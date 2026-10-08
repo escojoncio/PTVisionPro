@@ -10,6 +10,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build/visionos"
 BUILD_NUMBER="${1:-1}"
+[ "$BUILD_NUMBER" = "--moltenvk-only" ] && BUILD_NUMBER=1
 MOLTENVK_COMMIT="$(python3 -c "import json;print(json.load(open('$ROOT/upstream/pt-ipad/source-lock.json'))['moltenvk_target'])")"
 MOLTENVK="$ROOT/build/moltenvk"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}"
@@ -28,6 +29,10 @@ if [ ! -f "$LIB" ]; then
 fi
 [ -f "$LIB" ] || { echo "MoltenVK xros archive missing"; exit 1; }
 HEADERS="$MOLTENVK/Package/Release/MoltenVK/include"
+if [ "${1:-}" = "--moltenvk-only" ]; then
+  echo "MoltenVK ready: $LIB"
+  exit 0
+fi
 
 # --- Voice models (whisper) -------------------------------------------------------------------
 VOICE="$ROOT/build/voice"

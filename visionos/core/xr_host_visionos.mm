@@ -1240,7 +1240,10 @@ int pt_vp_start(void* layer_renderer, const char* const* argv, int argc, const c
     for (int i = 0; i < argc; ++i) g_args.emplace_back(argv[i]);
     NSArray* documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     if (documents.count) {
+        // The game's log where the launcher's Log tab reads it.
         b.log_path = std::string([documents[0] UTF8String]) + "/pt.log";
+        g_args.emplace_back("--log");
+        g_args.emplace_back(b.log_path);
     }
     b.running = true;  // before the thread: the app polls pt_vp_running right away
     std::thread(GameThread).detach();
