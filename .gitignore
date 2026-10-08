@@ -1,0 +1,4 @@
+build/
+visionos/Resources/
+visionos/PTVisionPro.xcodeproj/
+.DS_Store
