@@ -58,6 +58,11 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
     `configuration.maxRenderQuality` y `layerRenderer.renderQuality` (visionOS 26). Se registran
     los valores por defecto del sistema ("Layer: ... system default") para calibrar. Sustituye a
     `renderQuality` (clave antigua ignorada). Selector de 60° en giro por pasos del launcher.
+- Para la build 10 (en `main`, aún sin compilar): panel de rendimiento en el visor
+  (`PT_VP_OVERLAY`, interruptor «Panel de rendimiento dentro del juego» que antes no hacía nada):
+  línea "FPS · GPU · LOOP · ojo · térmico" con fuente 5x7 (`kGlyphs`, `RasteriseOverlay`) en dos
+  texturas RGBA8 sRGB compartidas (ping-pong, cada 500 ms), quad fijo a la cabeza 0,3 m bajo el
+  centro a 1 m, 0,6 m de ancho; no se dibuja en el drawable de captura.
 - Build 7: Xcode 26 / visionOS 26 (runner `macos-26`, deployment 26.0 en
   `project.yml` y CMake). Cambios (todo sin probar en el visor):
   - Correcciones "sin ventana" en `main.cpp` (parche): sonido (`sound.Init` exigía ventana),
