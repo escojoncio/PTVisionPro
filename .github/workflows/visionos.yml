@@ -1,0 +1,86 @@
+name: visionOS app
+
+# Builds only on demand: a manual run, or a push whose commit message says [build].
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: visionos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)/Contents/Developer"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i xros || true
+
+      - name: Tools
+        run: |
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+          brew list ninja >/dev/null 2>&1 || brew install ninja
+          brew install shaderc xcodegen
+          cmake --version; glslc --version | head -1
+
+      - name: MoltenVK cache
+        id: moltenvk
+        uses: actions/cache@v4
+        with:
+          path: build/moltenvk/Package/Release/MoltenVK
+          key: moltenvk-xros-${{ hashFiles('upstream/pt-ipad/source-lock.json') }}-v1
+
+      - name: MoltenVK license (cached package has no repository)
+        if: steps.moltenvk.outputs.cache-hit == 'true'
+        run: |
+          mkdir -p build/moltenvk
+          curl -sL https://raw.githubusercontent.com/KhronosGroup/MoltenVK/main/LICENSE -o build/moltenvk/LICENSE
+
+      - name: Dependency and voice cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/deps
+            build/voice
+          key: deps-${{ hashFiles('upstream/pt-ipad/dependency-lock.json') }}-v1
+
+      - name: Build
+        run: tools/build_visionos.sh ${{ github.run_number }}
+
+      - name: Logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/visionos/CMakeFiles/CMakeConfigureLog.yaml
+            build/visionos/CMakeFiles/CMakeOutput.log
+            build/visionos/CMakeFiles/CMakeError.log
+          if-no-files-found: ignore
+
+      - name: IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PTVisionPro-${{ github.run_number }}
+          path: build/visionos/ipa/*.ipa
+
+      - name: Release
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: build/visionos/ipa/*.ipa
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

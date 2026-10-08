@@ -1,0 +1,97 @@
+// SPDX-License-Identifier: MIT
+//
+// The logs: the game core writes its own file (pt_vp_log_path, inside the app's Documents, so
+// it is also reachable from the Files app), and the launcher shows its last lines and sends it.
+// The app's own lines go to the system log (Console) with a prefix, and to a small file of their
+// own in Documents/Registros, so a crash of the core still leaves what the app did before it.
+
+import Foundation
+import os
+
+enum LogFiles {
+    private static let logger = Logger(subsystem: "pt.visionpro", category: "app")
+    private static let lock = NSLock()
+    private static var appLogHandle: FileHandle?
+
+    static var directory: URL {
+        PTSettings.documents.appendingPathComponent("Registros", isDirectory: true)
+    }
+
+    /// The app's own log of this session.
+    static var appLogURL: URL {
+        directory.appendingPathComponent("app.txt")
+    }
+
+    /// The core's log, once it has started.
+    static var coreLogURL: URL? {
+        guard let pointer = pt_vp_log_path() else { return nil }
+        let path = String(cString: pointer)
+        return path.isEmpty ? nil : URL(fileURLWithPath: path)
+    }
+
+    /// At the app's start: a fresh app log.
+    static func begin() {
+        let manager = FileManager.default
+        try? manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try? manager.removeItem(at: appLogURL)
+        manager.createFile(atPath: appLogURL.path, contents: nil)
+        lock.lock()
+        appLogHandle = try? FileHandle(forWritingTo: appLogURL)
+        lock.unlock()
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        log("P.T. VR \(version) (\(Bundle.main.bundleIdentifier ?? "?")), "
+            + "\(ProcessInfo.processInfo.operatingSystemVersionString), "
+            + "\(PTSettings.hardwareModel()), \(ProcessInfo.processInfo.physicalMemory / (1024 * 1024)) MB")
+    }
+
+    /// A line of the app's own.
+    static func log(_ message: String) {
+        logger.notice("\(message, privacy: .public)")
+        let line = "\(stamp(Date())) \(message)\n"
+        lock.lock()
+        defer { lock.unlock() }
+        if let data = line.data(using: .utf8) {
+            appLogHandle?.write(data)
+        }
+    }
+
+    /// The last lines of a file (the whole file when it is small).
+    static func tail(of url: URL?, lines wanted: Int = 300) -> String {
+        guard let url, let handle = try? FileHandle(forReadingFrom: url) else {
+            return ""
+        }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let window: UInt64 = 256 * 1024
+        let start = size > window ? size - window : 0
+        try? handle.seek(toOffset: start)
+        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        var lines = text.components(separatedBy: "\n")
+        if start > 0, !lines.isEmpty {
+            // The first line is probably cut.
+            lines.removeFirst()
+        }
+        return lines.suffix(wanted).joined(separator: "\n")
+    }
+
+    /// What is sent with the share button: the core's log and the app's.
+    static func filesToShare() -> [URL] {
+        var files: [URL] = []
+        if let core = coreLogURL, FileManager.default.fileExists(atPath: core.path) {
+            files.append(core)
+        }
+        if FileManager.default.fileExists(atPath: appLogURL.path) {
+            files.append(appLogURL)
+        }
+        return files
+    }
+
+    private static func stamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter.string(from: date)
+    }
+}

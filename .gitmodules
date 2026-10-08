@@ -1,0 +1,3 @@
+[submodule "upstream/pt-ipad"]
+	path = upstream/pt-ipad
+	url = https://github.com/buberlo/pt-ipad.git

@@ -1,0 +1,98 @@
+# The Apple Vision Pro app, as an XcodeGen project (https://github.com/yonaskolb/XcodeGen):
+# `xcodegen generate` in this folder writes PTVisionPro.xcodeproj. The game itself (C++ on Vulkan,
+# through MoltenVK) is built beforehand with CMake into ../build/visionos as static libraries, and
+# this app links them in: libpt_visionos.a and whatever else CMake leaves in ../build/visionos/lib.
+#
+# The link line for those libraries is not written here: the CI script works it out from what
+# CMake produced and passes it as PT_LINK_FLAGS (for example
+# `xcodebuild ... PT_LINK_FLAGS="-lpt_visionos -lMoltenVK -lSDL3"`). Building in Xcode by hand,
+# set the same variable in the scheme or change the default below.
+name: PTVisionPro
+options:
+  bundleIdPrefix: com.kdt
+  deploymentTarget:
+    visionOS: "2.0"
+  createIntermediateGroups: true
+  xcodeVersion: "16.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+targets:
+  PTVisionPro:
+    type: application
+    platform: visionOS
+    scheme: {}
+    sources:
+      - path: App
+        excludes:
+          - Info.plist
+          - PTVisionPro.entitlements
+      # What the game reads next to its executable (the bundle's root): the SPIR-V shaders, the
+      # voice models and the fonts, copied here from the CMake build by the CI script.
+      - path: Resources/shaders
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Resources/voice
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Resources/fonts
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Resources/licenses
+        type: folder
+        buildPhase: resources
+        optional: true
+    settings:
+      base:
+        PRODUCT_NAME: PTVisionPro
+        # The App ID the installs are signed for (a free account can only register a few App IDs a
+        # week; the sideloading tools add the team's suffix). The IPA comes out with it already.
+        PRODUCT_BUNDLE_IDENTIFIER: com.kdt.livecontainer
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: App/PTVisionPro.entitlements
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_OBJC_BRIDGING_HEADER: App/Bridge/PTVisionPro-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/App/Bridge
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../build/visionos/lib
+        # What CMake produced, as the CI script tells it (see the top of this file).
+        PT_LINK_FLAGS: -lpt_visionos
+        OTHER_LDFLAGS:
+          - -ObjC
+          # The app exports nothing but its Mach-O header: the game's libraries bring their own
+          # zlib, C++ operator new/delete and the like, and exported from the app the system
+          # could end up calling them instead of its own.
+          - -Wl,-exported_symbol,__mh_execute_header
+          - $(PT_LINK_FLAGS)
+          - -lc++
+          - -framework CompositorServices
+          - -framework ARKit
+          - -framework Metal
+          - -framework MetalKit
+          - -framework GameController
+          - -framework AVFoundation
+          - -framework AudioToolbox
+          - -framework CoreHaptics
+          - -framework QuartzCore
+          - -framework IOSurface
+          - -framework Accelerate
+          - -framework CoreGraphics
+          - -framework Foundation
+          - -framework UIKit
+          - -framework CoreMedia
+          - -framework CoreAudio
+          - -framework CoreVideo
+          - -framework IOKit
+          - -framework Security
+        ENABLE_BITCODE: NO
+        DEAD_CODE_STRIPPING: YES
+        MTL_ENABLE_DEBUG_INFO: NO
+        SUPPORTED_PLATFORMS: "xros"
+        TARGETED_DEVICE_FAMILY: "7"
