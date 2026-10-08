@@ -20,6 +20,16 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <dispatch/dispatch.h>
+#include <execinfo.h>
+#include <fcntl.h>
+#include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <os/proc.h>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+
 #import <ARKit/ARKit.h>
 #import <CompositorServices/CompositorServices.h>
 #import <Foundation/Foundation.h>
@@ -1714,7 +1724,165 @@ namespace {
 std::vector<std::string> g_args;
 std::vector<char*> g_argv;
 
+// ---------------------------------------------------------------------------------------------
+// Diagnostics for a game that dies without a word. visionOS ends a process two ways the game's
+// own log cannot see: a fault (a signal; caught here, the failing code written to pt.log before
+// the system's crash report) and running out of memory (jetsam: SIGKILL, nothing can be written
+// then, so the memory is written down while it climbs, and the process's limit at the start).
+
+int g_crash_fd = -1;
+const struct mach_header* g_main_image = nullptr;
+
+void CrashWrite(const char* text) {
+    if (g_crash_fd >= 0) (void)!write(g_crash_fd, text, std::strlen(text));
+}
+
+void CrashWriteHex(uintptr_t value) {
+    char out[19] = "0x";
+    for (int i = 0; i < 16; ++i) {
+        const int digit = static_cast<int>((value >> ((15 - i) * 4)) & 0xF);
+        out[2 + i] = static_cast<char>(digit < 10 ? '0' + digit : 'a' + digit - 10);
+    }
+    out[18] = '\0';
+    CrashWrite(out);
+}
+
+void CrashWriteNumber(long value) {
+    char out[24];
+    int n = 0;
+    unsigned long v = value < 0 ? static_cast<unsigned long>(-value) : static_cast<unsigned long>(value);
+    do {
+        out[n++] = static_cast<char>('0' + v % 10);
+        v /= 10;
+    } while (v && n < 22);
+    if (value < 0) out[n++] = '-';
+    char reversed[24];
+    for (int i = 0; i < n; ++i) reversed[i] = out[n - 1 - i];
+    reversed[n] = '\0';
+    CrashWrite(reversed);
+}
+
+const char* SignalName(int sig) {
+    switch (sig) {
+        case SIGSEGV: return "SIGSEGV (bad memory access)";
+        case SIGBUS: return "SIGBUS (bad memory access)";
+        case SIGILL: return "SIGILL (illegal instruction)";
+        case SIGFPE: return "SIGFPE (arithmetic)";
+        case SIGTRAP: return "SIGTRAP (trap: a Swift or library check failed)";
+        case SIGABRT: return "SIGABRT (abort)";
+        default: return "signal";
+    }
+}
+
+void OnCrashSignal(int sig, siginfo_t* info, void* context) {
+    CrashWrite("[  crash  ] error crash: ");
+    CrashWrite(SignalName(sig));
+    CrashWrite(" at address ");
+    CrashWriteHex(reinterpret_cast<uintptr_t>(info ? info->si_addr : nullptr));
+#if defined(__arm64__) || defined(__aarch64__)
+    if (context) {
+        const ucontext_t* uc = static_cast<const ucontext_t*>(context);
+        CrashWrite(", pc ");
+        CrashWriteHex(static_cast<uintptr_t>(arm_thread_state64_get_pc(uc->uc_mcontext->__ss)));
+        CrashWrite(", lr ");
+        CrashWriteHex(static_cast<uintptr_t>(arm_thread_state64_get_lr(uc->uc_mcontext->__ss)));
+    }
+#endif
+    CrashWrite(", app image at ");
+    CrashWriteHex(reinterpret_cast<uintptr_t>(g_main_image));
+    CrashWrite(", thread ");
+    uint64_t thread = 0;
+    pthread_threadid_np(nullptr, &thread);
+    CrashWriteNumber(static_cast<long>(thread));
+    CrashWrite("\n[  crash  ] info  crash: stack (the game's functions are in the app's own image):\n");
+    void* frames[48];
+    const int count = backtrace(frames, 48);
+    if (g_crash_fd >= 0) backtrace_symbols_fd(frames, count, g_crash_fd);
+    // Then the system's own report, as without this handler.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+// A stack of its own for the handler on the calling thread (the alternate stack is per thread),
+// so that a stack overflow can still be reported.
+void UseAlternateStack() {
+    constexpr size_t kSize = 64 * 1024;
+    stack_t stack{};
+    stack.ss_sp = new char[kSize];
+    stack.ss_size = kSize;
+    sigaltstack(&stack, nullptr);
+}
+
+void InstallCrashSignals(const std::string& log_path) {
+    if (log_path.empty()) return;
+    g_crash_fd = open(log_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
+    for (uint32_t i = 0; i < _dyld_image_count(); ++i) {
+        const char* name = _dyld_get_image_name(i);
+        if (name && std::strstr(name, ".app/")) {
+            g_main_image = _dyld_get_image_header(i);
+            break;
+        }
+    }
+    UseAlternateStack();
+    struct sigaction action{};
+    action.sa_sigaction = OnCrashSignal;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&action.sa_mask);
+    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP}) sigaction(sig, &action, nullptr);
+}
+
+struct MemoryNow {
+    uint64_t footprint_mb = 0;
+    uint64_t available_mb = 0;
+};
+
+MemoryNow QueryMemory() {
+    MemoryNow m;
+    task_vm_info_data_t vm{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &count) == KERN_SUCCESS) {
+        m.footprint_mb = vm.phys_footprint / (1024 * 1024);
+    }
+    m.available_mb = os_proc_available_memory() / (1024 * 1024);
+    return m;
+}
+
+void WatchMemory() {
+    // The game opens its log in its first milliseconds: the lines below go into it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const MemoryNow start = QueryMemory();
+    pt::LogInfo("memory: limit about {} MB for this app (footprint {} MB, available {} MB; the increased-memory-limit "
+                "entitlement raises it when the signing keeps it)", start.footprint_mb + start.available_mb, start.footprint_mb,
+                start.available_mb);
+    // The system's own warning, when it comes.
+    static dispatch_source_t pressure =
+        dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0, DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
+                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_event_handler(pressure, ^{
+        const unsigned long level = dispatch_source_get_data(pressure);
+        const MemoryNow m = QueryMemory();
+        pt::LogWarn("memory: system pressure {} (footprint {} MB, available {} MB)", (level & DISPATCH_MEMORYPRESSURE_CRITICAL) ? "CRITICAL" : "warning",
+                    m.footprint_mb, m.available_mb);
+    });
+    dispatch_resume(pressure);
+    // A line whenever the footprint moves by 256 MB, and every check once it runs low: the last
+    // lines before a silent end say whether memory ran out.
+    uint64_t logged = start.footprint_mb;
+    uint64_t peak = start.footprint_mb;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        const MemoryNow m = QueryMemory();
+        peak = std::max(peak, m.footprint_mb);
+        const bool moved = m.footprint_mb > logged + 256 || m.footprint_mb + 256 < logged;
+        if (moved || m.available_mb < 600) {
+            pt::LogInfo("memory: footprint {} MB, available {} MB, peak {} MB", m.footprint_mb, m.available_mb, peak);
+            logged = m.footprint_mb;
+        }
+    }
+}
+
 void GameThread() {
+    UseAlternateStack();
     pt::xr::Bridge& b = pt::xr::bridge();
     b.running = true;
     g_argv.clear();
@@ -1766,6 +1934,8 @@ int pt_vp_start(void* layer_renderer, const char* const* argv, int argc, const c
         g_args.emplace_back("--log");
         g_args.emplace_back(b.log_path);
     }
+    InstallCrashSignals(b.log_path);
+    std::thread(WatchMemory).detach();
     b.running = true;  // before the thread: the app polls pt_vp_running right away
     std::thread(GameThread).detach();
     return 0;
