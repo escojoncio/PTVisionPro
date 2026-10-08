@@ -6,9 +6,16 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 
 ## Estado
 
-- **Ninguna build lanzada todavía.** Todo el código está escrito sin compilar (no hay Mac en la
-  sesión): la primera build de CI servirá para corregir errores de compilación.
-- Repo local creado; falta el remoto `PTVisionPro` en GitHub (push pendiente).
+- Repo en GitHub (`escojoncio/PTVisionPro`, rama `main`). Código escrito sin compilar en local
+  (no hay Mac en la sesión); las builds de CI van corrigiendo errores de compilación.
+- Builds: 1 y 2 fallaron en `fetchDependencies --xros` (la opción de MoltenVK es
+  `--visionos`, target `make visionos`; corregido). **Build 3 (run 37790180042) lanzada**:
+  primera compilación de MoltenVK para visionOS (30–40 min, luego en caché). Pendiente de leer.
+- Logs de CI: los logs de los jobs están en Azure y no se pueden leer desde la sesión; el
+  workflow publica el log completo en la rama `ci-logs` (`latest.log` y `run-N.log`):
+  `gh api "repos/escojoncio/PTVisionPro/contents/latest.log?ref=ci-logs" --jq .content | base64 -d`.
+- Lanzar build: `gh api -X POST repos/escojoncio/PTVisionPro/actions/workflows/visionos.yml/dispatches -f ref=main`
+  (GraphQL de `gh workflow run` no está disponible).
 
 ## Arquitectura (decidida, no cambiar sin motivo)
 
@@ -61,8 +68,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 
 ## Pendiente (siguiente sesión, en orden)
 
-1. Crear el remoto `PTVisionPro` en GitHub, push, lanzar workflow y corregir errores de
-   compilación (riesgos conocidos: ggml/whisper con `CMAKE_SYSTEM_NAME=visionOS`; SDL3 sin
+1. Leer el log de la build 3 y corregir errores de compilación (riesgos conocidos: ggml/whisper con `CMAKE_SYSTEM_NAME=visionOS`; SDL3 sin
    vídeo en visionOS; nombres exactos de la C API de Compositor Services; `GCProductCategory`
    de los Sense; `IOKit` en visionOS).
 2. Primera prueba en el visor: ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
