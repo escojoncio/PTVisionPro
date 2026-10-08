@@ -48,6 +48,31 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - `main.cpp`: puntero sin `MapDisplayPoint` en visionOS; `input.EnableTouch(PT_IOS && !PT_VISIONOS)`
   (sin superposición táctil del iPad).
 
+## Datos y partidas: carpeta VPS4 (compartida con AstroVisionPro)
+
+- `visionos/App/Core/VPS4Folder.swift`: carpeta `VPS4` creada por el usuario en la raíz de
+  "En mi Apple Vision Pro". `.fileImporter` de carpeta (`HomeView`, botón «Elegir VPS4»; rechaza
+  otro nombre) → `startAccessingSecurityScopedResource` + bookmark en UserDefaults
+  (`vps4.bookmark`) y llavero (servicio `VPS4`, cuenta `bookmark`). **Mismas claves que debe usar
+  AstroVisionPro** (mismo bundle ID `com.kdt.livecontainer` → mismo contenedor/llavero). Si el
+  bookmark no resuelve (p. ej. tras reinstalar) se vuelve a pedir. Crea `Juegos` y `Partidas`.
+- Juego: `GameData.find` busca `VPS4/Juegos/CUSA01127`, otras carpetas de `VPS4/Juegos`,
+  `VPS4/CUSA01127`, y después Documents (respaldo). Versión por tamaño exacto (`knownSizes`:
+  chunk1.psarc 421978112, texture.qar 892291044 = US v01.00); otro tamaño → aviso, se puede jugar.
+- Partidas: `GameRunner` pasa `--save-dir VPS4/Partidas/CUSA01127` (el juego guarda
+  `PT_Save_Data*` ahí). Sin VPS4: dentro de la app (por defecto del port).
+- `main.cpp` (`#if PT_VISIONOS`): sin la instalación verificada por manifiesto del iPad
+  (`pt::assets::VerifyInstallation` exigía `pt-ipad-assets-v1` y rechazaba ficheros extra como
+  `sce_sys`); exige `--game` válido (`LooksLikeGameDir`).
+- Log del juego: `pt_vp_start` añade `--log Documents/pt.log` (antes iba a Application
+  Support y la pestaña Registro no lo veía).
+
+## CI: cachés
+
+- `actions/cache/restore` + `actions/cache/save` manuales: MoltenVK se guarda nada más
+  compilarse (`tools/build_visionos.sh --moltenvk-only`), deps+voz con `if: always()`. Antes
+  `actions/cache` solo guardaba si todo el job salía bien (builds 3 y 4 recompilaron MoltenVK).
+
 ## Comprobación local (sin Mac)
 
 ```

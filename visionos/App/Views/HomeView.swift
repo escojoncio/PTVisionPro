@@ -5,11 +5,13 @@
 // it in the immersive space.
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissWindow) private var dismissWindow
+    @State private var choosingVPS4 = false
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -36,6 +38,19 @@ struct HomeView: View {
             }
             .padding(48)
         }
+        .fileImporter(isPresented: $choosingVPS4, allowedContentTypes: [.folder]) { result in
+            switch result {
+            case .success(let url):
+                if let problem = VPS4Folder.shared.choose(url) {
+                    model.message = problem
+                } else {
+                    model.message = nil
+                }
+                model.findGame()
+            case .failure(let error):
+                LogFiles.log("VPS4: picker failed (\(error.localizedDescription))")
+            }
+        }
     }
 
     // MARK: - Background
@@ -61,22 +76,39 @@ struct HomeView: View {
     private var dataCard: some View {
         let verdict: Verdict
         let detail: String
+        let hasVPS4 = VPS4Folder.shared.url != nil
         switch model.dataStatus {
         case .ready:
-            verdict = .ok
             let data = model.gameData
-            detail = "\(data?.folder.lastPathComponent ?? GameData.folderName) · \(GameData.format(bytes: data?.totalBytes ?? 0))"
+            let place = data?.inVPS4 == true ? "VPS4 › \(VPS4Folder.gamesName) › " : ""
+            let name = "\(place)\(data?.folder.lastPathComponent ?? GameData.folderName) · \(GameData.format(bytes: data?.totalBytes ?? 0))"
+            if let odd = data?.unexpectedSize, !odd.isEmpty {
+                verdict = .warning
+                detail = name + "\n" + L("No es la versión US v01.00 (tamaño distinto: \(odd.joined(separator: ", "))); puede no funcionar.",
+                                         "Not the US v01.00 release (different size: \(odd.joined(separator: ", "))); it may not work.")
+            } else {
+                verdict = .ok
+                detail = name
+            }
         case .incomplete(let files):
             verdict = .warning
             detail = L("Faltan: \(files.joined(separator: ", "))", "Missing: \(files.joined(separator: ", "))")
         case .missing:
             verdict = .missing
-            detail = L("Copia la carpeta \(GameData.folderName) con Archivos", "Copy the \(GameData.folderName) folder with Files")
+            detail = hasVPS4
+                ? L("Copia \(GameData.folderName) a VPS4 › \(VPS4Folder.gamesName)", "Copy \(GameData.folderName) to VPS4 › \(VPS4Folder.gamesName)")
+                : L("Elige tu carpeta VPS4", "Choose your VPS4 folder")
         }
         return StatusCard(title: L("Datos del juego", "Game data"), symbol: "opticaldisc.fill", verdict: verdict, detail: detail) {
-            if model.dataStatus != .ready {
-                Button(L("Buscar", "Find")) {
-                    model.findGame()
+            HStack(spacing: 8) {
+                if !hasVPS4 {
+                    Button(L("Elegir VPS4", "Choose VPS4")) {
+                        choosingVPS4 = true
+                    }
+                } else if model.dataStatus != .ready {
+                    Button(L("Buscar", "Find")) {
+                        model.findGame()
+                    }
                 }
             }
         }
@@ -84,8 +116,8 @@ struct HomeView: View {
 
     private var controllerCard: some View {
         let controller = model.controller
-        let verdict: Verdict = controller == nil ? .warning : (controller!.isPlayStation ? .ok : .warning)
-        var detail = controller?.name ?? L("Empareja un DualSense", "Pair a DualSense")
+        let verdict: Verdict = controller == nil ? .warning : .ok
+        var detail = controller?.name ?? L("Empareja un mando (o usa las manos en los menús)", "Pair a controller (or use your hands in menus)")
         if let level = controller?.batteryLevel {
             detail += " · \(Int((level * 100).rounded())) %"
             if controller?.isCharging == true {
@@ -110,8 +142,16 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(L("Cómo poner el juego", "How to add the game"))
                 .font(.headline)
-            Text(L("Copia la carpeta \(GameData.folderName) de tu copia de P.T. (la que tiene chunk1.psarc y texture.qar) a «En mi Apple Vision Pro › P.T. VR» con la app Archivos, por ejemplo desde una carpeta compartida de tu PC (Archivos › Conectarse a un servidor). Vuelve aquí y pulsa Buscar.",
-                   "Copy the \(GameData.folderName) folder of your copy of P.T. (the one with chunk1.psarc and texture.qar) to “On My Apple Vision Pro › P.T. VR” with the Files app, for example from a shared folder on your PC (Files › Connect to Server). Come back here and press Find."))
+            Text(L("""
+                   1. En la app Archivos, en «En mi Apple Vision Pro», crea una carpeta llamada VPS4 (si ya la tienes de ASTRO BOT, sirve la misma).
+                   2. Pulsa «Elegir VPS4» y elige esa carpeta. La app crea dentro las carpetas \(VPS4Folder.gamesName) y \(VPS4Folder.savesName) (ahí van las partidas).
+                   3. Copia la carpeta \(GameData.folderName) de tu copia de P.T. (la que tiene chunk1.psarc y texture.qar) a VPS4 › \(VPS4Folder.gamesName), por ejemplo desde una carpeta compartida de tu PC (Archivos › Conectarse a un servidor), y pulsa «Buscar».
+                   """,
+                   """
+                   1. In the Files app, under “On My Apple Vision Pro”, make a folder called VPS4 (if you already have it from ASTRO BOT, the same one works).
+                   2. Press “Choose VPS4” and pick that folder. The app makes the \(VPS4Folder.gamesName) and \(VPS4Folder.savesName) folders in it (saves go there).
+                   3. Copy the \(GameData.folderName) folder of your copy of P.T. (the one with chunk1.psarc and texture.qar) to VPS4 › \(VPS4Folder.gamesName), for example from a shared folder on your PC (Files › Connect to Server), and press “Find”.
+                   """))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
