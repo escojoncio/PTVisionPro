@@ -24,7 +24,10 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Fallo detectado en revisión: `Host::CreateInstance` añadía `VK_EXT_metal_objects` (extensión
   de DISPOSITIVO) a la instancia → `vkCreateInstance` fallaría. Corregido en build 6
   (la instancia se crea tal cual la pide el motor; la extensión solo en `CreateDevice`).
-- **Build 7 (pendiente)**: Xcode 26 / visionOS 26 (runner `macos-26`, deployment 26.0 en
+- **Build 7 (run_number 10): OK** con Xcode 26.6 / SDK XROS 26.5 → `releases/download/build-10/PTVisionPro-10.ipa`.
+  Avisos: `cp_frame_query_drawable` obsoleta en visionOS 26 (usar `cp_frame_query_drawables`;
+  sigue funcionando). Build 8: claves VPS4 de AstroVisionPro + `withLock` en `SenseTracking`.
+- Build 7: Xcode 26 / visionOS 26 (runner `macos-26`, deployment 26.0 en
   `project.yml` y CMake). Cambios (todo sin probar en el visor):
   - Correcciones "sin ventana" en `main.cpp` (parche): sonido (`sound.Init` exigía ventana),
     juego al reloj real (`paced` y `dt` reales; antes 1 tick/bucle → velocidad ligada a los fps),

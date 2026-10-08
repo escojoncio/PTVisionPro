@@ -47,9 +47,7 @@ final class SenseTracking: @unchecked Sendable {
 
     private func start(_ controllers: [GCController], wanted: Set<ObjectIdentifier>) async {
         defer {
-            lock.lock()
-            starting = false
-            lock.unlock()
+            lock.withLock { starting = false }
         }
         guard AccessoryTrackingProvider.isSupported else {
             LogFiles.log("Sense tracking: not supported here")
@@ -73,10 +71,10 @@ final class SenseTracking: @unchecked Sendable {
             LogFiles.log("Sense tracking: could not start (\(error.localizedDescription))")
             return
         }
-        lock.lock()
-        self.session = session
-        tracked = wanted
-        lock.unlock()
+        lock.withLock {
+            self.session = session
+            tracked = wanted
+        }
         LogFiles.log("Sense tracking: on for \(accessories.count) controller(s)")
         let updates = Task.detached(priority: .userInitiated) {
             for await update in provider.anchorUpdates {
@@ -84,9 +82,7 @@ final class SenseTracking: @unchecked Sendable {
                 Self.send(update.anchor)
             }
         }
-        lock.lock()
-        task = updates
-        lock.unlock()
+        lock.withLock { task = updates }
     }
 
     func stop() {
@@ -106,7 +102,7 @@ final class SenseTracking: @unchecked Sendable {
 
     private static func send(_ anchor: AccessoryAnchor) {
         // The hand holding it, else the hand it is made for.
-        let held = "\(anchor.heldChirality)".lowercased()
+        let held = String(describing: anchor.heldChirality).lowercased()
         let inherent = "\(anchor.accessory.inherentChirality)".lowercased()
         let isLeft = held.contains("left") || (!held.contains("right") && inherent.contains("left"))
         let hand: Int32 = isLeft ? 0 : 1
