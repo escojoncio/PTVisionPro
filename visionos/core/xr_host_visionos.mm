@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -128,6 +129,96 @@ simd_float4x4 ModelMatrix(const glm::quat& orientation, const glm::vec3& positio
     simd_float4x4 out;
     for (int c = 0; c < 4; ++c) out.columns[c] = simd_make_float4(m[c][0], m[c][1], m[c][2], m[c][3]);
     return out;
+}
+
+// The performance panel (the launcher's "performance overlay"): one line of text in a small
+// texture, drawn with a 5x7 font (the characters it writes; anything else is a space) at twice
+// its size.
+struct Glyph {
+    char c;
+    uint8_t rows[7];  // five bits a row, the leftmost the highest
+};
+constexpr Glyph kGlyphs[] = {
+    {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+    {'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
+    {'C', {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}},
+    {'D', {0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C}},
+    {'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}},
+    {'F', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}},
+    {'G', {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F}},
+    {'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}},
+    {'I', {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+    {'J', {0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C}},
+    {'K', {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}},
+    {'L', {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F}},
+    {'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
+    {'N', {0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11}},
+    {'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+    {'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
+    {'Q', {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}},
+    {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}},
+    {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
+    {'T', {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04}},
+    {'U', {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+    {'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}},
+    {'W', {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A}},
+    {'X', {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11}},
+    {'Y', {0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04}},
+    {'Z', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F}},
+    {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+    {'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+    {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
+    {'3', {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E}},
+    {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
+    {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}},
+    {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+    {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+    {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
+    {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+    {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}},
+    {':', {0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00}},
+    {'/', {0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00}},
+    {'%', {0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03}},
+    {'-', {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00}},
+    {'(', {0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02}},
+    {')', {0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08}},
+};
+constexpr uint32_t kOverlayWidth = 640;
+constexpr uint32_t kOverlayHeight = 28;
+constexpr int kOverlayScale = 2;
+
+// `text` into RGBA8 pixels (premultiplied): white on a translucent dark band.
+void RasteriseOverlay(const std::string& text, std::vector<uint32_t>& pixels) {
+    pixels.assign(kOverlayWidth * kOverlayHeight, 0x8C000000u);  // black, alpha 0.55 (ABGR in memory: R first)
+    const int advance = 6 * kOverlayScale;
+    const int top = (static_cast<int>(kOverlayHeight) - 7 * kOverlayScale) / 2;
+    int x0 = 8;
+    for (char raw : text) {
+        if (x0 + advance > static_cast<int>(kOverlayWidth) - 8) break;
+        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(raw)));
+        const Glyph* glyph = nullptr;
+        for (const Glyph& g : kGlyphs) {
+            if (g.c == c) {
+                glyph = &g;
+                break;
+            }
+        }
+        if (glyph) {
+            for (int row = 0; row < 7; ++row) {
+                for (int col = 0; col < 5; ++col) {
+                    if (!(glyph->rows[row] & (0x10 >> col))) continue;
+                    for (int dy = 0; dy < kOverlayScale; ++dy) {
+                        for (int dx = 0; dx < kOverlayScale; ++dx) {
+                            const int px = x0 + col * kOverlayScale + dx;
+                            const int py = top + row * kOverlayScale + dy;
+                            pixels[static_cast<size_t>(py) * kOverlayWidth + static_cast<size_t>(px)] = 0xFFFFFFFFu;
+                        }
+                    }
+                }
+            }
+        }
+        x0 += advance;
+    }
 }
 
 const char* kCompositeShader = R"(
@@ -310,6 +401,11 @@ struct Host::Impl {
     std::chrono::steady_clock::time_point last_head_time;
     // The space was closed with the game still running: waiting for a new one.
     bool space_gone = false;
+    // The performance panel: two textures, one shown while the other is rewritten.
+    id<MTLTexture> overlay_textures[2] = {nil, nil};
+    int overlay_current = 0;
+    std::chrono::steady_clock::time_point overlay_updated;
+    std::vector<uint32_t> overlay_pixels;
     simd_float4x4 origin_from_device = matrix_identity_float4x4;
     bool anchor_valid = false;
     bool running = false;
@@ -696,6 +792,18 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
         }
     } else {
         LogInfo("vr: MetalFX {}", pt::visionos::Headset().metalfx ? "not needed (the eyes are drawn at the views' size)" : "off");
+    }
+    if (const char* overlay = std::getenv("PT_VP_OVERLAY"); overlay && overlay[0] == '1') {
+        MTLTextureDescriptor* t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB
+                                                                                      width:kOverlayWidth
+                                                                                     height:kOverlayHeight
+                                                                                  mipmapped:NO];
+        t.usage = MTLTextureUsageShaderRead;
+        t.storageMode = MTLStorageModeShared;
+        x.overlay_textures[0] = [x.mtl_device newTextureWithDescriptor:t];
+        x.overlay_textures[1] = [x.mtl_device newTextureWithDescriptor:t];
+        LogInfo("vr: performance panel {}", x.overlay_textures[0] && x.overlay_textures[1] ? "on" : "could not be made");
+        if (!x.overlay_textures[1]) x.overlay_textures[0] = nil;
     }
     x.running = true;
     x.divisor = pt::visionos::Headset().target_fps == 45 ? 2 : 1;
@@ -1234,6 +1342,25 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 }
             }
+            if (x.overlay_textures[0] && drawable == x.drawable) {
+                // The performance panel, fixed below the middle of the view (not in recordings).
+                const simd_float4x4 projection = cp_drawable_compute_projection(drawable, cp_axis_direction_convention_right_up_back, v);
+                const simd_float4x4 world_from_view = simd_mul(origin_from_device, cp_view_get_transform(view));
+                const simd_float4x4 view_projection = simd_mul(projection, Inverse(world_from_view));
+                const glm::quat head = QuatOf(origin_from_device);
+                const glm::vec3 position = PositionOf(origin_from_device) + head * glm::vec3(0.0f, -0.30f, -1.0f);
+                const float width = 0.6f;
+                Uniforms q{};
+                q.mvp = simd_mul(view_projection, ModelMatrix(head, position, glm::vec2(width, width * kOverlayHeight / kOverlayWidth)));
+                q.rect = simd_make_float4(0.0f, 0.0f, 1.0f, 1.0f);
+                q.alpha = 1.0f;
+                q.opaque = 0.0f;
+                [enc setRenderPipelineState:x.quad_pipeline];
+                [enc setVertexBytes:&q length:sizeof(q) atIndex:0];
+                [enc setFragmentBytes:&q length:sizeof(q) atIndex:0];
+                [enc setFragmentTexture:x.overlay_textures[x.overlay_current] atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+            }
         }
         [enc endEncoding];
     }
@@ -1251,6 +1378,26 @@ void Host::EndFrame(const FrameLayers& layers) {
         return;
     }
     const bool anything = should_render_ && (layers.projection || layers.screen || layers.hud);
+    if (x.overlay_textures[0] && std::chrono::steady_clock::now() - x.overlay_updated > std::chrono::milliseconds(500)) {
+        // The performance panel's line, into the texture not shown now (the other may still be
+        // read by the GPU), shown from this frame on.
+        pt_vp_stats st{};
+        {
+            Bridge& b = bridge();
+            std::lock_guard<std::mutex> lock(b.mutex);
+            st = b.stats;
+        }
+        const std::string text = std::format("{:.0f} FPS  GPU {:.1f} MS  LOOP {:.1f} MS  {}X{}  {}", st.fps, st.gpu_ms, st.frame_ms, st.eye_width,
+                                             st.eye_height, pt_apple_thermal_state());
+        RasteriseOverlay(text, x.overlay_pixels);
+        const int next = 1 - x.overlay_current;
+        [x.overlay_textures[next] replaceRegion:MTLRegionMake2D(0, 0, kOverlayWidth, kOverlayHeight)
+                                    mipmapLevel:0
+                                      withBytes:x.overlay_pixels.data()
+                                    bytesPerRow:kOverlayWidth * sizeof(uint32_t)];
+        x.overlay_current = next;
+        x.overlay_updated = std::chrono::steady_clock::now();
+    }
     id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
     cb.label = @"P.T. composite";
     ComposeFrame(*this, x, x.drawable, layers, x.origin_from_device, should_render_, cb);
