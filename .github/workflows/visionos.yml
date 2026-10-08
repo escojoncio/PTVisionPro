@@ -95,7 +95,7 @@ jobs:
           git init -q && git checkout -q -b ci-logs
           cp "$GITHUB_WORKSPACE/build.log" "run-${{ github.run_number }}.log" || echo "no log" > "run-${{ github.run_number }}.log"
           tail -c 900000 "run-${{ github.run_number }}.log" > latest.log
-          git add . && git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -qm "run ${{ github.run_number }} [skip ci]"
+          git add . && git -c user.name=ci -c user.email= commit -qm "run ${{ github.run_number }} [skip ci]"
           git push -qf "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}" ci-logs
 
       - name: Logs on failure
