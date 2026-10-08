@@ -75,7 +75,14 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   memoria, sin señal capturada, muerte antes de 10 s → no es memoria. Sospecha: `abort()`/
   `std::terminate` (el juego solo los registra en Windows: `InstallCrashReporting` va bajo
   `#ifdef _WIN32` en `main.cpp`) o `exit()`.
-- **Build 13 (run_number 17): OK** → `releases/download/build-17/PTVisionPro-17.ipa` (la recomendada; sin probar): `InstallCrashSignals` añade SIGABRT, `std::set_terminate`
+- **Build 13 (run_number 17): OK** → `releases/download/build-17/PTVisionPro-17.ipa` (75,9 MB; la recomendada). Sin probar en el visor.
+  Hipótesis a contrastar con su log: el pasillo carga 143 modelos + texturas en el hilo del juego
+  (`StageManager::Load` → `models_.Get` → `TextureManager::Create`, subida síncrona), que es el mismo
+  que presenta frames al compositor → varios segundos sin `cp_frame` → posible cierre del espacio
+  inmersivo por el sistema. Descartado `FatalError` (escribe `fatal:` antes de `_Exit`; no aparece).
+  Si las últimas `where:` muestran el bucle ocupado en la carga sin línea de crash/exit → presentar
+  frames (último frame reproyectado o fondo de carga) desde otro hilo mientras el bucle está parado.
+  `InstallCrashSignals` añade SIGABRT, `std::set_terminate`
   (mensaje de la excepción + abort → pila del que lanzó) y `std::atexit` (pila de quien llama a exit).
   Vigilante cada 100 ms, umbral 128 MB; mientras el bucle lleva >0,5 s parado, cada 0,5 s una línea
   `where: loop X s busy, game thread at +0x... +0x...` (offsets en la imagen de la app).
