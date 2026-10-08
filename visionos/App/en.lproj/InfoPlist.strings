@@ -3,3 +3,4 @@
 "NSHandsTrackingUsageDescription" = "Your hands point and select in the game's menus (pinch to choose).";
 "NSMicrophoneUsageDescription" = "P.T. listens to your voice for the game's radio";
 "NSBluetoothAlwaysUsageDescription" = "PlayStation controllers connect over Bluetooth.";
+"NSAccessoryTrackingUsageDescription" = "PlayStation VR2 Sense controllers are tracked in space to hold the flashlight in your hand and point at the menus.";

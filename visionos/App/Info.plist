@@ -68,6 +68,8 @@
 	</array>
 	<key>NSWorldSensingUsageDescription</key>
 	<string>El seguimiento de la cabeza sitúa al jugador en el pasillo.</string>
+	<key>NSAccessoryTrackingUsageDescription</key>
+	<string>Los mandos PlayStation VR2 Sense se siguen en el espacio para llevar la linterna en la mano y señalar en los menús.</string>
 	<key>NSHandsTrackingUsageDescription</key>
 	<string>Con tus manos apuntas y seleccionas en los menús del juego (pellizca para elegir).</string>
 	<key>NSMicrophoneUsageDescription</key>

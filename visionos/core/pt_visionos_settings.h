@@ -17,6 +17,8 @@ struct HeadsetSettings {
     float resolution_scale = 0.6f;
     int target_fps = 90;
     bool foveation = true;
+    bool metalfx = true;  // the eyes drawn at the image size and enlarged by MetalFX
+    int fov = 100;        // percent of the views' field of view the game draws (70 to 100)
 };
 
 // The launcher's settings into the game's, after pt.ini was read.
@@ -33,5 +35,10 @@ void GraphicsChanged(const AppSettings& settings);
 
 // A preset (0 M2, 1 M5, 2 custom) into the settings, and to the app.
 void ApplyPreset(int preset, AppSettings& settings);
+
+// After each eye is drawn: the GPU time of the eye's last measured frame (and of its passes:
+// shadows, mirror, gbuffer, lighting, compose, post) and the CPU time it took to record it, for
+// the launcher's performance panel and a summary in the log every ten seconds.
+void ReportEye(int eye, float gpu_ms, const float pass_ms[6], float cpu_ms);
 
 }  // namespace pt::visionos

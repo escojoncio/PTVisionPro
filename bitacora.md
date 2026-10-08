@@ -24,6 +24,36 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Fallo detectado en revisión: `Host::CreateInstance` añadía `VK_EXT_metal_objects` (extensión
   de DISPOSITIVO) a la instancia → `vkCreateInstance` fallaría. Corregido en build 6
   (la instancia se crea tal cual la pide el motor; la extensión solo en `CreateDevice`).
+- **Build 7 (pendiente)**: Xcode 26 / visionOS 26 (runner `macos-26`, deployment 26.0 en
+  `project.yml` y CMake). Cambios (todo sin probar en el visor):
+  - Correcciones "sin ventana" en `main.cpp` (parche): sonido (`sound.Init` exigía ventana),
+    juego al reloj real (`paced` y `dt` reales; antes 1 tick/bucle → velocidad ligada a los fps),
+    voz (`hearing`/recognizer exigían ventana; `PT_VP_VOICE=0` la apaga), iconos de botones en
+    segundo plano. Idioma de partida nueva: `PT_SYSTEM_LANGUAGE` desde `PT_VP_LANGUAGE` o
+    `[NSLocale preferredLanguages]` (en Apple el juego usaba siempre en-US → sin subtítulos).
+  - `Host::FocusLost()` = estado (como OpenXR), no flanco: pausa real al quitarse el visor.
+  - Sombras: el ojo derecho reutiliza el atlas del izquierdo si todas las `ShadowView` son
+    idénticas (`scene_frame.cpp`, `vr_shadow_views_`; log "vr: the right eye uses...").
+  - MetalFX espacial por ojo (`MTLFXSpatialScaler`, perceptual, salida = píxeles cubiertos de la
+    vista) si `PT_VP_METALFX` y el ojo es menor; si falla, estirado normal. Framework MetalFX.
+  - Campo de visión `PT_VP_FOV` 70–100 %: tangentes ×k al juego, ojos de `vista×k×escala`, quad
+    del ojo en su rectángulo NDC (resto negro). Nitidez `PT_VP_SHARPEN`: `eye_fragment` (4 vecinos,
+    limitado a su rango). Tangentes de cada vista desde `cp_drawable_compute_projection`
+    (`R=(1+m20)/m00`, `L=(m20-1)/m00`), sin `cp_view_get_tangents` (obsoleta).
+  - Preset gráfico del juego `PT_VP_GRAPHICS` (`ApplyGraphicsPreset`) antes de sombras/SSAO/...
+  - HUD premultiplicado en la composición (antes se multiplicaba dos veces por alfa).
+  - `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1` y `PT_STATUS_LOG=1` en `pt_vp_start`; log
+    `vr pace:` cada 10 s (GPU ambos ojos y por pasada, CPU, térmico) vía
+    `pt::visionos::ReportEye`; `gpu_ms` en el panel Rendimiento.
+  - PS VR2 Sense 6DoF: `Tracking/SenseTracking.swift` (`AccessoryTrackingProvider`) →
+    `pt_vp_set_aim` → `controllers_.aim` (linterna en la mano) y rayo de menú (gatillo = clic,
+    `l2/r2` nuevos). `NSAccessoryTrackingUsageDescription` en Info.plist.
+  - Pausa con las manos: pellizco izquierdo mantenido 0,8 s sin menú y sin mando
+    (`VrPlay`: `!c.active && c.menu` → Start). Un pellizco/gatillo ya mantenido al aparecer el
+    rayo no hace clic.
+  - Menú del juego: filas MetalFX y Campo de visión (claves `metalfx`, `fov`); presets con
+    `metalfx` (M2 sí, M5 no) y `fov` 100 en `kPresets` y `PTSettings.defaults`.
+  - Launcher: vuelve el interruptor MetalFX; quitados "Resolución dinámica" (no implementada).
 - **Build 6 (run_number 9): OK** → `releases/download/build-9/PTVisionPro-9.ipa`. Primera prueba
   real en el visor pendiente (VPS4, detección, arranque VR, menú Vision Pro, rayo de mano, mandos).
 - (Build 5:) VPS4 + arreglo de enlazado. Log completo: `git show origin/ci-logs:run-N.log`
@@ -155,9 +185,7 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 2. Primera prueba en el visor: ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
    -Z adelante, igual que OpenXR; si la imagen sale girada revisar `QuatOf`/tangentes) y la
    altura (ARKit origen en el suelo; `VrPlay` recentra en la cabeza).
-3. Profundidad real al drawable (hoy constante "lejos") para que la reproyección del sistema no
-   deforme en cerca; `MetalFX` opcional en la pasada de composición; resolución dinámica.
-4. Sombras/culling compartidos entre ojos; sync GPU sin `vkQueueWaitIdle` ya está resuelto por
-   cola compartida, verificar que MoltenVK no difiere los commits (`MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS`).
-5. PS VR2 Sense 6DoF (pose) cuando la API lo exponga; hoy `hand_valid=false`.
+3. Profundidad real al drawable (hoy constante "lejos"): mejora la reproyección a 45 fps.
+4. Resolución dinámica (el renderer recrea objetivos al cambiar de tamaño: hacerlo con viewport).
+5. Calibrar presets M2/M5 con las líneas `vr pace:` del registro.
 6. Comprobación de datos en el launcher: hecha (chunk1.psarc, texture.qar); probar con los datos reales.

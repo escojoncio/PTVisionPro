@@ -24,6 +24,7 @@
 #import <CompositorServices/CompositorServices.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #import <simd/simd.h>
 
 #include <algorithm>
@@ -42,6 +43,8 @@
 #include "engine/platform/settings.h"
 #include "pt_visionos.h"
 #include "pt_visionos_settings.h"
+#include "engine/platform/apple_host.h"
+#include "engine/platform/graphics_presets.h"
 
 namespace pt::xr {
 
@@ -65,6 +68,12 @@ struct Bridge {
     void (*setting_changed)(const char*, const char*) = nullptr;
     std::vector<SpatialTouch> touches;
     pt_vp_hand hands[2]{};
+    // Tracked controllers (PlayStation VR2 Sense).
+    struct Aim {
+        bool valid = false;
+        glm::vec3 position{0.0f};
+        glm::quat orientation{1.0f, 0.0f, 0.0f, 0.0f};
+    } aims[2];
     std::atomic<bool> running{false};
     std::atomic<bool> quit{false};
     std::atomic<bool> foreground{true};
@@ -122,20 +131,20 @@ struct Uniforms {
     float4 rect;     // eye: the part of the image shown; laser: the eye's position (xyz)
     float alpha;
     float opaque;
-    float2 pad;
+    float2 pad;      // eye: sharpening (x), 0 to 1
     float4 cursor;   // on a panel: u, v, width / height, 0 none | 1 aiming | 2 pinching
     float4 p0;       // laser: start (xyz), half width (w)
     float4 p1;       // laser: end (xyz)
     float4 color;    // laser
 };
 struct Varyings { float4 position [[position]]; float2 uv; };
-// A full-view triangle: the eye image covers the whole view.
+// The eye image over the part of the view it was drawn for (p0: its rectangle in normalized
+// device coordinates, x0 y0 x1 y1; the whole view unless the field of view is narrowed).
 vertex Varyings eye_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer(0)]]) {
-    float2 p = float2((id == 1) ? 3.0 : -1.0, (id == 2) ? 3.0 : -1.0);
+    float2 corner = float2((id & 1) != 0 ? 1.0 : 0.0, (id >> 1) != 0 ? 1.0 : 0.0);
     Varyings v;
-    v.position = float4(p, 0.0, 1.0);
-    float2 uv = p * 0.5 + 0.5;
-    uv.y = 1.0 - uv.y;
+    v.position = float4(mix(u.p0.xy, u.p0.zw, corner), 0.0, 1.0);
+    float2 uv = float2(corner.x, 1.0 - corner.y);
     v.uv = u.rect.xy + uv * u.rect.zw;
     return v;
 }
@@ -150,10 +159,11 @@ vertex Varyings quad_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer
 }
 fragment float4 composite_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
+    // The game's images are premultiplied (the HUD's alpha, as an OpenXR quad layer takes it);
+    // the eyes and the virtual screen are opaque.
     float4 c = tex.sample(s, in.uv);
-    c.a = mix(c.a, 1.0, u.opaque) * u.alpha;
-    float3 rgb = c.rgb * c.a;
-    float a = c.a;
+    float3 rgb = c.rgb * u.alpha;
+    float a = mix(c.a, 1.0, u.opaque) * u.alpha;
     if (u.cursor.w > 0.0) {
         // The hand's cursor: a ring (filled while pinching), dark edged so it shows on any colour.
         float2 d = (in.uv - u.cursor.xy) * float2(u.cursor.z, 1.0);
@@ -168,6 +178,24 @@ fragment float4 composite_fragment(Varyings in [[stage_in]], texture2d<float> te
         a = max(a, ring);
     }
     return float4(rgb, a);
+}
+// An eye image, sharpened as much as the settings say: the difference with its four
+// neighbours added back, kept within their range so no halo appears.
+fragment float4 eye_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float3 c = tex.sample(s, in.uv).rgb;
+    float amount = u.pad.x;
+    if (amount > 0.0) {
+        float2 px = 1.0 / float2(tex.get_width(), tex.get_height());
+        float3 n = tex.sample(s, in.uv + float2(0.0, -px.y)).rgb;
+        float3 so = tex.sample(s, in.uv + float2(0.0, px.y)).rgb;
+        float3 w = tex.sample(s, in.uv + float2(-px.x, 0.0)).rgb;
+        float3 e = tex.sample(s, in.uv + float2(px.x, 0.0)).rgb;
+        float3 lo = min(c, min(min(n, so), min(w, e)));
+        float3 hi = max(c, max(max(n, so), max(w, e)));
+        c = clamp(c + (c * 4.0 - n - so - w - e) * (amount * 0.5), lo, hi);
+    }
+    return float4(c, 1.0);
 }
 // A laser from the hand: a thin strip from p0 to p1 that faces the eye.
 vertex Varyings laser_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer(0)]]) {
@@ -240,7 +268,7 @@ struct Host::Impl {
     bool running = false;
     bool exit_requested = false;
     bool was_focused = false;
-    bool focus_lost_edge = false;
+    bool ever_focused = false;
     std::chrono::steady_clock::time_point last_stats;
     uint64_t stats_frames = 0;
     double loop_ms = 0.0;
@@ -274,6 +302,10 @@ struct Host::Impl {
     HandRay rays[2];
     bool pointer_wanted = false;
     int primary_hand = 1;
+    // Without a controller, a long pinch of the left hand opens the pause menu.
+    bool menu_pinch = false;
+    bool menu_pinch_fired = false;
+    std::chrono::steady_clock::time_point menu_pinch_since;
 
     // 45 frames a second: every other display frame shows the previous picture again, at the head
     // pose it was drawn for, and the compositor reprojects it to where the head is by then.
@@ -283,6 +315,18 @@ struct Host::Impl {
     FrameLayers last_layers;
     ar_device_anchor_t last_anchor = nil;
     simd_float4x4 last_origin_from_device = matrix_identity_float4x4;
+
+    // MetalFX: each eye image enlarged to the size the headset's views have, before composing.
+    bool metalfx = false;
+    id<MTLFXSpatialScaler> scalers[2] = {nil, nil};
+    id<MTLTexture> enlarged[2] = {nil, nil};
+    uint32_t view_width = 0;
+    uint32_t view_height = 0;
+    // The part of each view's field of view the game draws (0.7 to 1, the launcher's "field of
+    // view"): fewer pixels, a black border around.
+    float fov_scale = 1.0f;
+    // Sharpening of the eye images on their way to the views (0 to 1).
+    float sharpen = 0.3f;
 
     uint32_t eye_width = 0;
     uint32_t eye_height = 0;
@@ -404,7 +448,7 @@ struct Host::Impl {
             if (!p) LogError("vr: pipeline {}: {}", vertex.UTF8String, error ? error.localizedDescription.UTF8String : "unknown error");
             return p;
         };
-        eye_pipeline = make(@"eye_vertex", false);
+        eye_pipeline = make(@"eye_vertex", false, @"eye_fragment");
         quad_pipeline = make(@"quad_vertex", true);
         laser_pipeline = make(@"laser_vertex", true, @"laser_fragment");
         MTLDepthStencilDescriptor* ds = [MTLDepthStencilDescriptor new];
@@ -534,9 +578,15 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
         error_ = "Compositor Services gave no drawable";
         return false;
     }
-    x.eye_width = std::max(16u, static_cast<uint32_t>(std::lround(width * x.scale)));
-    x.eye_height = std::max(16u, static_cast<uint32_t>(std::lround(height * x.scale)));
-    LogInfo("vr: drawable view {}x{}, eyes drawn at {}x{} (scale {:.2f})", width, height, x.eye_width, x.eye_height, x.scale);
+    if (const char* fov = std::getenv("PT_VP_FOV")) x.fov_scale = std::clamp(static_cast<float>(std::atof(fov)) / 100.0f, 0.7f, 1.0f);
+    if (const char* sharpen = std::getenv("PT_VP_SHARPEN")) x.sharpen = std::clamp(static_cast<float>(std::atof(sharpen)), 0.0f, 1.0f);
+    // The views' pixels the eyes cover, and the eyes' own size.
+    const uint32_t covered_width = std::max(16u, static_cast<uint32_t>(std::lround(width * x.fov_scale)));
+    const uint32_t covered_height = std::max(16u, static_cast<uint32_t>(std::lround(height * x.fov_scale)));
+    x.eye_width = std::max(16u, static_cast<uint32_t>(std::lround(covered_width * x.scale)));
+    x.eye_height = std::max(16u, static_cast<uint32_t>(std::lround(covered_height * x.scale)));
+    LogInfo("vr: drawable view {}x{}, field of view {:.0f} %, eyes drawn at {}x{} (scale {:.2f})", width, height, x.fov_scale * 100.0f,
+            x.eye_width, x.eye_height, x.scale);
     constexpr uint32_t kImages = 3;
     const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
     if (!x.CreateImages(ctx, format, x.eye_width, x.eye_height, kImages, eye_swapchains_[0], x.textures[0], "left eye") ||
@@ -545,6 +595,44 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
         !x.CreateImages(ctx, format, 1920, 1080, kImages, screen_swapchain_, x.textures[3], "virtual screen")) {
         error_ = "cannot create the eye images";
         return false;
+    }
+    x.view_width = covered_width;
+    x.view_height = covered_height;
+    if (pt::visionos::Headset().metalfx && (x.eye_width + 8 < covered_width || x.eye_height + 8 < covered_height)) {
+        if ([MTLFXSpatialScalerDescriptor supportsDevice:x.mtl_device]) {
+            bool ok = true;
+            for (int eye = 0; eye < 2 && ok; ++eye) {
+                MTLFXSpatialScalerDescriptor* d = [MTLFXSpatialScalerDescriptor new];
+                d.inputWidth = x.eye_width;
+                d.inputHeight = x.eye_height;
+                d.outputWidth = covered_width;
+                d.outputHeight = covered_height;
+                d.colorTextureFormat = x.textures[eye][0].pixelFormat;
+                d.outputTextureFormat = x.textures[eye][0].pixelFormat;
+                // sRGB images: the scaler works on the encoded (perceptual) values.
+                d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+                x.scalers[eye] = [d newSpatialScalerWithDevice:x.mtl_device];
+                if (!x.scalers[eye]) {
+                    ok = false;
+                    break;
+                }
+                MTLTextureDescriptor* t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:d.outputTextureFormat
+                                                                                              width:covered_width
+                                                                                             height:covered_height
+                                                                                          mipmapped:NO];
+                t.usage = x.scalers[eye].outputTextureUsage | MTLTextureUsageShaderRead;
+                t.storageMode = MTLStorageModePrivate;
+                x.enlarged[eye] = [x.mtl_device newTextureWithDescriptor:t];
+                ok = x.enlarged[eye] != nil;
+            }
+            x.metalfx = ok;
+            LogInfo("vr: MetalFX {} ({}x{} -> {}x{} per eye)", ok ? "on" : "could not be set up", x.eye_width, x.eye_height, covered_width,
+                    covered_height);
+        } else {
+            LogInfo("vr: MetalFX spatial scaling is not supported on this device");
+        }
+    } else {
+        LogInfo("vr: MetalFX {}", pt::visionos::Headset().metalfx ? "not needed (the eyes are drawn at the views' size)" : "off");
     }
     x.running = true;
     x.divisor = pt::visionos::Headset().target_fps == 45 ? 2 : 1;
@@ -597,14 +685,16 @@ void Host::PollEvents() {
         x.running = false;
     }
     const bool focused = state == cp_layer_renderer_state_running && b.foreground.load();
-    x.focus_lost_edge = x.was_focused && !focused;
     x.was_focused = focused;
+    x.ever_focused = x.ever_focused || focused;
 }
 
 bool Host::SessionRunning() const { return impl_->running; }
 bool Host::ExitRequested() const { return impl_->exit_requested; }
 bool Host::Focused() const { return impl_->was_focused; }
-bool Host::FocusLost() const { return impl_->focus_lost_edge; }
+// Like OpenXR's session state: true while the game is not in front after it has been (the
+// headset taken off, the space hidden, the app in the background), not just when it happens.
+bool Host::FocusLost() const { return impl_->ever_focused && !impl_->was_focused; }
 bool Host::ShouldRender() const { return should_render_; }
 
 bool Host::WaitFrame() {
@@ -692,11 +782,17 @@ void Host::LocateViews() {
     for (int i = 0; i < 2; ++i) {
         cp_view_t view = cp_drawable_get_view(x.drawable, i);
         const simd_float4x4 world = simd_mul(x.origin_from_device, cp_view_get_transform(view));
-        const simd_float4 t = cp_view_get_tangents(view);  // left, right, top, bottom, positive
+        // The view's field of view from its projection (x and y rows of an off-axis frustum,
+        // looking down -Z): right = (1 + m20) / m00, left = (m20 - 1) / m00, likewise up and down.
+        const simd_float4x4 p = cp_drawable_compute_projection(x.drawable, cp_axis_direction_convention_right_up_back, static_cast<size_t>(i));
+        const float m00 = p.columns[0][0], m20 = p.columns[2][0], m11 = p.columns[1][1], m21 = p.columns[2][1];
+        const float tan_left = (m20 - 1.0f) / m00, tan_right = (m20 + 1.0f) / m00;
+        const float tan_down = (m21 - 1.0f) / m11, tan_up = (m21 + 1.0f) / m11;
         eyes_[i].orientation = QuatOf(world);
         eyes_[i].position = PositionOf(world);
-        eyes_[i].tangents = glm::vec4(-t.x, t.y, t.z, -t.w);
-        eyes_[i].angles = glm::vec4(-std::atan(t.x), std::atan(t.y), std::atan(t.z), -std::atan(t.w));
+        const float k = x.fov_scale;
+        eyes_[i].tangents = glm::vec4(tan_left, tan_right, tan_up, tan_down) * k;
+        eyes_[i].angles = glm::vec4(std::atan(tan_left * k), std::atan(tan_right * k), std::atan(tan_up * k), std::atan(tan_down * k));
     }
     head_.orientation = QuatOf(x.origin_from_device);
     head_.position = PositionOf(x.origin_from_device);
@@ -731,12 +827,16 @@ void Host::SyncActions() {
     Impl& x = *impl_;
     std::vector<SpatialTouch> touches;
     pt_vp_hand hands[2];
+    Bridge::Aim aims[2];
     {
         std::lock_guard<std::mutex> lock(b.mutex);
         touches.swap(b.touches);
         hands[0] = b.hands[0];
         hands[1] = b.hands[1];
+        aims[0] = b.aims[0];
+        aims[1] = b.aims[1];
     }
+    const bool triggers[2] = {c.l2, c.r2};
 
     // Pointing with the hands: while a menu is open, a ray from each tracked hand. The ray starts
     // at the index finger's knuckle and points away from an estimated shoulder, which keeps it
@@ -752,7 +852,11 @@ void Host::SyncActions() {
     for (int h = 0; h < 2; ++h) {
         Impl::HandRay& r = x.rays[h];
         const pt_vp_hand& hand = hands[h];
-        r.active = x.pointer_wanted && x.panel_shown && views_valid_ && hand.tracked;
+        const bool was_active = r.active;
+        // A tracked controller in this hand points (its trigger clicks); else the hand itself
+        // (a pinch clicks).
+        const bool controller = aims[h].valid;
+        r.active = x.pointer_wanted && x.panel_shown && views_valid_ && (controller || hand.tracked);
         if (!r.active) {
             r.hit = false;
             r.pinched = false;
@@ -760,28 +864,65 @@ void Host::SyncActions() {
             continue;
         }
         any_ray = true;
-        const glm::vec3 knuckle(hand.index_knuckle[0], hand.index_knuckle[1], hand.index_knuckle[2]);
-        const glm::vec3 thumb(hand.thumb_tip[0], hand.thumb_tip[1], hand.thumb_tip[2]);
-        const glm::vec3 index(hand.index_tip[0], hand.index_tip[1], hand.index_tip[2]);
-        const glm::vec3 shoulder = head_.position + glm::vec3(0.0f, -0.20f, 0.0f) + right * (h == 0 ? -0.17f : 0.17f) - flat * 0.05f;
-        glm::vec3 direction = knuckle - shoulder;
-        direction = glm::length(direction) > 1.0e-3f ? glm::normalize(direction) : forward;
-        r.direction = r.smoothed ? glm::normalize(glm::mix(r.direction, direction, 0.35f)) : direction;
-        r.smoothed = true;
-        r.origin = knuckle;
+        bool pressed = false;
+        bool released = false;
+        if (controller) {
+            r.origin = aims[h].position;
+            r.direction = glm::normalize(aims[h].orientation * glm::vec3(0.0f, 0.0f, -1.0f));
+            r.smoothed = false;
+            pressed = triggers[h];
+            released = !triggers[h];
+        } else {
+            const glm::vec3 knuckle(hand.index_knuckle[0], hand.index_knuckle[1], hand.index_knuckle[2]);
+            const glm::vec3 thumb(hand.thumb_tip[0], hand.thumb_tip[1], hand.thumb_tip[2]);
+            const glm::vec3 index(hand.index_tip[0], hand.index_tip[1], hand.index_tip[2]);
+            const glm::vec3 shoulder = head_.position + glm::vec3(0.0f, -0.20f, 0.0f) + right * (h == 0 ? -0.17f : 0.17f) - flat * 0.05f;
+            glm::vec3 direction = knuckle - shoulder;
+            direction = glm::length(direction) > 1.0e-3f ? glm::normalize(direction) : forward;
+            r.direction = r.smoothed ? glm::normalize(glm::mix(r.direction, direction, 0.35f)) : direction;
+            r.smoothed = true;
+            r.origin = knuckle;
+            const float gap = glm::distance(thumb, index);
+            pressed = gap < 0.015f;
+            released = gap > 0.03f;
+        }
         float distance = 1.5f;
         r.hit = PanelHit(r.origin, r.direction, x.panel_rotation, x.panel_centre, x.panel_size, r.uv, &distance);
         r.end = r.origin + r.direction * (r.hit ? distance : 1.5f);
-        const float gap = glm::distance(thumb, index);
-        if (!r.pinched && gap < 0.015f) {
+        if (!was_active) {
+            // A pinch (or trigger) already held when the ray appears, such as the one that opened
+            // the menu, is not a click.
+            r.pinched = !released;
+        } else if (!r.pinched && pressed) {
             r.pinched = true;
             if (r.hit) {
                 hand_click = true;
                 hand_click_uv = r.uv;
                 x.primary_hand = h;
             }
-        } else if (r.pinched && gap > 0.03f) {
+        } else if (r.pinched && released) {
             r.pinched = false;
+        }
+    }
+    // The pause menu by hand: the left hand's thumb and index held together for 0.8 s while no
+    // menu is open and no controller is in use.
+    {
+        const pt_vp_hand& left = hands[0];
+        const float gap = left.tracked ? glm::distance(glm::vec3(left.thumb_tip[0], left.thumb_tip[1], left.thumb_tip[2]),
+                                                       glm::vec3(left.index_tip[0], left.index_tip[1], left.index_tip[2]))
+                                       : 1.0f;
+        const auto now = std::chrono::steady_clock::now();
+        if (!x.menu_pinch && gap < 0.015f) {
+            x.menu_pinch = true;
+            x.menu_pinch_fired = false;
+            x.menu_pinch_since = now;
+        } else if (x.menu_pinch && gap > 0.03f) {
+            x.menu_pinch = false;
+        }
+        if (x.menu_pinch && !x.menu_pinch_fired && !x.pointer_wanted && !c.active && now - x.menu_pinch_since > std::chrono::milliseconds(800)) {
+            x.menu_pinch_fired = true;
+            controllers_.menu = true;
+            LogInfo("vr: pause menu opened with a long pinch of the left hand");
         }
     }
     if (!x.pointer_wanted) {
@@ -826,9 +967,16 @@ void Host::SyncActions() {
     x.click_pending = false;
     for (int hand = 0; hand < 2; ++hand) {
         HandPose& p = controllers_.aim[hand];
-        p.valid = c.hand_valid[hand];
-        p.position = glm::vec3(c.hand_pos[hand][0], c.hand_pos[hand][1], c.hand_pos[hand][2]);
-        p.orientation = glm::normalize(glm::quat(c.hand_rot[hand][3], c.hand_rot[hand][0], c.hand_rot[hand][1], c.hand_rot[hand][2]));
+        if (aims[hand].valid) {
+            // A tracked PlayStation VR2 Sense: the flashlight can be held with it.
+            p.valid = true;
+            p.position = aims[hand].position;
+            p.orientation = aims[hand].orientation;
+        } else {
+            p.valid = c.hand_valid[hand];
+            p.position = glm::vec3(c.hand_pos[hand][0], c.hand_pos[hand][1], c.hand_pos[hand][2]);
+            p.orientation = glm::normalize(glm::quat(c.hand_rot[hand][3], c.hand_rot[hand][0], c.hand_rot[hand][1], c.hand_rot[hand][2]));
+        }
     }
 }
 
@@ -848,7 +996,19 @@ void Host::Release(Swapchain& swapchain) { swapchain.acquired = false; }
 // HUD as quads in the world. `origin_from_device` is the head pose the drawable is set to (the
 // one the eye images were drawn for). Encoded into `cb`; the caller presents.
 static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, const FrameLayers& layers, const simd_float4x4& origin_from_device,
-                         bool render, id<MTLCommandBuffer> cb) {
+                         bool render, id<MTLCommandBuffer> cb, bool enlarge = true) {
+    // MetalFX first: the eye images enlarged (a repeated frame keeps the enlarged images it has).
+    const bool use_enlarged = x.metalfx && layers.projection;
+    if (use_enlarged && enlarge && render) {
+        for (int eye = 0; eye < 2; ++eye) {
+            id<MTLFXSpatialScaler> scaler = x.scalers[eye];
+            scaler.colorTexture = x.textures[eye][host.EyeSwapchain(eye).index];
+            scaler.outputTexture = x.enlarged[eye];
+            scaler.inputContentWidth = x.eye_width;
+            scaler.inputContentHeight = x.eye_height;
+            [scaler encodeToCommandBuffer:cb];
+        }
+    }
     const bool anything = render && (layers.projection || layers.screen || layers.hud);
     // What "far" is in the drawable's depth convention: a distant point through its projection.
     float far_depth = 0.0f;
@@ -891,11 +1051,19 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 u.rect = simd_make_float4(0.0f, 0.0f, 1.0f, 1.0f);
                 u.alpha = 1.0f;
                 u.opaque = 1.0f;
+                u.pad[0] = x.sharpen;
+                // Where the eye's (possibly narrowed) field of view falls in this view.
+                const simd_float4x4 proj = cp_drawable_compute_projection(drawable, cp_axis_direction_convention_right_up_back, v);
+                const float k = x.fov_scale;
+                const float m00 = proj.columns[0][0], m20 = proj.columns[2][0], m11 = proj.columns[1][1], m21 = proj.columns[2][1];
+                const float l = (m20 - 1.0f) / m00 * k, r = (m20 + 1.0f) / m00 * k;
+                const float d = (m21 - 1.0f) / m11 * k, t = (m21 + 1.0f) / m11 * k;
+                u.p0 = simd_make_float4(m00 * l - m20, m11 * d - m21, m00 * r - m20, m11 * t - m21);
                 [enc setRenderPipelineState:x.eye_pipeline];
                 [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
                 [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
-                [enc setFragmentTexture:x.textures[v][host.EyeSwapchain(static_cast<int>(v)).index] atIndex:0];
-                [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [enc setFragmentTexture:use_enlarged ? x.enlarged[v] : x.textures[v][host.EyeSwapchain(static_cast<int>(v)).index] atIndex:0];
+                [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             }
             if (layers.screen || layers.hud) {
                 const simd_float4x4 projection = cp_drawable_compute_projection(drawable, cp_axis_direction_convention_right_up_back, v);
@@ -1008,7 +1176,7 @@ static void RepeatLastFrame(Host& host, Host::Impl& x) {
         cp_drawable_set_device_anchor(drawable, x.last_anchor);
         id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
         cb.label = @"P.T. repeat";
-        ComposeFrame(host, x, drawable, x.last_layers, x.last_origin_from_device, true, cb);
+        ComposeFrame(host, x, drawable, x.last_layers, x.last_origin_from_device, true, cb, false);
         cp_drawable_encode_present(drawable, cb);
         [cb commit];
     }
@@ -1062,10 +1230,11 @@ struct Preset {
     bool ssao;
     bool bloom;
     bool reflections;
+    bool metalfx;
 };
 constexpr Preset kPresets[2] = {
-    {0.60f, 1, false, true, false},  // Vision Pro M2
-    {0.85f, 2, true, true, true},    // Vision Pro M5
+    {0.60f, 1, false, true, false, true},   // Vision Pro M2
+    {0.85f, 2, true, true, true, false},    // Vision Pro M5
 };
 
 const char* ShadowName(int quality) {
@@ -1080,7 +1249,7 @@ const char* ShadowName(int quality) {
 bool MatchesPreset(int preset, const AppSettings& s, const HeadsetSettings& h) {
     if (preset < 0 || preset > 1) return false;
     const Preset& p = kPresets[preset];
-    return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == 90 && h.foveation &&
+    return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == 90 && h.foveation && h.metalfx == p.metalfx && h.fov == 100 &&
            s.graphics.shadow_quality == p.shadow_quality && s.graphics.ambient_occlusion == p.ssao && s.graphics.bloom == p.bloom &&
            s.graphics.reflections == p.reflections;
 }
@@ -1125,6 +1294,8 @@ void ApplyPreset(int preset, AppSettings& s) {
     h.resolution_scale = p.resolution_scale;
     h.target_fps = 90;
     h.foveation = true;
+    h.metalfx = p.metalfx;
+    h.fov = 100;
     s.vr.resolution_scale = p.resolution_scale;
     s.graphics.shadow_quality = p.shadow_quality;
     s.graphics.ambient_occlusion = p.ssao;
@@ -1134,6 +1305,8 @@ void ApplyPreset(int preset, AppSettings& s) {
     SettingChanged("resolution_scale", std::format("{:.2f}", p.resolution_scale));
     SettingChanged("target_fps", "90");
     SettingChanged("foveation", "1");
+    SettingChanged("metalfx", p.metalfx ? "1" : "0");
+    SettingChanged("fov", "100");
     SettingChanged("shadows", ShadowName(p.shadow_quality));
     SettingChanged("ssao", p.ssao ? "1" : "0");
     SettingChanged("bloom", p.bloom ? "1" : "0");
@@ -1149,7 +1322,17 @@ void ApplySettings(AppSettings& s) {
     h.resolution_scale = std::clamp(Number("PT_VP_RESOLUTION_SCALE", 0.6f), 0.5f, 2.0f);
     h.target_fps = static_cast<int>(Number("PT_VP_TARGET_FPS", 90.0f)) == 45 ? 45 : 90;
     h.foveation = Flag("PT_VP_FOVEATION", true);
+    h.metalfx = Flag("PT_VP_METALFX", true);
+    h.fov = std::clamp(static_cast<int>(Number("PT_VP_FOV", 100.0f)), 70, 100);
 
+    // The game's own graphics preset first (textures, filtering, clarity...); the launcher's
+    // shadows, SSAO, bloom and reflections below go over it.
+    if (const char* preset = Env("PT_VP_GRAPHICS")) {
+        const std::string v = preset;
+        const GraphicsPreset g = v == "low" ? GraphicsPreset::Low : v == "high" ? GraphicsPreset::High
+                                 : v == "ultra" ? GraphicsPreset::Ultra : GraphicsPreset::Original;
+        ApplyGraphicsPreset(s, g, false);
+    }
     s.vr.enabled = true;
     s.vr.resolution_scale = h.resolution_scale;
     s.vr.turn = static_cast<int>(Number("PT_VP_TURN", 0.0f)) == 1 ? 1 : 0;
@@ -1183,9 +1366,73 @@ void ApplySettings(AppSettings& s) {
     s.ray_tracing = {};
     s.camera.third_person = false;
     s.extras.livesplit = false;
-    LogInfo("visionos: preset {}, image {:.0f} %, {} frames a second, foveation {}, shadows {}, SSAO {}, bloom {}, reflections {}",
+    LogInfo("visionos: preset {}, image {:.0f} %, {} frames a second, foveation {}, MetalFX {}, shadows {}, SSAO {}, bloom {}, reflections {}",
             h.preset == 0 ? "M2" : h.preset == 1 ? "M5" : "custom", h.resolution_scale * 100.0f, h.target_fps, h.foveation ? "on" : "off",
+            h.metalfx ? "on" : "off",
             ShadowName(s.graphics.shadow_quality), s.graphics.ambient_occlusion, s.graphics.bloom, s.graphics.reflections);
+}
+
+namespace {
+struct EyeTimes {
+    std::mutex mutex;
+    float gpu[2] = {};
+    float pass[2][6] = {};
+    float cpu[2] = {};
+    double sum_gpu = 0.0;
+    double sum_pass[2][6] = {};
+    double sum_cpu = 0.0;
+    uint64_t samples = 0;
+    std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
+};
+EyeTimes& Times() {
+    static EyeTimes* const t = new EyeTimes;
+    return *t;
+}
+}  // namespace
+
+void ReportEye(int eye, float gpu_ms, const float pass_ms[6], float cpu_ms) {
+    if (eye < 0 || eye > 1) return;
+    EyeTimes& t = Times();
+    std::lock_guard<std::mutex> lock(t.mutex);
+    t.gpu[eye] = gpu_ms;
+    t.cpu[eye] = cpu_ms;
+    for (int i = 0; i < 6; ++i) t.pass[eye][i] = pass_ms[i];
+    if (eye != 1) return;
+    const float both = t.gpu[0] + t.gpu[1];
+    {
+        pt::xr::Bridge& b = pt::xr::bridge();
+        std::lock_guard<std::mutex> bl(b.mutex);
+        b.stats.gpu_ms = both;
+    }
+    t.sum_gpu += both;
+    t.sum_cpu += t.cpu[0] + t.cpu[1];
+    for (int e = 0; e < 2; ++e) {
+        for (int i = 0; i < 6; ++i) t.sum_pass[e][i] += t.pass[e][i];
+    }
+    ++t.samples;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - t.since < std::chrono::seconds(10) || t.samples == 0) return;
+    const double n = static_cast<double>(t.samples);
+    double fps = 0.0;
+    uint32_t width = 0, height = 0;
+    {
+        pt::xr::Bridge& b = pt::xr::bridge();
+        std::lock_guard<std::mutex> bl(b.mutex);
+        fps = b.stats.fps;
+        width = b.stats.eye_width;
+        height = b.stats.eye_height;
+    }
+    auto passes = [&](int e) {
+        return std::format("shadows {:.2f}, mirror {:.2f}, gbuffer {:.2f}, lighting {:.2f}, compose {:.2f}, post {:.2f}", t.sum_pass[e][0] / n,
+                           t.sum_pass[e][1] / n, t.sum_pass[e][2] / n, t.sum_pass[e][3] / n, t.sum_pass[e][4] / n, t.sum_pass[e][5] / n);
+    };
+    LogInfo("vr pace: {:.1f} frames shown/s, GPU both eyes {:.2f} ms (left: {}; right: {}), CPU recording {:.2f} ms, eyes {}x{}, "
+            "MetalFX {}, thermal {}",
+            fps, t.sum_gpu / n, passes(0), passes(1), t.sum_cpu / n, width, height, Headset().metalfx ? "on" : "off", pt_apple_thermal_state());
+    t.sum_gpu = t.sum_cpu = 0.0;
+    for (auto& e : t.sum_pass) for (double& v : e) v = 0.0;
+    t.samples = 0;
+    t.since = now;
 }
 
 }  // namespace pt::visionos
@@ -1222,10 +1469,25 @@ int pt_vp_start(void* layer_renderer, const char* const* argv, int argc, const c
     if (b.started || !layer_renderer) return 1;
     b.started = true;
     b.layer = (__bridge cp_layer_renderer_t)layer_renderer;
+    // MoltenVK hands each vkQueueSubmit to Metal before it returns: the composition, committed
+    // on the same Metal queue afterwards, then runs after the game's frame.
+    setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "1", 1);
+    // The game's status line every ten seconds (fps, GPU, memory, thermal state) without a window.
+    setenv("PT_STATUS_LOG", "1", 0);
     for (int i = 0; i < env_count; ++i) {
         const std::string pair = env[i];
         const size_t eq = pair.find('=');
         if (eq != std::string::npos) setenv(pair.substr(0, eq).c_str(), pair.substr(eq + 1).c_str(), 1);
+    }
+    // The language a new game starts with (subtitles, voices): the launcher's choice, or the
+    // headset's (the game only asks the system for it on Windows).
+    if (!std::getenv("PT_SYSTEM_LANGUAGE")) {
+        std::string language = std::getenv("PT_VP_LANGUAGE") ? std::getenv("PT_VP_LANGUAGE") : "system";
+        if (language.empty() || language == "system") {
+            NSString* preferred = [NSLocale preferredLanguages].firstObject;
+            language = preferred ? std::string(preferred.UTF8String) : std::string("en-US");
+        }
+        setenv("PT_SYSTEM_LANGUAGE", language.c_str(), 1);
     }
     g_args.clear();
     g_args.emplace_back("pt");
@@ -1278,6 +1540,17 @@ void pt_vp_spatial_event(int phase, float ox, float oy, float oz, float dx, floa
     t.direction = glm::length(d) > 1.0e-6f ? glm::normalize(d) : glm::vec3(0.0f, 0.0f, -1.0f);
     std::lock_guard<std::mutex> lock(b.mutex);
     if (b.touches.size() < 64) b.touches.push_back(t);
+}
+
+void pt_vp_set_aim(int hand, bool valid, const float position[3], const float orientation[4]) {
+    if (hand < 0 || hand > 1) return;
+    pt::xr::Bridge& b = pt::xr::bridge();
+    std::lock_guard<std::mutex> lock(b.mutex);
+    b.aims[hand].valid = valid && position && orientation;
+    if (b.aims[hand].valid) {
+        b.aims[hand].position = glm::vec3(position[0], position[1], position[2]);
+        b.aims[hand].orientation = glm::normalize(glm::quat(orientation[3], orientation[0], orientation[1], orientation[2]));
+    }
 }
 
 void pt_vp_set_hand(int hand, const pt_vp_hand* state) {

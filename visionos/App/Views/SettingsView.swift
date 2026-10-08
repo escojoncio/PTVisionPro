@@ -126,11 +126,12 @@ struct SettingsView: View {
     private var headsetSection: some View {
         Section {
             Toggle(L("Renderizado foveado", "Foveated rendering"), isOn: bool(\.foveation))
+            Toggle(L("Escalado MetalFX", "MetalFX upscaling"), isOn: bool(\.metalFX))
         } header: {
             Text(L("Visor", "Headset"))
         } footer: {
-            Text(L("Máxima nitidez donde miras y menos detalle alrededor.",
-                   "Sharpest where you look, less detail around it."))
+            Text(L("Foveado: máxima nitidez donde miras y menos detalle alrededor. MetalFX: cada ojo se dibuja al tamaño de imagen y se amplía con nitidez a la resolución del visor (útil por debajo del 100 %).",
+                   "Foveation: sharpest where you look, less detail around it. MetalFX: each eye is drawn at the image size and enlarged sharply to the headset's resolution (useful below 100 %)."))
         }
     }
 

@@ -36,15 +36,15 @@ struct PerformanceView: View {
                     LabeledContent(L("Preset", "Preset"), value: model.settings.preset.title)
                     LabeledContent(L("Escala de resolución", "Resolution scale"), value: "\(Int((model.settings.resolutionScale * 100).rounded())) %")
                     LabeledContent(L("Objetivo", "Target"), value: "\(model.settings.targetFPS) fps")
-                    LabeledContent(L("Resolución dinámica", "Dynamic resolution"), value: model.settings.dynamicResolution ? L("Sí", "Yes") : L("No", "No"))
+                    LabeledContent(L("Campo de visión", "Field of view"), value: "\(model.settings.fov) %")
                     LabeledContent(L("Foveación", "Foveation"), value: model.settings.foveation ? L("Sí", "Yes") : L("No", "No"))
                     LabeledContent("MetalFX", value: model.settings.metalFX ? L("Sí", "Yes") : L("No", "No"))
                     LabeledContent(L("Gráficos", "Graphics"), value: "\(model.settings.graphicsPreset) · \(L("sombras", "shadows")) \(model.settings.shadows)")
                 } header: {
                     Text(L("Ajustes en uso", "Settings in use"))
                 } footer: {
-                    Text(L("Si las imágenes por segundo caen por debajo del objetivo, baja la escala de resolución o el preset del juego, o activa la resolución dinámica.",
-                           "If the frames per second fall below the target, lower the resolution scale or the game preset, or turn dynamic resolution on."))
+                    Text(L("Si las imágenes por segundo caen por debajo del objetivo: baja la escala de resolución (con MetalFX activado), el campo de visión o las sombras, o pasa a 45 fps. «GPU» es el tiempo de los dos ojos: para 90 fps tiene que quedar por debajo de unos 11 ms.",
+                           "If the frames per second fall below the target: lower the resolution scale (with MetalFX on), the field of view or the shadows, or switch to 45 fps. \u{201C}GPU\u{201D} is both eyes' time: for 90 fps it has to stay under about 11 ms."))
                 }
             }
             .navigationTitle(L("Rendimiento", "Performance"))

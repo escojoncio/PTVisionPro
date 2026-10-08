@@ -11,7 +11,7 @@ name: PTVisionPro
 options:
   bundleIdPrefix: com.kdt
   deploymentTarget:
-    visionOS: "2.0"
+    visionOS: "26.0"
   createIntermediateGroups: true
   xcodeVersion: "16.0"
 settings:
@@ -73,6 +73,7 @@ targets:
           - $(PT_LINK_FLAGS)
           - -lc++
           - -framework CompositorServices
+          - -framework MetalFX
           - -framework ARKit
           - -framework Metal
           - -framework MetalKit
