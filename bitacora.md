@@ -103,7 +103,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   post 5); gráficos al máximo solo −2 fps → limitado por píxeles; (3) escenas en pantalla virtual (2,8 m a
   2,5 m, `kScreenWidth/kScreenDistance` en `vr_play.cpp`) se ven pequeñas; (4) tras «Terminar partida» quedaba
   el mensaje de pausa sin botón «Continuar».
-- **Build 15 (lanzada):**
+- **Build 15 (run_number 19): OK** → `releases/download/build-19/PTVisionPro-19.ipa`. Sin probar en el visor:
   - Ojo derecho: en layout `layered` hay UNA textura array (slice por ojo) y su `MTLRasterizationRateMap` tiene
     una capa por slice; una pasada por vista con `slice` fijo y sin array usaba la capa 0 (ojo izq.) para los
     dos ojos. Ahora `ComposeFrame` hace una pasada por textura del drawable (`renderTargetArrayLength` =
@@ -112,6 +112,20 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
     `[[viewport_array_index]]` en los tres vertex shaders. Pipelines con `inputPrimitiveTopology = Triangle`.
     Log único al empezar: `vr: drawable N view(s), N texture(s) (array, N slice(s)), N foveation map(s) of N layer(s)`.
   - Launcher: `AppModel.gameEnded` borra solo `pausedMessage` (estático); el resto de mensajes se mantiene.
+- **Build 16 (lanzada): escenas inmersivas** (`vr_play.cpp/.h` en el parche; ajuste «Escenas inmersivas» en
+  `PTSettings.immersiveCutscenes` → `PT_VP_CUTSCENES`, `SettingsView` sección Juego; por defecto sí):
+  - `ScreenMode`: con cámara de demo y ajuste activo → `cutscene_` (estéreo), no pantalla virtual. La mirilla
+    (`IsPeepholeTheaterActive`) sigue en pantalla. Log `vr: cutscene in stereo from the scene's camera`.
+  - `PrepareStereo` con `cutscene_`: al entrar guarda `cutscene_ref_yaw_` (yaw de la cabeza en mundo) y
+    `cutscene_entry_` (offset de la cabeza); `heading = Yaw(logic.yaw - ref)`; ojos en `logic.position` (cámara
+    de la demo vía `DemoSystem::CameraOverride`) + `heading * (Offset(ojo) - entry)` con el mismo límite que en
+    juego (kHeadReach/Rise/Drop) y raycast contra paredes desde la cámara; orientación `heading * ToWorld(ojo)`.
+    Pitch/roll de la cámara de la demo ignorados a propósito (mareo). Recentrar reinicia la referencia.
+  - `ApplyControls`: `screen = screen || cutscene_` (sin giro, stick derecho al juego, linterna de la escena).
+  - Revisión: pendiente de comodidad, viñeteado/fundido en cortes de cámara (criterio de salto de
+    `BlendCameras`, main.cpp:854-863).
+- Comprobación local de `vr_play.cpp`: con `/root/deps/lua51` de LuaDist (rama 5.1.5) copiar
+  `src/luaconf.h.orig` a `src/luaconf.h` e incluir `-I/root/deps/lua51/src`.
 - **Build 14 (run_number 18): OK** → `releases/download/build-18/PTVisionPro-18.ipa` (la recomendada; sin probar en el visor). "Keeper" de fotogramas (`xr_host_visionos.mm`):
   - `Impl::mutex` + `GameCall()` (sella `game_call_ns` antes y después de bloquear) en PollEvents, WaitFrame,
     BeginFrame, LocateViews, SyncActions, Acquire, EndFrame, SetFrameDivisor. Ninguno llama a otro con guarda.

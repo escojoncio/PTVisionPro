@@ -170,11 +170,54 @@ index 42d8b01..66d67e8 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..8e1c81f 100644
+index e8e4ae7..e480cc5 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
-@@ -64,6 +64,11 @@ bool VrPlay::ScreenMode(Game& game) {
+@@ -2,6 +2,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstdlib>
+ 
+ #include "engine/core/log.h"
+ #include "engine/physics/collision_world.h"
+@@ -50,11 +51,26 @@ bool VrPlay::ScreenMode(Game& game) {
+     glm::vec3 position;
+     glm::quat rotation;
+     float fov = 0.0f;
+-    const bool screen = game.Demos().CameraWorld(position, rotation, fov) || game.Nazo().IsPeepholeTheaterActive();
+-    if (screen != screen_) {
+-        LogInfo("vr: {}", screen ? "virtual screen (a camera the game frames)" : "stereo view");
++    const bool demo = game.Demos().CameraWorld(position, rotation, fov);
++#if PT_VISIONOS
++    // Immersive cutscenes (the launcher's setting, on by default): the scene's camera drawn in
++    // stereo around the head instead of on the virtual screen.
++    static const bool immersive = [] {
++        const char* v = std::getenv("PT_VP_CUTSCENES");
++        return !v || v[0] != '0';
++    }();
++#else
++    constexpr bool immersive = false;
++#endif
++    const bool peephole = game.Nazo().IsPeepholeTheaterActive();
++    const bool screen = (demo && !immersive) || peephole;
++    const bool cutscene = demo && !screen;
++    if (screen != screen_ || cutscene != cutscene_) {
++        LogInfo("vr: {}", screen ? "virtual screen (a camera the game frames)" : cutscene ? "cutscene in stereo from the scene's camera" : "stereo view");
+     }
+     screen_ = screen;
++    cutscene_ = cutscene;
++    if (!cutscene_) cutscene_entered_ = false;
+     if (!screen_) {
+         screen_placed_ = false;
+     }
+@@ -62,11 +78,20 @@ bool VrPlay::ScreenMode(Game& game) {
+ }
+ 
  void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool screen, float dt) {
++    // A cutscene in stereo takes the controls a cutscene on the screen takes: no turning, the
++    // right stick to the game, the scene's own flashlight.
++    screen = screen || cutscene_;
      const xr::ControllerState& c = host_.Controllers();
      const xr::ViewPose& head = host_.Head();
 +    host_.SetPointerWanted(menu_open);
@@ -185,7 +228,11 @@ index e8e4ae7..8e1c81f 100644
      if (waited_ && host_.ViewsValid() && !centered_) {
          rig_.Recenter(head.position, head.orientation, game.GetCamera().yaw);
          centered_ = true;
-@@ -83,6 +88,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
++        cutscene_entered_ = false;
+         LogInfo("vr: centred on the head at ({:.3f} {:.3f} {:.3f}), world yaw {:.1f}", head.position.x, head.position.y, head.position.z,
+                 glm::degrees(rig_.BaseYaw()));
+     }
+@@ -83,6 +108,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
              state.left_stick = move;
              state.left_stick_from_pad = true;
          }
@@ -198,7 +245,7 @@ index e8e4ae7..8e1c81f 100644
          if (c.interact) raw |= kRawCross;
          if (c.back) raw |= kRawCircle;
          if (c.menu) raw |= kRawStart;
-@@ -106,8 +117,21 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -106,8 +137,21 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          if (raw != 0 || glm::length(c.move) > 0.2f || glm::length(c.turn) > 0.2f) {
              state.from_gamepad = true;
          }
@@ -221,6 +268,82 @@ index e8e4ae7..8e1c81f 100644
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
      state.raw_held |= raw;
+@@ -160,6 +204,60 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+     for (int i = 0; i < 2; ++i) {
+         frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
+     }
++    if (cutscene_) {
++        // A cutscene in stereo: the scene's camera is where the head was when it began, pointing
++        // where the head pointed (so nothing jumps); the head then turns and leans freely
++        // around it. The camera's pitch and roll are left out: imposed on the head they make
++        // people sick.
++        const xr::ViewPose& head = host_.Head();
++        if (!cutscene_entered_) {
++            cutscene_entered_ = true;
++            cutscene_ref_yaw_ = xr::AnglesOf(rig_.ToWorld(head.orientation)).yaw;
++            cutscene_entry_ = rig_.Offset(head.position);
++        }
++        const glm::quat heading = xr::YawRotation(xr::WrapAngle(logic.yaw - cutscene_ref_yaw_));
++        const glm::vec3 offset = heading * (rig_.Offset(head.position) - cutscene_entry_);
++        // The same reach as in play, and not through walls (scene cameras sit close to them).
++        glm::vec3 kept = offset;
++        const float reach = glm::length(glm::vec2(kept.x, kept.z));
++        if (reach > kHeadReach) {
++            kept.x *= kHeadReach / reach;
++            kept.z *= kHeadReach / reach;
++        }
++        kept.y = std::clamp(kept.y, -kHeadDrop, kHeadRise);
++        if (const float length = glm::length(kept); length > 1.0e-3f) {
++            const glm::vec3 direction = kept / length;
++            RayHit hit;
++            if (game.Collision().Raycast(logic.position, direction, length + kWallMargin, hit)) {
++                kept = direction * std::max(0.0f, hit.distance - kWallMargin);
++            }
++        }
++        const glm::vec3 correction = kept - offset;
++        out.head = xr::EyeCamera(logic.position + kept, glm::normalize(heading * rig_.ToWorld(head.orientation)), frusta_[0], kNearPlane);
++        for (int i = 0; i < 2; ++i) {
++            const xr::ViewPose& pose = host_.Eye(i);
++            out.poses[i] = pose;
++            out.eyes[i] = xr::EyeCamera(logic.position + heading * (rig_.Offset(pose.position) - cutscene_entry_) + correction,
++                                        glm::normalize(heading * rig_.ToWorld(pose.orientation)), frusta_[i], kNearPlane);
++        }
++        out.render = {render_size_.x, render_size_.y};
++        Place(head.position, xr::AnglesOf(head.orientation).yaw, menu_open, dt);
++        auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
++            if (!host_.Acquire(sc)) return false;
++            t.image = sc.images[sc.index];
++            t.view = sc.views[sc.index];
++            t.format = sc.format;
++            t.extent = sc.extent;
++            t.rect = rect;
++            return true;
++        };
++        if (!target(host_.EyeSwapchain(0), frusta_[0].rect, out.targets[0]) || !target(host_.EyeSwapchain(1), frusta_[1].rect, out.targets[1]) ||
++            !target(host_.HudSwapchain(), glm::vec4(0.0f, 0.0f, 1.0f, 1.0f), out.hud)) {
++            for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
++            return false;
++        }
++        return true;
++    }
+     const Player& player = game.GetPlayer();
+     const glm::vec3 feet = player.Feet();
+     const glm::vec3 eye = player.Eye();
+diff --git a/src/game/vr_play.h b/src/game/vr_play.h
+index d1485b2..4ded0f9 100644
+--- a/src/game/vr_play.h
++++ b/src/game/vr_play.h
+@@ -53,6 +53,10 @@ private:
+     bool waited_ = false;
+     bool centered_ = false;
+     bool screen_ = false;
++    bool cutscene_ = false;  // a scene's camera drawn in stereo (immersive cutscenes)
++    bool cutscene_entered_ = false;  // where the head was when it began (below) is known
++    float cutscene_ref_yaw_ = 0.0f;  // the head's heading in the world then: the scene's camera points there
++    glm::vec3 cutscene_entry_{0.0f};  // the head's place then: the scene's camera is there
+     bool screen_placed_ = false;
+     glm::quat screen_orientation_{1.0f, 0.0f, 0.0f, 0.0f};
+     glm::vec3 screen_position_{0.0f};
 diff --git a/src/main.cpp b/src/main.cpp
 index d629ab3..f1a32ae 100644
 --- a/src/main.cpp
