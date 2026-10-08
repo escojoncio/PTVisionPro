@@ -58,7 +58,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
     `configuration.maxRenderQuality` y `layerRenderer.renderQuality` (visionOS 26). Se registran
     los valores por defecto del sistema ("Layer: ... system default") para calibrar. Sustituye a
     `renderQuality` (clave antigua ignorada). Selector de 60° en giro por pasos del launcher.
-- Build 10 (lanzada): panel de rendimiento en el visor
+- **Build 10 (run_number 13): OK** → `releases/download/build-13/PTVisionPro-13.ipa` (75,8 MB). Sin probar en el visor. Panel de rendimiento en el visor
   (`PT_VP_OVERLAY`, interruptor «Panel de rendimiento dentro del juego» que antes no hacía nada):
   línea "FPS · GPU · LOOP · ojo · térmico" con fuente 5x7 (`kGlyphs`, `RasteriseOverlay`) en dos
   texturas RGBA8 sRGB compartidas (ping-pong, cada 500 ms), quad fijo a la cabeza 0,3 m bajo el
