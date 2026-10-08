@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -257,8 +258,16 @@ struct Uniforms {
     float4 p0;       // laser: start (xyz), half width (w)
     float4 p1;       // laser: end (xyz)
     float4 color;    // laser
+    uint4 target;    // the view's slice of the drawable's texture (x) and its viewport (y)
 };
-struct Varyings { float4 position [[position]]; float2 uv; };
+// Each view draws to its own slice and viewport by index, in one pass over the drawable's
+// texture: the rasterizer then uses that slice's layer of the foveation map.
+struct Varyings {
+    float4 position [[position]];
+    float2 uv;
+    uint layer [[render_target_array_index]];
+    uint viewport [[viewport_array_index]];
+};
 // The eye image over the part of the view it was drawn for (p0: its rectangle in normalized
 // device coordinates, x0 y0 x1 y1; the whole view unless the field of view is narrowed).
 vertex Varyings eye_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer(0)]]) {
@@ -267,6 +276,8 @@ vertex Varyings eye_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer(
     v.position = float4(mix(u.p0.xy, u.p0.zw, corner), 0.0, 1.0);
     float2 uv = float2(corner.x, 1.0 - corner.y);
     v.uv = u.rect.xy + uv * u.rect.zw;
+    v.layer = u.target.x;
+    v.viewport = u.target.y;
     return v;
 }
 // A quad in the world (the HUD, the virtual screen): size is in the model matrix.
@@ -276,6 +287,8 @@ vertex Varyings quad_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer
     Varyings v;
     v.position = u.mvp * float4(c, 0.0, 1.0);
     v.uv = float2(c.x + 0.5, 0.5 - c.y);
+    v.layer = u.target.x;
+    v.viewport = u.target.y;
     return v;
 }
 fragment float4 composite_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
@@ -328,6 +341,8 @@ vertex Varyings laser_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffe
     Varyings v;
     v.position = u.mvp * float4(p, 1.0);
     v.uv = float2((id >> 1) != 0 ? 1.0 : 0.0, 0.0);
+    v.layer = u.target.x;
+    v.viewport = u.target.y;
     return v;
 }
 fragment float4 laser_fragment(Varyings in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
@@ -347,6 +362,7 @@ struct Uniforms {
     simd_float4 p0;
     simd_float4 p1;
     simd_float4 color;
+    simd_uint4 target;
 };
 
 PFN_vkExportMetalObjectsEXT ExportMetalObjects(VkDevice device) {
@@ -625,6 +641,8 @@ struct Host::Impl {
             d.vertexFunction = [library newFunctionWithName:vertex];
             d.fragmentFunction = [library newFunctionWithName:fragment];
             d.colorAttachments[0].pixelFormat = color;
+            // Layered rendering (each view's draws pick their slice) needs the topology class.
+            d.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
             d.colorAttachments[0].blendingEnabled = blend;
             d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
             d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
@@ -881,6 +899,15 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
         const MTLViewport vp = cp_view_texture_map_get_viewport(map);
         width = static_cast<uint32_t>(vp.width);
         height = static_cast<uint32_t>(vp.height);
+        {
+            // How the drawable is laid out (the composition draws each view to its slice).
+            id<MTLTexture> color = cp_drawable_get_color_texture(drawable, 0);
+            const size_t maps = cp_drawable_get_rasterization_rate_map_count(drawable);
+            id<MTLRasterizationRateMap> map0 = maps ? cp_drawable_get_rasterization_rate_map(drawable, 0) : nil;
+            LogInfo("vr: drawable {} view(s), {} texture(s) ({}, {} slice(s)), {} foveation map(s){}", cp_drawable_get_view_count(drawable),
+                    cp_drawable_get_texture_count(drawable), color.textureType == MTLTextureType2DArray ? "array" : "2D", color.arrayLength, maps,
+                    map0 ? std::format(" of {} layer(s)", map0.layerCount) : std::string());
+        }
         // A black frame, with the head where it is if ARKit knows it already.
         const CFTimeInterval when = cp_time_to_cf_time_interval(cp_frame_timing_get_presentation_time(cp_drawable_get_frame_timing(drawable)));
         if (ar_world_tracking_provider_query_device_anchor_at_timestamp(x.world_tracking, when, x.anchor) == ar_device_anchor_query_status_success) {
@@ -1430,35 +1457,59 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
         if (std::fabs(clip.w) > 1.0e-6f) far_depth = std::clamp(clip.z / clip.w, 0.0f, 1.0f);
     }
     const size_t view_count = std::min<size_t>(2, cp_drawable_get_view_count(drawable));
+    auto texture_of = [&](size_t v) { return cp_view_texture_map_get_texture_index(cp_view_get_view_texture_map(cp_drawable_get_view(drawable, v))); };
+    // One pass per texture of the drawable (layered layout: one array texture, a slice per view;
+    // dedicated: a texture per view). A pass per slice would rasterize every view with the first
+    // layer of the foveation map, the left eye's: the right eye came out deformed.
+    id<MTLRenderCommandEncoder> enc = nil;
+    size_t enc_texture = SIZE_MAX;
     for (size_t v = 0; v < view_count; ++v) {
         cp_view_t view = cp_drawable_get_view(drawable, v);
         cp_view_texture_map_t map = cp_view_get_view_texture_map(view);
         const size_t texture_index = cp_view_texture_map_get_texture_index(map);
-        const size_t slice = cp_view_texture_map_get_slice_index(map);
-        const MTLViewport viewport = cp_view_texture_map_get_viewport(map);
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = cp_drawable_get_color_texture(drawable, texture_index);
-        pass.colorAttachments[0].slice = slice;
-        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
-        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
-        id<MTLTexture> depth = cp_drawable_get_depth_texture(drawable, texture_index);
-        if (depth) {
-            pass.depthAttachment.texture = depth;
-            pass.depthAttachment.slice = slice;
-            pass.depthAttachment.loadAction = MTLLoadActionClear;
-            pass.depthAttachment.storeAction = MTLStoreActionStore;
-            // Everything distant until the game hands real depth (the compositor reprojects with it).
-            pass.depthAttachment.clearDepth = far_depth;
+        const uint32_t slice = static_cast<uint32_t>(cp_view_texture_map_get_slice_index(map));
+        if (!enc || texture_index != enc_texture) {
+            if (enc) [enc endEncoding];
+            enc_texture = texture_index;
+            id<MTLTexture> color = cp_drawable_get_color_texture(drawable, texture_index);
+            MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = color;
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+            pass.renderTargetArrayLength = color.textureType == MTLTextureType2DArray ? color.arrayLength : 1;
+            id<MTLTexture> depth = cp_drawable_get_depth_texture(drawable, texture_index);
+            if (depth) {
+                pass.depthAttachment.texture = depth;
+                pass.depthAttachment.loadAction = MTLLoadActionClear;
+                pass.depthAttachment.storeAction = MTLStoreActionStore;
+                // Everything distant until the game hands real depth (the compositor reprojects with it).
+                pass.depthAttachment.clearDepth = far_depth;
+            }
+            if (texture_index < cp_drawable_get_rasterization_rate_map_count(drawable)) {
+                if (id<MTLRasterizationRateMap> rate = cp_drawable_get_rasterization_rate_map(drawable, texture_index)) pass.rasterizationRateMap = rate;
+            }
+            enc = [cb renderCommandEncoderWithDescriptor:pass];
+            // The viewports of this texture's views, in view order (each view's index below).
+            MTLViewport viewports[2];
+            NSUInteger viewport_count = 0;
+            for (size_t w = 0; w < view_count; ++w) {
+                if (texture_of(w) == texture_index) {
+                    viewports[viewport_count++] = cp_view_texture_map_get_viewport(cp_view_get_view_texture_map(cp_drawable_get_view(drawable, w)));
+                }
+            }
+            [enc setViewports:viewports count:viewport_count];
+            [enc setDepthStencilState:x.depth_write];
         }
-        id<MTLRasterizationRateMap> rate = cp_drawable_get_rasterization_rate_map(drawable, texture_index);
-        if (rate) pass.rasterizationRateMap = rate;
-        id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
-        [enc setViewport:viewport];
-        [enc setDepthStencilState:x.depth_write];
+        uint32_t viewport_index = 0;
+        for (size_t w = 0; w < v; ++w) {
+            if (texture_of(w) == texture_index) ++viewport_index;
+        }
+        const simd_uint4 target = simd_make_uint4(slice, viewport_index, 0, 0);
         if (anything) {
             Uniforms u{};
             u.mvp = matrix_identity_float4x4;
+            u.target = target;
             if (layers.projection) {
                 u.rect = simd_make_float4(0.0f, 0.0f, 1.0f, 1.0f);
                 u.alpha = 1.0f;
@@ -1492,6 +1543,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 const int cursor_panel = layers.hud ? 2 : 3;
                 auto quad = [&](int which, const glm::quat& orientation, const glm::vec3& position, const glm::vec2& size, bool alpha) {
                     Uniforms q{};
+                    q.target = target;
                     q.mvp = simd_mul(view_projection, ModelMatrix(orientation, position, size));
                     q.rect = simd_make_float4(0.0f, 0.0f, 1.0f, 1.0f);
                     q.alpha = 1.0f;
@@ -1512,6 +1564,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     const Host::Impl::HandRay& r = x.rays[h];
                     if (!r.active) continue;
                     Uniforms l{};
+                    l.target = target;
                     l.mvp = view_projection;
                     l.rect = simd_make_float4(world_from_view.columns[3][0], world_from_view.columns[3][1], world_from_view.columns[3][2], 1.0f);
                     l.p0 = simd_make_float4(r.origin.x, r.origin.y, r.origin.z, 0.0015f);
@@ -1531,6 +1584,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 const glm::vec3 position = PositionOf(origin_from_device) + head * glm::vec3(0.0f, -0.18f, -1.0f);  // ~10° low: still sharp with foveation
                 const float width = 0.75f;
                 Uniforms q{};
+                q.target = target;
                 q.mvp = simd_mul(view_projection, ModelMatrix(head, position, glm::vec2(width, width * kOverlayHeight / kOverlayWidth)));
                 q.rect = simd_make_float4(0.0f, 0.0f, 1.0f, 1.0f);
                 q.alpha = 1.0f;
@@ -1542,8 +1596,8 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             }
         }
-        [enc endEncoding];
     }
+    if (enc) [enc endEncoding];
 }
 
 void Host::EndFrame(const FrameLayers& layers) {
