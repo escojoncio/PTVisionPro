@@ -273,8 +273,29 @@ final class PlayStationController: @unchecked Sendable {
             settings = settings || dualShock.touchpadButton.isPressed
         }
         new.settings = settings
+        // The menus: the D-pad, L1/R1 (switching the settings page's columns), and the glyphs of
+        // the controller in hand.
+        new.dpad_up = gamepad.dpad.up.isPressed
+        new.dpad_down = gamepad.dpad.down.isPressed
+        new.dpad_left = gamepad.dpad.left.isPressed
+        new.dpad_right = gamepad.dpad.right.isPressed
+        new.l1 = gamepad.leftShoulder.isPressed
+        new.r1 = gamepad.rightShoulder.isPressed
+        new.prompt_style = Self.promptStyle(controller)
         new.hand_valid = (false, false)
         publish(new)
+    }
+
+    /// The button glyphs the game shows: 1 PlayStation, 2 Nintendo, 0 Xbox (A B X Y, the default).
+    private static func promptStyle(_ controller: GCController) -> Int32 {
+        if isPlayStation(controller) || isSense(controller) {
+            return 1
+        }
+        let category = controller.productCategory.lowercased()
+        if category.contains("switch") || category.contains("joy-con") || category.contains("nintendo") {
+            return 2
+        }
+        return 0
     }
 
     /// The two Sense controllers as one: the left one has the move stick, Square (lower face
@@ -318,6 +339,9 @@ final class PlayStationController: @unchecked Sendable {
         new.zoom = pressed(right, ["Thumbstick Button", GCInputRightThumbstickButton])
         new.menu = pressed(right, [GCInputButtonOptions, GCInputButtonMenu])
         new.settings = pressed(left, [GCInputButtonShare, GCInputButtonMenu, GCInputButtonOptions])
+        new.l1 = pressed(left, [GCInputLeftShoulder, "Grip Button", "Left Shoulder"])
+        new.r1 = pressed(right, [GCInputRightShoulder, "Grip Button", "Right Shoulder"])
+        new.prompt_style = 1
         // TODO: GameController does not give a Sense controller's pose on visionOS 2 (ARKit's
         // accessory tracking arrived with visionOS 26). Until the app tracks them, the game places
         // the flashlight with the head.

@@ -1,5 +1,5 @@
 /* The texts of the permissions visionOS asks for P.T. VR (in English). */
 "NSWorldSensingUsageDescription" = "Head tracking places the player in the corridor.";
-"NSHandsTrackingUsageDescription" = "The hands can hold the flashlight and point in the game.";
+"NSHandsTrackingUsageDescription" = "Your hands point and select in the game's menus (pinch to choose).";
 "NSMicrophoneUsageDescription" = "P.T. listens to your voice for the game's radio";
 "NSBluetoothAlwaysUsageDescription" = "PlayStation controllers connect over Bluetooth.";
