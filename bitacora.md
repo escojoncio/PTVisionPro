@@ -31,6 +31,33 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Claves VPS4 de AstroVisionPro (`vps4FolderBookmark`, llavero `astroquest.vps4`/`folder-bookmark`)
   + `withLock` en `SenseTracking` (sin avisos de Swift). Solo quedan avisos de terceros y
   `cp_frame_query_drawable` obsoleta. Es la build recomendada para la primera prueba.
+- Build 9 (en curso): sin probar en el visor.
+  - `cp_frame_query_drawables` (visionOS 26): `QueryDrawables` → `drawable` (`cp_drawable_target_built_in`)
+    + `capture` (grabación de alta calidad de Reality Composer Pro); array vacío = frame cancelado,
+    NO se toca (ni `end_submission`). La captura se compone igual (MetalFX reutilizado,
+    `ComposeFrame(..., enlarge=false)`), con los ojos colocados por `eye_tangents` (tangentes ×k
+    del ojo guardadas en `LocateViews`, válidas para cualquier proyección). Frames sin dibujo:
+    `PresentBlank` (limpia a negro/lejos; antes se presentaba contenido indefinido).
+  - 45 fps nativo: `cp_layer_renderer_set_minimum_frame_repeat_count(layer, divisor-1)` (visionOS
+    1+): el compositor da el doble de tiempo por frame y reproyecta. Eliminado el
+    `RepeatLastFrame` manual (competía con el juego en la cola de Metal).
+  - Continuar tras cerrar el espacio (Digital Crown): el núcleo ya no termina al invalidarse la
+    capa; espera en pausa (`space_gone`, sleep 50 ms). La app detecta `LayerRenderer.state ==
+    .invalidated` en `tick` → `immersiveEnded` (mensaje + botón «Continuar en VR»). Al reabrir:
+    `GameRunner.start` ve `model.running` → `pt_vp_attach_layer` → `Bridge::next_layer` →
+    `PollEvents` cambia `x.layer`, `StartTracking` (sesión ARKit nueva), recentrado, repeat count.
+    HandTracking se reinicia; Sense se reinicia en el siguiente tick.
+  - Recentrado: `Host::TakeRecenter()` (nuevo en `xr_host.h`; OpenXR/stub → false) consumido en
+    `VrPlay::ApplyControls` (`centered_ = false`). Fuentes: capa nueva, menú VR «Recentrar vista»
+    (`kVpRecenter` → `pt::visionos::RequestRecenter`), salto de cabeza entre frames (>0,3 m a >4 m/s
+    o >30° a >1500°/s en <150 ms: recentrado del sistema con la Digital Crown).
+  - Fin con error: `pt_vp_exit_code()`; el launcher muestra la última línea `] error ` de pt.log.
+    Tras terminar: botón «Cerrar la app» (`exit(0)`; el núcleo arranca una vez por proceso).
+    `launcherVisible` evita abrir dos ventanas del launcher.
+  - Calidad del visor (`compositorQuality`, 0 = la del sistema; 60–100 %): con foveado,
+    `configuration.maxRenderQuality` y `layerRenderer.renderQuality` (visionOS 26). Se registran
+    los valores por defecto del sistema ("Layer: ... system default") para calibrar. Sustituye a
+    `renderQuality` (clave antigua ignorada). Selector de 60° en giro por pasos del launcher.
 - Build 7: Xcode 26 / visionOS 26 (runner `macos-26`, deployment 26.0 en
   `project.yml` y CMake). Cambios (todo sin probar en el visor):
   - Correcciones "sin ventana" en `main.cpp` (parche): sonido (`sound.Init` exigía ventana),
@@ -133,8 +160,13 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 ```
 python3 tools/prepare_source.py          # o --edit para editar el parche
 # cabeceras en /root/deps: glm volk vma imgui stb sdl vkh(Vulkan-Headers) lua51 (clones superficiales)
+# (en build/port-src; /tmp/claude-0/gen/build_id.h con #define PT_BUILD_ID "local")
 clang++ -std=c++23 -fsyntax-only -w -DPT_APPLE=1 -DPT_IOS=1 -DPT_VISIONOS=1 -DVOLK_NAMESPACE -DVK_NO_PROTOTYPES \
-  -include src/engine/platform/apple_host.h -DVK_USE_PLATFORM_METAL_EXT -DSDL_MAIN_HANDLED=1 ... src/main.cpp
+  -DVK_USE_PLATFORM_METAL_EXT -DSDL_MAIN_HANDLED=1 -DPT_NATIVE_BUILD='"x"' -DPT_VOICE_MODEL_DIR='"v"' \
+  -include src/engine/platform/apple_host.h -Isrc -I/root/PTVisionPro/visionos/core \
+  -I/root/PTVisionPro/visionos/App/Bridge -I/tmp/claude-0/gen -I/root/deps/glm -I/root/deps/volk \
+  -I/root/deps/vma/include -I/root/deps/imgui -I/root/deps/imgui/backends -I/root/deps/stb \
+  -I/root/deps/sdl/include -I/root/deps/vkh/include -I/root/deps/lua51 src/main.cpp
 ```
 Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C build/port-src diff > patches/0001-visionos-menus.patch`.
 
@@ -195,5 +227,4 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 2. Profundidad real al drawable (hoy constante "lejos"): mejora la reproyección a 45 fps.
 3. Resolución dinámica (el renderer recrea objetivos al cambiar de tamaño: hacerlo con viewport).
 4. Calibrar presets M2/M5 con las líneas `vr pace:` del registro.
-5. Migrar a `cp_frame_query_drawables` (visionOS 26).
 6. Comprobación de datos en el launcher: hecha (chunk1.psarc, texture.qar); probar con los datos reales.

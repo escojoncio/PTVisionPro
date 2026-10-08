@@ -76,6 +76,17 @@ enum LogFiles {
         return lines.suffix(wanted).joined(separator: "\n")
     }
 
+    /// The core's last error line, without its time and level ("" when there is none).
+    static func lastCoreError() -> String {
+        let lines = tail(of: coreLogURL, lines: 400).components(separatedBy: "\n")
+        guard let line = lines.last(where: { $0.contains("] error ") }),
+              let range = line.range(of: "] error ") else {
+            return ""
+        }
+        let text = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
+        return text.count > 160 ? String(text.prefix(160)) + "…" : text
+    }
+
     /// What is sent with the share button: the core's log and the app's.
     static func filesToShare() -> [URL] {
         var files: [URL] = []

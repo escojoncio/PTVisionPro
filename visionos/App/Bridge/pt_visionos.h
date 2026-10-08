@@ -63,7 +63,7 @@ typedef struct pt_vp_stats {
 /// "--game" and the data folder's path (argv[0] is NOT a program name). env: "NAME=value"
 /// strings the core takes as its settings (the PT_VP_* variables PTSettings exports).
 /// Returns 0 if the game thread started. May be called once per process: a second call returns
-/// nonzero.
+/// nonzero (a space opened again while the game runs goes to pt_vp_attach_layer).
 int pt_vp_start(void* layer_renderer, const char* const* argv, int argc,
                 const char* const* env, int env_count);
 
@@ -72,6 +72,15 @@ void pt_vp_request_quit(void);
 
 /// Whether the game thread is alive.
 bool pt_vp_running(void);
+
+/// How the game ended: what its main returned (0 a normal end), or -1 while it runs.
+int pt_vp_exit_code(void);
+
+/// The layer of an immersive space opened again while the game runs (the player closed the
+/// space, with the Digital Crown for example, and came back): the game draws to it from its next
+/// frame and centres on the head again. Same pointer rules as pt_vp_start. Returns 0 if the game
+/// takes it, nonzero if no game is running.
+int pt_vp_attach_layer(void* layer_renderer);
 
 /// The newest controller state (copied).
 void pt_vp_set_controller(const pt_vp_controller* state);

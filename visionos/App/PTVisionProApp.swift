@@ -22,7 +22,7 @@ struct PTVisionProApp: App {
         ImmersiveSpace(id: AppModel.immersiveSpaceID) {
             CompositorLayer(configuration: GameLayerConfiguration(
                 foveation: model.settings.foveation,
-                renderQuality: model.settings.renderQuality)) { layerRenderer in
+                compositorQuality: model.settings.compositorQuality)) { layerRenderer in
                 // On the main actor whatever thread the layer is handed over on: the core starts
                 // its own thread and waits for the layer to run.
                 Task { @MainActor [model] in

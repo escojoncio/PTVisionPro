@@ -48,6 +48,8 @@ final class AppModel {
     var stats = GameStats()
     var message: String?
     var immersiveOpen = false
+    /// The launcher window is on screen (so that it is not opened twice).
+    var launcherVisible = false
     /// Opens the launcher window again (it is closed while the game is shown, so that nothing
     /// but the game is in view) and closes the game's space. Kept from the launcher's environment.
     var openLauncher: OpenWindowAction?
@@ -85,11 +87,22 @@ final class AppModel {
         dataStatus == .ready && !started
     }
 
+    /// The game runs with its space closed (paused): it can be gone back to.
+    var canContinue: Bool {
+        running && !immersiveOpen
+    }
+
+    /// The game ran and ended: the core starts once per process, so playing again takes a fresh
+    /// start of the app.
+    var needsRelaunch: Bool {
+        started && !running
+    }
+
     /// Why the game cannot start, for the launcher.
     var startHint: String {
         if started && !running {
-            return L("Para volver a jugar, cierra la app del todo y ábrela de nuevo.",
-                     "To play again, close the app completely and open it again.")
+            return L("Para volver a jugar, cierra la app y ábrela de nuevo.",
+                     "To play again, close the app and open it again.")
         }
         switch dataStatus {
         case .missing:
@@ -109,34 +122,50 @@ final class AppModel {
         LogFiles.log("Immersive space opened")
     }
 
+    /// The launcher window, unless it is already there.
+    func showLauncher() {
+        guard !launcherVisible else { return }
+        openLauncher?(id: Self.launcherID)
+    }
+
     /// The core started (GameRunner, from the space's layer).
     func gameStarted() {
         started = true
         running = true
     }
 
-    /// The game thread ended (the player closed the space, the game ended, or it failed).
-    func gameEnded() {
+    /// The game thread ended (the player left from the game's menu or the launcher, or it
+    /// failed): `code` is what the game returned (0 a normal end).
+    func gameEnded(code: Int32 = 0) {
         guard running || immersiveOpen else { return }
         running = false
-        LogFiles.log("Game ended")
+        LogFiles.log("Game ended (code \(code))")
+        if code != 0 && message == nil {
+            let reason = LogFiles.lastCoreError()
+            message = reason.isEmpty
+                ? L("El juego se cerró con un error (código \(code)). Mira la pestaña Registro.",
+                    "The game closed with an error (code \(code)). See the Log tab.")
+                : L("El juego se cerró con un error: \(reason)", "The game closed with an error: \(reason)")
+        }
         if immersiveOpen {
             immersiveOpen = false
             Task { [dismissImmersive] in
                 await dismissImmersive?()
             }
         }
-        openLauncher?(id: Self.launcherID)
+        showLauncher()
     }
 
-    /// The game's space has closed (Digital Crown, or the system): the core is told to end.
+    /// The game's space closed under it (the Digital Crown, or the system): the game waits,
+    /// paused, and the launcher offers to go back to it or to end it.
     func immersiveEnded() {
-        LogFiles.log("Immersive space closed")
+        LogFiles.log("Immersive space closed; the game waits paused")
         immersiveOpen = false
         if running {
-            pt_vp_request_quit()
+            message = L("Partida en pausa. Pulsa «Continuar en VR» para volver donde estabas.",
+                        "Game paused. Press “Continue in VR” to go back where you were.")
         }
-        openLauncher?(id: Self.launcherID)
+        showLauncher()
     }
 
     /// The launcher's "end game" button.

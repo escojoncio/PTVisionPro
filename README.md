@@ -53,6 +53,10 @@ Konami or Kojima Productions.
 - **Menus with your hands**: while a menu is open a ray comes out of each hand; pinch thumb and
   index finger to choose. Without a controller, a long pinch of the left hand opens the pause
   menu. With Sense controllers, point and pull the trigger.
+- **Leaving and coming back**: closing the game's space (the Digital Crown) pauses the game;
+  **Continue in VR** in the launcher goes back where you were. Settings › VR › Recentre view puts
+  you back in the corridor where you stand (also done by itself after recentring with a long
+  press of the Digital Crown).
 - **Settings**: everything is in the launcher and in the game's own menu (its PC page becomes a
   Vision Pro page): presets for the Vision Pro M2 and M5 or custom, 90 or 45 frames a second,
   image size with MetalFX upscaling, field of view, foveation, graphics, turning and comfort.
@@ -71,7 +75,7 @@ Konami or Kojima Productions.
 
 ## Building
 
-On a Mac with Xcode 16 (visionOS SDK), `cmake`, `ninja`, `glslc` (`brew install shaderc`) and
+On a Mac with Xcode 26 (visionOS 26 SDK), `cmake`, `ninja`, `glslc` (`brew install shaderc`) and
 `xcodegen`:
 
 ```

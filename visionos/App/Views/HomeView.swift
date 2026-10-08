@@ -4,6 +4,7 @@
 // three glass cards that say what to do when something is missing, and the button that starts
 // it in the immersive space.
 
+import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -167,11 +168,34 @@ struct HomeView: View {
     private var actions: some View {
         HStack(spacing: 16) {
             if model.running {
+                if model.canContinue {
+                    Button {
+                        open()
+                    } label: {
+                        Label(L("Continuar en VR", "Continue in VR"), systemImage: "play.fill")
+                            .padding(.horizontal, 24)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.extraLarge)
+                    .buttonBorderShape(.capsule)
+                }
                 Button(role: .destructive) {
                     model.quitGame()
                 } label: {
                     Label(L("Terminar partida", "End game"), systemImage: "stop.fill")
                         .padding(.horizontal, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.extraLarge)
+                .buttonBorderShape(.capsule)
+            } else if model.needsRelaunch {
+                // The game core starts once per process: playing again takes a fresh start.
+                Button {
+                    LogFiles.log("Closing the app to play again")
+                    exit(0)
+                } label: {
+                    Label(L("Cerrar la app", "Close the app"), systemImage: "arrow.clockwise")
+                        .padding(.horizontal, 24)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.extraLarge)

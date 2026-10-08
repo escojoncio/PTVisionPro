@@ -77,9 +77,16 @@ struct Bridge {
     std::atomic<bool> running{false};
     std::atomic<bool> quit{false};
     std::atomic<bool> foreground{true};
+    // The menu's "recentre" (pt::visionos::RequestRecenter).
+    std::atomic<bool> recenter{false};
+    // How pt_game_main returned (-1 while it runs).
+    std::atomic<int> exit_code{-1};
     pt_vp_stats stats{};
     std::string log_path;
     bool started = false;
+    // The layer of an immersive space opened again while the game runs (the player came back to
+    // it after closing it): the host draws to it once the old one is gone.
+    cp_layer_renderer_t next_layer = nil;
 };
 
 Bridge& bridge() {
@@ -236,7 +243,33 @@ PFN_vkExportMetalObjectsEXT ExportMetalObjects(VkDevice device) {
 
 bool Available() { return true; }
 
-static void RepeatLastFrame(Host& host, Host::Impl& x);
+static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, const FrameLayers& layers, const simd_float4x4& origin_from_device,
+                         bool render, id<MTLCommandBuffer> cb, bool enlarge = true);
+
+// A frame's drawables (visionOS 26): the headset's own first, and while a high-quality video is
+// being recorded a second one for the recording. False when the frame was cancelled: it has no
+// drawables and must not be touched again (not even to end its submission).
+static bool QueryDrawables(cp_frame_t frame, cp_drawable_t& builtin, cp_drawable_t& capture) {
+    builtin = nil;
+    capture = nil;
+    cp_drawable_array_t array = cp_frame_query_drawables(frame);
+    const size_t count = array ? cp_drawable_array_get_count(array) : 0;
+    for (size_t i = 0; i < count; ++i) {
+        cp_drawable_t d = cp_drawable_array_get_drawable(array, i);
+        if (!d) continue;
+        if (!builtin && cp_drawable_get_target(d) == cp_drawable_target_built_in) {
+            builtin = d;
+        } else if (!capture) {
+            capture = d;
+        }
+    }
+    if (!builtin) {
+        builtin = capture;
+        capture = nil;
+    }
+    return builtin != nil;
+}
+
 
 // ---------------------------------------------------------------------------------------------
 
@@ -259,10 +292,24 @@ struct Host::Impl {
     id<MTLDepthStencilState> depth_write = nil;
     std::vector<id<MTLTexture>> textures[4];  // per swapchain: eye 0, eye 1, HUD, screen
 
-    // The frame in flight.
+    // The frame in flight: the drawable the headset shows, and while a high-quality video is
+    // being recorded (visionOS 26) a second one for the recording.
     cp_frame_t frame = nil;
     cp_drawable_t drawable = nil;
+    cp_drawable_t capture = nil;
     bool submitting = false;
+    // The field of view each eye image covers (tangents: left, right, down, up), as the game
+    // drew it: placed by it in the views of any drawable.
+    simd_float4 eye_tangents[2] = {simd_make_float4(-1.0f, 1.0f, -1.0f, 1.0f), simd_make_float4(-1.0f, 1.0f, -1.0f, 1.0f)};
+    bool have_tangents = false;
+    // The game centres on the head again (a new tracking origin, or a jump of the head between
+    // two frames: the system recentred it after a long press of the Digital Crown).
+    bool recenter = false;
+    bool have_head = false;
+    simd_float4x4 last_head = matrix_identity_float4x4;
+    std::chrono::steady_clock::time_point last_head_time;
+    // The space was closed with the game still running: waiting for a new one.
+    bool space_gone = false;
     simd_float4x4 origin_from_device = matrix_identity_float4x4;
     bool anchor_valid = false;
     bool running = false;
@@ -307,14 +354,9 @@ struct Host::Impl {
     bool menu_pinch_fired = false;
     std::chrono::steady_clock::time_point menu_pinch_since;
 
-    // 45 frames a second: every other display frame shows the previous picture again, at the head
-    // pose it was drawn for, and the compositor reprojects it to where the head is by then.
+    // 45 frames a second: the compositor shows each picture over two display refreshes
+    // (reprojecting it to the head's movement) and gives the game twice the time to draw it.
     int divisor = 1;
-    bool repeat_next = false;
-    bool have_last = false;
-    FrameLayers last_layers;
-    ar_device_anchor_t last_anchor = nil;
-    simd_float4x4 last_origin_from_device = matrix_identity_float4x4;
 
     // MetalFX: each eye image enlarged to the size the headset's views have, before composing.
     bool metalfx = false;
@@ -477,6 +519,28 @@ struct Host::Impl {
     }
 };
 
+// ARKit's world tracking (the head), from scratch: at the start, and again for a new immersive
+// space (the providers of a closed one do not come back by themselves).
+static void StartTracking(Host::Impl& x) {
+    if (x.ar_session) ar_session_stop(x.ar_session);
+    x.ar_session = ar_session_create();
+    ar_world_tracking_configuration_t config = ar_world_tracking_configuration_create();
+    x.world_tracking = ar_world_tracking_provider_create(config);
+    ar_data_providers_t providers = ar_data_providers_create_with_data_providers(x.world_tracking, nil);
+    ar_session_run(x.ar_session, providers);
+}
+
+// A drawable shown with nothing in it (black, everything far), for frames the game drew nothing
+// for: what a drawable holds before it is drawn is undefined.
+static void PresentBlank(Host& host, Host::Impl& x, cp_drawable_t drawable) {
+    if (!drawable) return;
+    id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
+    cb.label = @"P.T. blank";
+    ComposeFrame(host, x, drawable, FrameLayers{}, matrix_identity_float4x4, false, cb, false);
+    cp_drawable_encode_present(drawable, cb);
+    [cb commit];
+}
+
 Host::Host() : impl_(std::make_unique<Impl>()) {}
 Host::~Host() { Shutdown(); }
 
@@ -500,13 +564,8 @@ bool Host::Init(const std::string&) {
             impl_->layout == cp_layer_renderer_layout_layered ? "layered" : impl_->layout == cp_layer_renderer_layout_shared ? "shared" : "dedicated",
             impl_->foveated ? "on" : "off");
     // ARKit: the head.
-    impl_->ar_session = ar_session_create();
-    ar_world_tracking_configuration_t config = ar_world_tracking_configuration_create();
-    impl_->world_tracking = ar_world_tracking_provider_create(config);
-    ar_data_providers_t providers = ar_data_providers_create_with_data_providers(impl_->world_tracking, nil);
-    ar_session_run(impl_->ar_session, providers);
+    StartTracking(*impl_);
     impl_->anchor = ar_device_anchor_create();
-    impl_->last_anchor = ar_device_anchor_create();
     return true;
 }
 
@@ -560,18 +619,22 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
         cp_frame_end_update(frame);
         cp_time_wait_until(cp_frame_timing_get_optimal_input_time(timing));
         cp_frame_start_submission(frame);
-        cp_drawable_t drawable = cp_frame_query_drawable(frame);
-        if (drawable) {
-            cp_view_t view = cp_drawable_get_view(drawable, 0);
-            cp_view_texture_map_t map = cp_view_get_view_texture_map(view);
-            const MTLViewport vp = cp_view_texture_map_get_viewport(map);
-            width = static_cast<uint32_t>(vp.width);
-            height = static_cast<uint32_t>(vp.height);
-            // Present nothing: an empty black frame.
-            id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
-            cp_drawable_encode_present(drawable, cb);
-            [cb commit];
+        cp_drawable_t drawable = nil;
+        cp_drawable_t capture = nil;
+        if (!QueryDrawables(frame, drawable, capture)) continue;  // cancelled: not to be touched
+        cp_view_t view = cp_drawable_get_view(drawable, 0);
+        cp_view_texture_map_t map = cp_view_get_view_texture_map(view);
+        const MTLViewport vp = cp_view_texture_map_get_viewport(map);
+        width = static_cast<uint32_t>(vp.width);
+        height = static_cast<uint32_t>(vp.height);
+        // A black frame, with the head where it is if ARKit knows it already.
+        const CFTimeInterval when = cp_time_to_cf_time_interval(cp_frame_timing_get_presentation_time(cp_drawable_get_frame_timing(drawable)));
+        if (ar_world_tracking_provider_query_device_anchor_at_timestamp(x.world_tracking, when, x.anchor) == ar_device_anchor_query_status_success) {
+            cp_drawable_set_device_anchor(drawable, x.anchor);
+            if (capture) cp_drawable_set_device_anchor(capture, x.anchor);
         }
+        PresentBlank(*this, x, drawable);
+        PresentBlank(*this, x, capture);
         cp_frame_end_submission(frame);
     }
     if (!width || !height) {
@@ -636,6 +699,7 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
     }
     x.running = true;
     x.divisor = pt::visionos::Headset().target_fps == 45 ? 2 : 1;
+    cp_layer_renderer_set_minimum_frame_repeat_count(x.layer, x.divisor - 1);
     x.last_stats = std::chrono::steady_clock::now();
     LogInfo("vr: session created");
     return true;
@@ -644,15 +708,15 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
 void Host::Shutdown() {
     Impl& x = *impl_;
     if (x.frame) {
-        if (x.drawable) {
-            id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
-            cp_drawable_encode_present(x.drawable, cb);
-            [cb commit];
+        if (x.submitting && !x.space_gone) {
+            PresentBlank(*this, x, x.drawable);
+            PresentBlank(*this, x, x.capture);
+            cp_frame_end_submission(x.frame);
         }
-        if (x.submitting) cp_frame_end_submission(x.frame);
         x.submitting = false;
         x.frame = nil;
         x.drawable = nil;
+        x.capture = nil;
         frame_open_ = false;
     }
     if (x.ctx && x.ctx->device) {
@@ -677,12 +741,52 @@ void Host::Shutdown() {
 void Host::PollEvents() {
     Impl& x = *impl_;
     if (!x.layer) return;
-    const cp_layer_renderer_state state = cp_layer_renderer_get_state(x.layer);
+    cp_layer_renderer_state state = cp_layer_renderer_get_state(x.layer);
     Bridge& b = bridge();
-    if (state == cp_layer_renderer_state_invalidated || b.quit.load()) {
-        if (!x.exit_requested) LogInfo("vr: the immersive space closed, ending");
+    if (b.quit.load()) {
+        if (!x.exit_requested) LogInfo("vr: the launcher ended the game");
         x.exit_requested = true;
         x.running = false;
+    } else {
+        cp_layer_renderer_t next = nil;
+        {
+            std::lock_guard<std::mutex> lock(b.mutex);
+            next = b.next_layer;
+            b.next_layer = nil;
+        }
+        // The frame in flight, if any, is the old layer's: finished while that layer still
+        // takes frames, else forgotten without touching it.
+        auto forget_frame = [&](bool finish) {
+            if (x.frame && x.submitting && finish) {
+                PresentBlank(*this, x, x.drawable);
+                PresentBlank(*this, x, x.capture);
+                cp_frame_end_submission(x.frame);
+            }
+            x.frame = nil;
+            x.drawable = nil;
+            x.capture = nil;
+            x.submitting = false;
+            frame_open_ = false;
+            x.have_head = false;
+        };
+        if (next) {
+            // A new immersive space (the player came back to the game): drawn to from now on,
+            // with the head tracked again from a new origin.
+            forget_frame(state != cp_layer_renderer_state_invalidated && !x.space_gone);
+            x.layer = next;
+            x.space_gone = false;
+            StartTracking(x);
+            x.recenter = true;
+            cp_layer_renderer_set_minimum_frame_repeat_count(x.layer, x.divisor - 1);
+            state = cp_layer_renderer_get_state(x.layer);
+            LogInfo("vr: a new immersive space; drawing to it (tracking started again)");
+        } else if (state == cp_layer_renderer_state_invalidated && !x.space_gone) {
+            // The space closed (the Digital Crown, or the system) with the game still running:
+            // it waits, paused, for the launcher to open a new one.
+            LogInfo("vr: the immersive space closed; the game waits for a new one");
+            x.space_gone = true;
+            forget_frame(false);
+        }
     }
     const bool focused = state == cp_layer_renderer_state_running && b.foreground.load();
     x.was_focused = focused;
@@ -703,15 +807,13 @@ bool Host::WaitFrame() {
     if (x.frame) {
         // A frame left open by a loop iteration that drew nothing.
         if (x.submitting) {
-            if (x.drawable) {
-                id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
-                cp_drawable_encode_present(x.drawable, cb);
-                [cb commit];
-            }
+            PresentBlank(*this, x, x.drawable);
+            PresentBlank(*this, x, x.capture);
             cp_frame_end_submission(x.frame);
         }
         x.frame = nil;
         x.drawable = nil;
+        x.capture = nil;
         x.submitting = false;
     }
     const cp_layer_renderer_state state = cp_layer_renderer_get_state(x.layer);
@@ -722,10 +824,11 @@ bool Host::WaitFrame() {
         return false;
     }
     if (state != cp_layer_renderer_state_running) {
+        // Closed (waiting for a new space) or not running yet: no frames, and no busy loop.
+        std::this_thread::sleep_for(std::chrono::milliseconds(state == cp_layer_renderer_state_invalidated ? 50 : 5));
         should_render_ = false;
         return false;
     }
-    if (x.repeat_next) RepeatLastFrame(*this, x);
     cp_frame_t frame = cp_layer_renderer_query_next_frame(x.layer);
     if (!frame) {
         should_render_ = false;
@@ -753,9 +856,8 @@ bool Host::BeginFrame() {
     if (!x.frame) return false;
     cp_frame_start_submission(x.frame);
     x.submitting = true;
-    x.drawable = cp_frame_query_drawable(x.frame);
-    if (!x.drawable) {
-        cp_frame_end_submission(x.frame);
+    if (!QueryDrawables(x.frame, x.drawable, x.capture)) {
+        // Cancelled by the compositor: the frame is not to be touched again.
         x.submitting = false;
         x.frame = nil;
         frame_open_ = false;
@@ -767,6 +869,7 @@ bool Host::BeginFrame() {
     x.anchor_valid = ar_world_tracking_provider_query_device_anchor_at_timestamp(x.world_tracking, when, x.anchor) == ar_device_anchor_query_status_success;
     if (x.anchor_valid) {
         cp_drawable_set_device_anchor(x.drawable, x.anchor);
+        if (x.capture) cp_drawable_set_device_anchor(x.capture, x.anchor);
         x.origin_from_device = ar_anchor_get_origin_from_anchor_transform(x.anchor);
     }
     frame_open_ = true;
@@ -793,10 +896,31 @@ void Host::LocateViews() {
         const float k = x.fov_scale;
         eyes_[i].tangents = glm::vec4(tan_left, tan_right, tan_up, tan_down) * k;
         eyes_[i].angles = glm::vec4(std::atan(tan_left * k), std::atan(tan_right * k), std::atan(tan_up * k), std::atan(tan_down * k));
+        x.eye_tangents[i] = simd_make_float4(tan_left, tan_right, tan_down, tan_up) * k;
     }
+    x.have_tangents = true;
     head_.orientation = QuatOf(x.origin_from_device);
     head_.position = PositionOf(x.origin_from_device);
     views_valid_ = true;
+    // A jump of the head between two frames a moment apart is no movement of the player's: the
+    // system moved the origin (a long press of the Digital Crown recentres it). The game
+    // centres on the head again, as at the start.
+    const auto now = std::chrono::steady_clock::now();
+    if (x.have_head && now - x.last_head_time < std::chrono::milliseconds(150)) {
+        const float dt = std::max(std::chrono::duration<float>(now - x.last_head_time).count(), 1.0f / 90.0f);
+        const simd_float4 moved = x.origin_from_device.columns[3] - x.last_head.columns[3];
+        const float distance = std::sqrt(moved.x * moved.x + moved.y * moved.y + moved.z * moved.z);
+        const float cosine = std::min(1.0f, std::fabs(glm::dot(QuatOf(x.last_head), QuatOf(x.origin_from_device))));
+        const float turned = glm::degrees(2.0f * std::acos(cosine));
+        // Faster than any head moves: 4 m/s, 1500 degrees/s.
+        if ((distance > 0.3f && distance / dt > 4.0f) || (turned > 30.0f && turned / dt > 1500.0f)) {
+            LogInfo("vr: the head jumped {:.2f} m / {:.0f} degrees in {:.0f} ms (the origin moved); centring again", distance, turned, dt * 1000.0f);
+            x.recenter = true;
+        }
+    }
+    x.have_head = true;
+    x.last_head = x.origin_from_device;
+    x.last_head_time = now;
 }
 
 void Host::SyncActions() {
@@ -996,8 +1120,8 @@ void Host::Release(Swapchain& swapchain) { swapchain.acquired = false; }
 // HUD as quads in the world. `origin_from_device` is the head pose the drawable is set to (the
 // one the eye images were drawn for). Encoded into `cb`; the caller presents.
 static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, const FrameLayers& layers, const simd_float4x4& origin_from_device,
-                         bool render, id<MTLCommandBuffer> cb, bool enlarge = true) {
-    // MetalFX first: the eye images enlarged (a repeated frame keeps the enlarged images it has).
+                         bool render, id<MTLCommandBuffer> cb, bool enlarge) {
+    // MetalFX first: the eye images enlarged (a recording's drawable reuses the enlarged images).
     const bool use_enlarged = x.metalfx && layers.projection;
     if (use_enlarged && enlarge && render) {
         for (int eye = 0; eye < 2; ++eye) {
@@ -1052,13 +1176,16 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 u.alpha = 1.0f;
                 u.opaque = 1.0f;
                 u.pad[0] = x.sharpen;
-                // Where the eye's (possibly narrowed) field of view falls in this view.
+                // Where the field of view the eye image covers falls in this view (the headset's
+                // own views: the view's, narrowed by the setting; a recording's: placed by it).
                 const simd_float4x4 proj = cp_drawable_compute_projection(drawable, cp_axis_direction_convention_right_up_back, v);
-                const float k = x.fov_scale;
                 const float m00 = proj.columns[0][0], m20 = proj.columns[2][0], m11 = proj.columns[1][1], m21 = proj.columns[2][1];
-                const float l = (m20 - 1.0f) / m00 * k, r = (m20 + 1.0f) / m00 * k;
-                const float d = (m21 - 1.0f) / m11 * k, t = (m21 + 1.0f) / m11 * k;
-                u.p0 = simd_make_float4(m00 * l - m20, m11 * d - m21, m00 * r - m20, m11 * t - m21);
+                simd_float4 e = x.eye_tangents[v];
+                if (!x.have_tangents) {
+                    const float k = x.fov_scale;
+                    e = simd_make_float4((m20 - 1.0f) / m00, (m20 + 1.0f) / m00, (m21 - 1.0f) / m11, (m21 + 1.0f) / m11) * k;
+                }
+                u.p0 = simd_make_float4(m00 * e.x - m20, m11 * e.z - m21, m00 * e.y - m20, m11 * e.w - m21);
                 [enc setRenderPipelineState:x.eye_pipeline];
                 [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
                 [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
@@ -1119,6 +1246,7 @@ void Host::EndFrame(const FrameLayers& layers) {
         if (x.submitting) cp_frame_end_submission(x.frame);
         x.submitting = false;
         x.frame = nil;
+        x.capture = nil;
         frame_open_ = false;
         return;
     }
@@ -1128,6 +1256,15 @@ void Host::EndFrame(const FrameLayers& layers) {
     ComposeFrame(*this, x, x.drawable, layers, x.origin_from_device, should_render_, cb);
     cp_drawable_encode_present(x.drawable, cb);
     [cb commit];
+    if (x.capture) {
+        // The recording's drawable after the headset's (which comes first), with the images
+        // MetalFX already enlarged.
+        id<MTLCommandBuffer> capture_cb = [x.mtl_queue commandBuffer];
+        capture_cb.label = @"P.T. capture";
+        ComposeFrame(*this, x, x.capture, layers, x.origin_from_device, should_render_, capture_cb, false);
+        cp_drawable_encode_present(x.capture, capture_cb);
+        [capture_cb commit];
+    }
     cp_frame_end_submission(x.frame);
     x.submitting = false;
     x.loop_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - x.frame_start).count();
@@ -1145,50 +1282,27 @@ void Host::EndFrame(const FrameLayers& layers) {
             x.panel_centre = layers.screen_position;
             x.panel_size = layers.screen_size;
         }
-        // Kept to be shown again on the next display frame at 45 frames a second.
-        if (x.divisor > 1 && x.anchor_valid) {
-            x.last_layers = layers;
-            x.last_origin_from_device = x.origin_from_device;
-            std::swap(x.anchor, x.last_anchor);
-            x.have_last = true;
-            x.repeat_next = true;
-        }
     }
     x.frame = nil;
     x.drawable = nil;
+    x.capture = nil;
     frame_open_ = false;
-}
-
-// The display frame in between at 45 frames a second: the last picture again, with the head pose
-// it was drawn for, so the compositor turns it to where the head is now.
-static void RepeatLastFrame(Host& host, Host::Impl& x) {
-    x.repeat_next = false;
-    if (!x.have_last || cp_layer_renderer_get_state(x.layer) != cp_layer_renderer_state_running) return;
-    cp_frame_t frame = cp_layer_renderer_query_next_frame(x.layer);
-    if (!frame) return;
-    cp_frame_timing_t timing = cp_frame_predict_timing(frame);
-    cp_frame_start_update(frame);
-    cp_frame_end_update(frame);
-    cp_time_wait_until(cp_frame_timing_get_optimal_input_time(timing));
-    cp_frame_start_submission(frame);
-    cp_drawable_t drawable = cp_frame_query_drawable(frame);
-    if (drawable) {
-        cp_drawable_set_device_anchor(drawable, x.last_anchor);
-        id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
-        cb.label = @"P.T. repeat";
-        ComposeFrame(host, x, drawable, x.last_layers, x.last_origin_from_device, true, cb, false);
-        cp_drawable_encode_present(drawable, cb);
-        [cb commit];
-    }
-    cp_frame_end_submission(frame);
 }
 
 void Host::SetPointerWanted(bool wanted) { impl_->pointer_wanted = wanted; }
 
+bool Host::TakeRecenter() {
+    Impl& x = *impl_;
+    const bool asked = bridge().recenter.exchange(false);
+    const bool wanted = x.recenter || asked;
+    x.recenter = false;
+    return wanted;
+}
+
 void Host::SetFrameDivisor(int divisor) {
     Impl& x = *impl_;
     x.divisor = std::clamp(divisor, 1, 2);
-    if (x.divisor == 1) x.repeat_next = false;
+    if (x.layer) cp_layer_renderer_set_minimum_frame_repeat_count(x.layer, x.divisor - 1);
     LogInfo("vr: {} frames a second", x.divisor == 2 ? 45 : 90);
 }
 
@@ -1390,6 +1504,11 @@ EyeTimes& Times() {
 }
 }  // namespace
 
+void RequestRecenter() {
+    pt::xr::bridge().recenter = true;
+    LogInfo("vr: recentre asked for in the menu");
+}
+
 void ReportEye(int eye, float gpu_ms, const float pass_ms[6], float cpu_ms) {
     if (eye < 0 || eye > 1) return;
     EyeTimes& t = Times();
@@ -1456,6 +1575,7 @@ void GameThread() {
     g_argv.push_back(nullptr);
     const int code = pt_game_main(static_cast<int>(g_argv.size() - 1), g_argv.data());
     pt::LogInfo("visionos: the game ended with code {}", code);
+    b.exit_code = code;
     b.running = false;
 }
 
@@ -1507,6 +1627,16 @@ int pt_vp_start(void* layer_renderer, const char* const* argv, int argc, const c
 void pt_vp_request_quit(void) { pt::xr::bridge().quit = true; }
 
 bool pt_vp_running(void) { return pt::xr::bridge().running.load(); }
+
+int pt_vp_exit_code(void) { return pt::xr::bridge().exit_code.load(); }
+
+int pt_vp_attach_layer(void* layer_renderer) {
+    pt::xr::Bridge& b = pt::xr::bridge();
+    if (!layer_renderer || !b.running.load()) return 1;
+    std::lock_guard<std::mutex> lock(b.mutex);
+    b.next_layer = (__bridge cp_layer_renderer_t)layer_renderer;
+    return 0;
+}
 
 void pt_vp_set_controller(const pt_vp_controller* state) {
     if (!state) return;

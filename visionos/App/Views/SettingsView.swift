@@ -126,12 +126,21 @@ struct SettingsView: View {
     private var headsetSection: some View {
         Section {
             Toggle(L("Renderizado foveado", "Foveated rendering"), isOn: bool(\.foveation))
+            Picker(L("Calidad del visor", "Headset render quality"), selection: float(\.compositorQuality)) {
+                Text(L("La del sistema", "System")).tag(Float(0))
+                Text("60 %").tag(Float(0.6))
+                Text("70 %").tag(Float(0.7))
+                Text("80 %").tag(Float(0.8))
+                Text("90 %").tag(Float(0.9))
+                Text("100 %").tag(Float(1.0))
+            }
+            .disabled(!model.settings.foveation)
             Toggle(L("Escalado MetalFX", "MetalFX upscaling"), isOn: bool(\.metalFX))
         } header: {
             Text(L("Visor", "Headset"))
         } footer: {
-            Text(L("Foveado: máxima nitidez donde miras y menos detalle alrededor. MetalFX: cada ojo se dibuja al tamaño de imagen y se amplía con nitidez a la resolución del visor (útil por debajo del 100 %).",
-                   "Foveation: sharpest where you look, less detail around it. MetalFX: each eye is drawn at the image size and enlarged sharply to the headset's resolution (useful below 100 %)."))
+            Text(L("Foveado: máxima nitidez donde miras y menos detalle alrededor. Calidad del visor (con foveado): la resolución de las imágenes que compone el visor; más alta es más nítida pero usa más memoria, y el juego dibuja a partir de ella (la escala de resolución es relativa a esta). MetalFX: cada ojo se dibuja al tamaño de imagen y se amplía con nitidez a la resolución del visor (útil por debajo del 100 %).",
+                   "Foveation: sharpest where you look, less detail around it. Headset render quality (with foveation): the resolution of the pictures the headset composes; higher is sharper but uses more memory, and the game draws from it (the resolution scale is relative to it). MetalFX: each eye is drawn at the image size and enlarged sharply to the headset's resolution (useful below 100 %)."))
         }
     }
 
@@ -147,6 +156,7 @@ struct SettingsView: View {
                     Text("15°").tag(15)
                     Text("30°").tag(30)
                     Text("45°").tag(45)
+                    Text("60°").tag(60)
                     Text("90°").tag(90)
                 }
             } else {
