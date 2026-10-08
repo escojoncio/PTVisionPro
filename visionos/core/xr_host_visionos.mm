@@ -28,6 +28,7 @@
 #include <os/proc.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include <exception>
 #include <signal.h>
 #include <unistd.h>
 
@@ -1841,7 +1842,33 @@ void InstallCrashSignals(const std::string& log_path) {
     action.sa_sigaction = OnCrashSignal;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigemptyset(&action.sa_mask);
-    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP}) sigaction(sig, &action, nullptr);
+    // SIGABRT too: the game reports abort() and std::terminate only on Windows.
+    for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGABRT}) sigaction(sig, &action, nullptr);
+    // An uncaught C++ exception: its message, then abort() (whose handler writes the stack,
+    // still the thrower's: nothing has been unwound).
+    std::set_terminate([] {
+        std::string what = "no active exception";
+        if (const std::exception_ptr error = std::current_exception()) {
+            try {
+                std::rethrow_exception(error);
+            } catch (const std::exception& e) {
+                what = std::string("exception: ") + e.what();
+            } catch (...) {
+                what = "exception of an unknown type";
+            }
+        }
+        CrashWrite("[  crash  ] error crash: std::terminate, uncaught ");
+        CrashWrite(what.c_str());
+        CrashWrite("\n");
+        std::abort();
+    });
+    // exit() from anywhere: who called it.
+    std::atexit([] {
+        CrashWrite("[  exit   ] warn  exit: exit() called; stack:\n");
+        void* frames[48];
+        const int count = backtrace(frames, 48);
+        if (g_crash_fd >= 0) backtrace_symbols_fd(frames, count, g_crash_fd);
+    });
 }
 
 struct MemoryNow {
@@ -1863,7 +1890,9 @@ MemoryNow QueryMemory() {
 // The game thread's stack while it is stuck: stopped for a moment, its frame pointers walked
 // (read with vm_read_overwrite, so a bad pointer only ends the walk), then let go before the
 // addresses are named (dladdr takes locks the stopped thread could hold).
-void DumpGameThread(double stalled_seconds) {
+// compact: one line of image offsets (named offline from the IPA's symbol table), for the
+// samples taken while a load runs; otherwise one line per frame with names.
+void DumpGameThread(double stalled_seconds, size_t max_frames = 48, bool compact = false) {
     const thread_act_t thread = pt::visionos::g_game_thread.load();
     if (!thread) return;
     // Nothing between suspend and resume may allocate or lock: the stopped thread could hold the
@@ -1877,7 +1906,7 @@ void DumpGameThread(double stalled_seconds) {
         pcs[n++] = static_cast<uintptr_t>(arm_thread_state64_get_pc(state));
         pcs[n++] = static_cast<uintptr_t>(arm_thread_state64_get_lr(state));
         uintptr_t fp = static_cast<uintptr_t>(arm_thread_state64_get_fp(state));
-        while (n < 48 && fp) {
+        while (n < std::min<size_t>(max_frames, 48) && fp) {
             uintptr_t frame[2] = {0, 0};
             vm_size_t got = 0;
             if (vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(fp), sizeof(frame), reinterpret_cast<vm_address_t>(frame), &got) !=
@@ -1891,6 +1920,22 @@ void DumpGameThread(double stalled_seconds) {
         }
     }
     thread_resume(thread);
+    if (compact) {
+        std::string line;
+        for (size_t i = 0; i < n; ++i) {
+            Dl_info info{};
+            if (dladdr(reinterpret_cast<void*>(pcs[i]), &info) && info.dli_fbase == g_main_image) {
+                line += std::format(" +0x{:x}", pcs[i] - reinterpret_cast<uintptr_t>(info.dli_fbase));
+            } else if (info.dli_fname) {
+                const char* image = std::strrchr(info.dli_fname, '/');
+                line += std::format(" {}", image ? image + 1 : info.dli_fname);
+            } else {
+                line += " ?";
+            }
+        }
+        pt::LogInfo("where: loop {:.1f} s busy, game thread at{}", stalled_seconds, line);
+        return;
+    }
     pt::LogWarn("watchdog: the game loop has not run for {:.0f} s; the game thread is at:", stalled_seconds);
     for (size_t i = 0; i < n; ++i) {
         Dl_info info{};
@@ -1923,15 +1968,16 @@ void WatchMemory() {
                     m.footprint_mb, m.available_mb);
     });
     dispatch_resume(pressure);
-    // A line whenever the footprint moves by 256 MB, and every check once it runs low: the last
+    // A line whenever the footprint moves by 128 MB, and every check once it runs low: the last
     // lines before a silent end say whether memory ran out.
     uint64_t logged = start.footprint_mb;
     uint64_t peak = start.footprint_mb;
     auto heartbeat = std::chrono::steady_clock::now();
     auto last_dump = heartbeat;
+    auto last_sample = heartbeat;
     int64_t dumped_loop = -1;
     for (;;) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         const MemoryNow m = QueryMemory();
         peak = std::max(peak, m.footprint_mb);
         const auto now = std::chrono::steady_clock::now();
@@ -1949,8 +1995,13 @@ void WatchMemory() {
             dumped_loop = loop;
             last_dump = now;
             DumpGameThread(stalled);
+        } else if (stalled > 0.5 && stalled <= 10.0 && pt::visionos::g_game_thread.load() && now - last_sample >= std::chrono::milliseconds(500)) {
+            // A load in progress: where it is, twice a second (the last of these lines says what
+            // the game was doing if the process then ends without a word).
+            last_sample = now;
+            DumpGameThread(stalled, 12, true);
         }
-        const bool moved = m.footprint_mb > logged + 256 || m.footprint_mb + 256 < logged;
+        const bool moved = m.footprint_mb > logged + 128 || m.footprint_mb + 128 < logged;
         if (moved || m.available_mb < 600) {
             pt::LogInfo("memory: footprint {} MB, available {} MB, peak {} MB", m.footprint_mb, m.available_mb, peak);
             logged = m.footprint_mb;
