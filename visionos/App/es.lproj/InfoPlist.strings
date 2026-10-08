@@ -1,0 +1,5 @@
+/* Textos de los permisos que visionOS pide para P.T. VR (en español). */
+"NSWorldSensingUsageDescription" = "El seguimiento de la cabeza sitúa al jugador en el pasillo.";
+"NSHandsTrackingUsageDescription" = "Las manos pueden sostener la linterna y señalar en el juego.";
+"NSMicrophoneUsageDescription" = "P.T. escucha tu voz para la radio del juego";
+"NSBluetoothAlwaysUsageDescription" = "Los mandos de PlayStation se conectan por Bluetooth.";
