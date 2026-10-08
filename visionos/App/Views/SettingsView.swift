@@ -185,6 +185,7 @@ struct SettingsView: View {
     private var gameSection: some View {
         Section {
             Toggle(L("Reconocimiento de voz (radio)", "Voice recognition (radio)"), isOn: bool(\.voiceRecognition))
+            Toggle(L("Escenas inmersivas", "Immersive cutscenes"), isOn: bool(\.immersiveCutscenes))
             Picker(L("Idioma", "Language"), selection: Binding(
                 get: { AppLanguage(rawValue: model.settings.language) ?? .system },
                 set: { model.setLanguage($0) })) {
@@ -195,7 +196,8 @@ struct SettingsView: View {
         } header: {
             Text(L("Juego", "Game"))
         } footer: {
-            Text(L("El idioma es el de la app y el del juego.", "The language is the app's and the game's."))
+            Text(L("El idioma es el de la app y el del juego. Escenas inmersivas: las escenas se ven en 3D desde su cámara, con la cabeza libre; sin ellas, en una pantalla virtual. Se aplica al empezar la partida.",
+                   "The language is the app's and the game's. Immersive cutscenes: scenes are shown in 3D from their camera, with the head free; without them, on a virtual screen. Applies when the game starts."))
         }
     }
 

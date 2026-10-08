@@ -60,6 +60,8 @@ struct PTSettings: Codable, Equatable {
     /// Show the hands (and the controller in them) in front of the game.
     var showHands = false
     var pauseWhenAway = true
+    /// Cutscenes drawn in stereo from the scene's camera (off: on a big virtual screen).
+    var immersiveCutscenes = true
 
     // Game.
     var voiceRecognition = true
@@ -207,7 +209,7 @@ struct PTSettings: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case preset, resolutionScale, dynamicResolution, targetFPS, fov, graphicsPreset, shadows
         case ssao, bloom, reflections, foveation, compositorQuality, metalFX, sharpen
-        case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway
+        case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
 
@@ -236,6 +238,7 @@ struct PTSettings: Codable, Equatable {
         flashlightHand = (try? c.decodeIfPresent(Int.self, forKey: .flashlightHand)) ?? base.flashlightHand
         showHands = (try? c.decodeIfPresent(Bool.self, forKey: .showHands)) ?? base.showHands
         pauseWhenAway = (try? c.decodeIfPresent(Bool.self, forKey: .pauseWhenAway)) ?? base.pauseWhenAway
+        immersiveCutscenes = (try? c.decodeIfPresent(Bool.self, forKey: .immersiveCutscenes)) ?? base.immersiveCutscenes
         voiceRecognition = (try? c.decodeIfPresent(Bool.self, forKey: .voiceRecognition)) ?? base.voiceRecognition
         language = (try? c.decodeIfPresent(String.self, forKey: .language)) ?? base.language
         showPerformanceOverlay = (try? c.decodeIfPresent(Bool.self, forKey: .showPerformanceOverlay)) ?? base.showPerformanceOverlay
@@ -278,6 +281,7 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_FLASHLIGHT_HAND=\(flashlightHand)",
             "PT_VP_SHOW_HANDS=\(flag(showHands))",
             "PT_VP_PAUSE_AWAY=\(flag(pauseWhenAway))",
+            "PT_VP_CUTSCENES=\(flag(immersiveCutscenes))",
             "PT_VP_VOICE=\(flag(voiceRecognition))",
             "PT_VP_LANGUAGE=\(resolvedLanguage)",
             "PT_VP_OVERLAY=\(flag(showPerformanceOverlay))",
