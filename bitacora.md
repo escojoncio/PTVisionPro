@@ -70,7 +70,9 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - Usuario: la app entera se cierra (no se queda colgada) y no aparece informe en Datos de análisis.
   Hipótesis principal: memoria. Objetivos de escena a 3419x2353 (~25 RGBA16F/LDR a tamaño completo en
   `scene_renderer.cpp:620-654`, ≈1 GB+, 4x lo del iPad a 1080p) + texturas del pasillo.
-- Build 11 (run 37820846570 cancelado para añadir el vigilante; relanzada): diagnóstico, sin cambio de comportamiento del juego:
+- **Build 11 (run_number 15): OK** → `releases/download/build-15/PTVisionPro-15.ipa`. Build 12 (run_number 16, en curso):
+  solo quita la asignación de memoria con el hilo del juego suspendido en `DumpGameThread` (array fijo).
+  Build 11: diagnóstico, sin cambio de comportamiento del juego:
   - Vigilante: `pt::visionos::LoopTick()` en `Host::PollEvents`/`WaitFrame`; `g_game_thread` =
     `mach_thread_self()` en `GameThread`. En `WatchMemory`: línea `alive:` cada 10 s (footprint,
     disponible, pico, segundos desde el último bucle); si el bucle lleva >10 s parado,
