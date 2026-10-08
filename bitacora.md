@@ -70,6 +70,18 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - Usuario: la app entera se cierra (no se queda colgada) y no aparece informe en Datos de análisis.
   Hipótesis principal: memoria. Objetivos de escena a 3419x2353 (~25 RGBA16F/LDR a tamaño completo en
   `scene_renderer.cpp:620-654`, ≈1 GB+, 4x lo del iPad a 1080p) + texturas del pasillo.
+- **Prueba build 12 (preset M2): mismo cierre al cargar el pasillo.** Límite real 8191 MB (la firma
+  conserva increased-memory-limit); al morir footprint 3040 MB, disponible 5151 MB; sin presión de
+  memoria, sin señal capturada, muerte antes de 10 s → no es memoria. Sospecha: `abort()`/
+  `std::terminate` (el juego solo los registra en Windows: `InstallCrashReporting` va bajo
+  `#ifdef _WIN32` en `main.cpp`) o `exit()`.
+- Build 13 (run_number 17, lanzada): `InstallCrashSignals` añade SIGABRT, `std::set_terminate`
+  (mensaje de la excepción + abort → pila del que lanzó) y `std::atexit` (pila de quien llama a exit).
+  Vigilante cada 100 ms, umbral 128 MB; mientras el bucle lleva >0,5 s parado, cada 0,5 s una línea
+  `where: loop X s busy, game thread at +0x... +0x...` (offsets en la imagen de la app).
+  Simbolizar: el binario de la IPA conserva la tabla de símbolos →
+  `unzip PTVisionPro-N.ipa Payload/PTVisionPro.app/PTVisionPro`, luego
+  `llvm-symbolizer --obj=PTVisionPro 0x1<offset>` (dirección = 0x100000000 + offset) o `llvm-nm -C -n`.
 - **Build 11 (run_number 15): OK** → `releases/download/build-15/PTVisionPro-15.ipa`. **Build 12 (run_number 16): OK** → `releases/download/build-16/PTVisionPro-16.ipa` (la recomendada):
   solo quita la asignación de memoria con el hilo del juego suspendido en `DumpGameThread` (array fijo).
   Build 11: diagnóstico, sin cambio de comportamiento del juego:
