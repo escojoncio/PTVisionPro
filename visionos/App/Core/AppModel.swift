@@ -140,6 +140,9 @@ final class AppModel {
     func gameEnded(code: Int32 = 0) {
         guard running || immersiveOpen else { return }
         running = false
+        // The pause message ("press Continue in VR") no longer applies: the hint to reopen the
+        // app shows instead. Any other message (why it could not start) stays.
+        if message == Self.pausedMessage { message = nil }
         LogFiles.log("Game ended (code \(code))")
         if code != 0 && message == nil {
             let reason = LogFiles.lastCoreError()
@@ -157,14 +160,18 @@ final class AppModel {
         showLauncher()
     }
 
+    static var pausedMessage: String {
+        L("Partida en pausa. Pulsa «Continuar en VR» para volver donde estabas.",
+          "Game paused. Press “Continue in VR” to go back where you were.")
+    }
+
     /// The game's space closed under it (the Digital Crown, or the system): the game waits,
     /// paused, and the launcher offers to go back to it or to end it.
     func immersiveEnded() {
         LogFiles.log("Immersive space closed; the game waits paused")
         immersiveOpen = false
         if running {
-            message = L("Partida en pausa. Pulsa «Continuar en VR» para volver donde estabas.",
-                        "Game paused. Press “Continue in VR” to go back where you were.")
+            message = Self.pausedMessage
         }
         showLauncher()
     }

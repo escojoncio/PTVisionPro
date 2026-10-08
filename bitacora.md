@@ -97,6 +97,21 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   pasa 2,0 s sin enviar fotogramas** (mensaje de sistema "hasn't been sending frames for 2.0s"; mismo caso
   documentado en Unity para cargas y compilación de shaders). En `VrPlay::BeginLoop` el juego abre el frame
   (WaitFrame+BeginFrame) ANTES de su update, así que la carga ocurre con un frame abierto.
+- **Prueba build 14: el juego ya se juega** (keeper cubre cargas de 1,9 s y 0,3 s; menús, ajustes en vivo y
+  botones con las manos OK). Problemas: (1) ojo derecho deforme (juego y pantalla virtual); (2) 11 fps:
+  GPU 85 ms ambos ojos a 3419x2353 por ojo (sombras 11 solo izq.; por ojo: gbuffer 6, lighting 13, compose 13,
+  post 5); gráficos al máximo solo −2 fps → limitado por píxeles; (3) escenas en pantalla virtual (2,8 m a
+  2,5 m, `kScreenWidth/kScreenDistance` en `vr_play.cpp`) se ven pequeñas; (4) tras «Terminar partida» quedaba
+  el mensaje de pausa sin botón «Continuar».
+- **Build 15 (lanzada):**
+  - Ojo derecho: en layout `layered` hay UNA textura array (slice por ojo) y su `MTLRasterizationRateMap` tiene
+    una capa por slice; una pasada por vista con `slice` fijo y sin array usaba la capa 0 (ojo izq.) para los
+    dos ojos. Ahora `ComposeFrame` hace una pasada por textura del drawable (`renderTargetArrayLength` =
+    `arrayLength`, 1 si 2D), `setViewports` con las vistas de esa textura, y cada draw elige slice y viewport
+    con `Uniforms.target` (`uint4`, al final del struct en MSL y C++) → `[[render_target_array_index]]` /
+    `[[viewport_array_index]]` en los tres vertex shaders. Pipelines con `inputPrimitiveTopology = Triangle`.
+    Log único al empezar: `vr: drawable N view(s), N texture(s) (array, N slice(s)), N foveation map(s) of N layer(s)`.
+  - Launcher: `AppModel.gameEnded` borra solo `pausedMessage` (estático); el resto de mensajes se mantiene.
 - **Build 14 (run_number 18): OK** → `releases/download/build-18/PTVisionPro-18.ipa` (la recomendada; sin probar en el visor). "Keeper" de fotogramas (`xr_host_visionos.mm`):
   - `Impl::mutex` + `GameCall()` (sella `game_call_ns` antes y después de bloquear) en PollEvents, WaitFrame,
     BeginFrame, LocateViews, SyncActions, Acquire, EndFrame, SetFrameDivisor. Ninguno llama a otro con guarda.
