@@ -24,7 +24,8 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Fallo detectado en revisión: `Host::CreateInstance` añadía `VK_EXT_metal_objects` (extensión
   de DISPOSITIVO) a la instancia → `vkCreateInstance` fallaría. Corregido en build 6
   (la instancia se crea tal cual la pide el motor; la extensión solo en `CreateDevice`).
-- Build 6: ese arreglo. Primera prueba real en el visor pendiente.
+- **Build 6 (run_number 9): OK** → `releases/download/build-9/PTVisionPro-9.ipa`. Primera prueba
+  real en el visor pendiente (VPS4, detección, arranque VR, menú Vision Pro, rayo de mano, mandos).
 - (Build 5:) VPS4 + arreglo de enlazado. Log completo: `git show origin/ci-logs:run-N.log`
   (`latest.log` por la API se trunca a ~900 KB).
 - Logs de CI: `gh api "repos/escojoncio/PTVisionPro/contents/latest.log?ref=ci-logs" --jq .content | base64 -d`
