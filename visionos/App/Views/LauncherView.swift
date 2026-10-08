@@ -36,6 +36,10 @@ struct LauncherView: View {
         .onAppear {
             model.openLauncher = openWindow
             model.dismissImmersive = dismissImmersiveSpace
+            model.launcherVisible = true
+        }
+        .onDisappear {
+            model.launcherVisible = false
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {

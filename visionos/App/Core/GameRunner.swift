@@ -15,6 +15,8 @@ final class GameRunner: @unchecked Sendable {
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private weak var model: AppModel?
+    /// The layer the game draws to now, to notice its space closing (the core keeps it alive).
+    private weak var layer: LayerRenderer?
 
     private init() {}
 
@@ -25,7 +27,35 @@ final class GameRunner: @unchecked Sendable {
     static func start(layerRenderer: LayerRenderer, settings: PTSettings, model: AppModel) {
         let configuration = layerRenderer.configuration
         LogFiles.log("Immersive space: layout \(configuration.layout == .layered ? "layered" : "dedicated"), "
-                     + "foveation \(configuration.isFoveationEnabled), colour \(configuration.colorFormat.rawValue)")
+                     + "foveation \(configuration.isFoveationEnabled), colour \(configuration.colorFormat.rawValue), "
+                     + "render quality \(layerRenderer.renderQuality.rawValue) (max \(configuration.maxRenderQuality.rawValue))")
+        // The render quality the settings ask for (with foveation; 0 leaves the system's).
+        if configuration.isFoveationEnabled && settings.compositorQuality > 0 {
+            let quality = min(settings.compositorQuality, configuration.maxRenderQuality.rawValue)
+            layerRenderer.renderQuality = .init(quality)
+            LogFiles.log("Render quality set to \(quality)")
+        }
+        listen(to: layerRenderer)
+
+        // The game is already running (its space was closed and opened again): it goes on in
+        // the new one, from where it was paused.
+        if model.running {
+            let pointer = Unmanaged.passUnretained(layerRenderer).toOpaque()
+            if pt_vp_attach_layer(pointer) == 0 {
+                LogFiles.log("The game goes on in the new immersive space")
+                shared.layer = layerRenderer
+                model.message = nil
+                // The hands and the Sense controllers are tracked again (a closed space's
+                // tracking does not come back by itself; the Sense ones restart on the next tick).
+                HandTracking.shared.stop()
+                HandTracking.shared.start()
+                SenseTracking.shared.stop()
+            } else {
+                LogFiles.log("The game had ended before its space opened again")
+                model.gameEnded(code: pt_vp_exit_code())
+            }
+            return
+        }
 
         let gamePath = model.gameData?.folder.path ?? ""
         var arguments = ["--game", gamePath]
@@ -36,27 +66,6 @@ final class GameRunner: @unchecked Sendable {
         let environment = settings.environment
         LogFiles.log("Starting the core: \(arguments.joined(separator: " "))")
 
-        // Looks and pinches, for the game's menus: the selection ray of each one to the core,
-        // which clicks the menu where a pinch starts and ends on it.
-        layerRenderer.onSpatialEvent = { events in
-            for event in events {
-                let phase: Int32
-                switch event.phase {
-                case .active: phase = 0
-                case .ended: phase = 1
-                default: phase = 2
-                }
-                guard let ray = event.selectionRay else {
-                    if phase != 0 {
-                        pt_vp_spatial_event(phase, 0, 0, 0, 0, 0, -1)
-                    }
-                    continue
-                }
-                pt_vp_spatial_event(phase,
-                                    Float(ray.origin.x), Float(ray.origin.y), Float(ray.origin.z),
-                                    Float(ray.direction.x), Float(ray.direction.y), Float(ray.direction.z))
-            }
-        }
         // Settings changed in the game's own menu: kept by the launcher like its own.
         pt_vp_settings_callback { key, value in
             guard let key, let value else { return }
@@ -76,13 +85,39 @@ final class GameRunner: @unchecked Sendable {
         if result != 0 {
             LogFiles.log("The core did not start (error \(result))")
             model.message = L("El juego no pudo arrancar (error \(result)).", "The game could not start (error \(result)).")
-            model.gameEnded()
+            model.gameEnded(code: result)
             return
         }
+        shared.layer = layerRenderer
         model.gameStarted()
         shared.attach(model: model)
         // The hands, for pointing at the game's menus.
         HandTracking.shared.start()
+    }
+
+    /// Looks and pinches, for the game's menus: the selection ray of each one to the core, which
+    /// clicks the menu where a pinch starts and ends on it.
+    @MainActor
+    private static func listen(to layerRenderer: LayerRenderer) {
+        layerRenderer.onSpatialEvent = { events in
+            for event in events {
+                let phase: Int32
+                switch event.phase {
+                case .active: phase = 0
+                case .ended: phase = 1
+                default: phase = 2
+                }
+                guard let ray = event.selectionRay else {
+                    if phase != 0 {
+                        pt_vp_spatial_event(phase, 0, 0, 0, 0, 0, -1)
+                    }
+                    continue
+                }
+                pt_vp_spatial_event(phase,
+                                    Float(ray.origin.x), Float(ray.origin.y), Float(ray.origin.z),
+                                    Float(ray.direction.x), Float(ray.direction.y), Float(ray.direction.z))
+            }
+        }
     }
 
     /// Everything that goes on while the game runs. On the main thread.
@@ -172,8 +207,15 @@ final class GameRunner: @unchecked Sendable {
             model.stats = stats
         }
         if !pt_vp_running() {
+            let code = pt_vp_exit_code()
             detach()
-            model.gameEnded()
+            model.gameEnded(code: code)
+            return
+        }
+        // The space closed under the game (the Digital Crown, or the system): it waits paused,
+        // and the launcher offers to go back to it.
+        if model.immersiveOpen, let layer, layer.state == .invalidated {
+            model.immersiveEnded()
         }
     }
 
@@ -189,6 +231,7 @@ final class GameRunner: @unchecked Sendable {
         observers = []
         PlayStationController.shared.onStateChange = nil
         model = nil
+        layer = nil
     }
 }
 
