@@ -67,7 +67,15 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Nota: `StereoRenderSize` (upstream) dibuja 3419x2353 (frustum simétrico que cubre los dos ojos,
   campos L -60 R 45 U 45 D -50) para imágenes 2696x2162: +38 % de píxeles. Candidato a optimizar
   con proyección asimétrica por ojo.
-- Build 11 (lanzada): diagnóstico, sin cambio de comportamiento del juego:
+- Usuario: la app entera se cierra (no se queda colgada) y no aparece informe en Datos de análisis.
+  Hipótesis principal: memoria. Objetivos de escena a 3419x2353 (~25 RGBA16F/LDR a tamaño completo en
+  `scene_renderer.cpp:620-654`, ≈1 GB+, 4x lo del iPad a 1080p) + texturas del pasillo.
+- Build 11 (run 37820846570 cancelado para añadir el vigilante; relanzada): diagnóstico, sin cambio de comportamiento del juego:
+  - Vigilante: `pt::visionos::LoopTick()` en `Host::PollEvents`/`WaitFrame`; `g_game_thread` =
+    `mach_thread_self()` en `GameThread`. En `WatchMemory`: línea `alive:` cada 10 s (footprint,
+    disponible, pico, segundos desde el último bucle); si el bucle lleva >10 s parado,
+    `DumpGameThread` (thread_suspend + `ARM_THREAD_STATE64` + recorrido de fp con
+    `vm_read_overwrite`, `dladdr` tras reanudar) → líneas `watchdog:   #i imagen +0xoff símbolo+0xoff`.
   - `InstallCrashSignals` (en `pt_vp_start`): SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGTRAP → escribe en
     `pt.log` (fd propio `O_APPEND`) "`[  crash  ] error crash: <señal> at address, pc, lr, app image at,
     thread`" + `backtrace_symbols_fd`; pila alternativa por hilo (`UseAlternateStack`, también en
