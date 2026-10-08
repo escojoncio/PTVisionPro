@@ -98,8 +98,11 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - `visionos/App/Core/VPS4Folder.swift`: carpeta `VPS4` creada por el usuario en la raíz de
   "En mi Apple Vision Pro". `.fileImporter` de carpeta (`HomeView`, botón «Elegir VPS4»; rechaza
   otro nombre) → `startAccessingSecurityScopedResource` + bookmark en UserDefaults
-  (`vps4.bookmark`) y llavero (servicio `VPS4`, cuenta `bookmark`). **Mismas claves que debe usar
-  AstroVisionPro** (mismo bundle ID `com.kdt.livecontainer` → mismo contenedor/llavero). Si el
+  (`vps4FolderBookmark`) y llavero (servicio `astroquest.vps4`, cuenta `folder-bookmark`):
+  **las de AstroVisionPro** (`visionos/App/Core/GameFolder.swift` allí, commit 5f23d03); mismo bundle
+  ID `com.kdt.livecontainer` → mismo contenedor/llavero → una sola elección sirve a las dos apps.
+  También crea `Cachés` (de AstroVisionPro). `Partidas/` raíz es el home de shadPS4; P.T. usa
+  `Partidas/CUSA01127`. Si el
   bookmark no resuelve (p. ej. tras reinstalar) se vuelve a pedir. Crea `Juegos` y `Partidas`.
 - Juego: `GameData.find` busca `VPS4/Juegos/CUSA01127`, otras carpetas de `VPS4/Juegos`,
   `VPS4/CUSA01127`, y después Documents (respaldo). Versión por tamaño exacto (`knownSizes`:
