@@ -1866,15 +1866,18 @@ MemoryNow QueryMemory() {
 void DumpGameThread(double stalled_seconds) {
     const thread_act_t thread = pt::visionos::g_game_thread.load();
     if (!thread) return;
-    std::vector<uintptr_t> pcs;
+    // Nothing between suspend and resume may allocate or lock: the stopped thread could hold the
+    // allocator's lock. A fixed array, then.
+    uintptr_t pcs[48];
+    size_t n = 0;
     if (thread_suspend(thread) != KERN_SUCCESS) return;
     arm_thread_state64_t state{};
     mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
     if (thread_get_state(thread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state), &count) == KERN_SUCCESS) {
-        pcs.push_back(static_cast<uintptr_t>(arm_thread_state64_get_pc(state)));
-        pcs.push_back(static_cast<uintptr_t>(arm_thread_state64_get_lr(state)));
+        pcs[n++] = static_cast<uintptr_t>(arm_thread_state64_get_pc(state));
+        pcs[n++] = static_cast<uintptr_t>(arm_thread_state64_get_lr(state));
         uintptr_t fp = static_cast<uintptr_t>(arm_thread_state64_get_fp(state));
-        for (int i = 0; i < 40 && fp; ++i) {
+        while (n < 48 && fp) {
             uintptr_t frame[2] = {0, 0};
             vm_size_t got = 0;
             if (vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(fp), sizeof(frame), reinterpret_cast<vm_address_t>(frame), &got) !=
@@ -1882,14 +1885,14 @@ void DumpGameThread(double stalled_seconds) {
                 got != sizeof(frame) || !frame[1]) {
                 break;
             }
-            pcs.push_back(frame[1]);
+            pcs[n++] = frame[1];
             if (frame[0] <= fp) break;
             fp = frame[0];
         }
     }
     thread_resume(thread);
     pt::LogWarn("watchdog: the game loop has not run for {:.0f} s; the game thread is at:", stalled_seconds);
-    for (size_t i = 0; i < pcs.size(); ++i) {
+    for (size_t i = 0; i < n; ++i) {
         Dl_info info{};
         if (dladdr(reinterpret_cast<void*>(pcs[i]), &info) && info.dli_fname) {
             const char* image = std::strrchr(info.dli_fname, '/');
