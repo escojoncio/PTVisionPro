@@ -28,12 +28,35 @@ contributed ideas on how some things could be adapted.
 
 **No game data is included and none is distributed.** You need your own, legally obtained copy
 of P.T. (the US release `CUSA01127` v01.00 is the one the port is verified with), extracted on
-your computer as the pt-ipad and pt-pc projects describe. Copy the `CUSA01127` folder (it has
-`chunk1.psarc` and `texture.qar`) into the app's folder in the Files app on the Vision Pro.
-The launcher checks the folder before starting.
+your computer as the pt-ipad and pt-pc projects describe.
+
+The data and the saves live outside the app, in a `VPS4` folder shared with the other Vision Pro
+ports, so they survive deleting or replacing the app:
+
+1. In the Files app, under "On My Apple Vision Pro", make a folder called `VPS4`.
+2. In the launcher, press **Choose VPS4** and pick it. The app makes `Juegos` (games) and
+   `Partidas` (saves) inside.
+3. Copy the `CUSA01127` folder (it has `chunk1.psarc` and `texture.qar`) to `VPS4/Juegos`, for
+   example from a shared folder on your computer (Files › Connect to Server), and press **Find**.
+
+The launcher checks the release by the files' exact sizes. Saves go to
+`VPS4/Partidas/CUSA01127`.
 
 P.T. and its content belong to their rights holders. This project is not affiliated with
 Konami or Kojima Productions.
+
+## Playing
+
+- **Controllers**: any controller visionOS knows (DualSense, DualShock 4, Xbox, Switch Pro), or
+  a pair of PlayStation VR2 Sense controllers, tracked in space: with them the flashlight can be
+  held in your hand (Settings › VR › Flashlight).
+- **Menus with your hands**: while a menu is open a ray comes out of each hand; pinch thumb and
+  index finger to choose. Without a controller, a long pinch of the left hand opens the pause
+  menu. With Sense controllers, point and pull the trigger.
+- **Settings**: everything is in the launcher and in the game's own menu (its PC page becomes a
+  Vision Pro page): presets for the Vision Pro M2 and M5 or custom, 90 or 45 frames a second,
+  image size with MetalFX upscaling, field of view, foveation, graphics, turning and comfort.
+  Both places stay in step.
 
 ## Layout
 
