@@ -112,7 +112,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
     `[[viewport_array_index]]` en los tres vertex shaders. Pipelines con `inputPrimitiveTopology = Triangle`.
     Log único al empezar: `vr: drawable N view(s), N texture(s) (array, N slice(s)), N foveation map(s) of N layer(s)`.
   - Launcher: `AppModel.gameEnded` borra solo `pausedMessage` (estático); el resto de mensajes se mantiene.
-- **Build 16 (lanzada): escenas inmersivas** (`vr_play.cpp/.h` en el parche; ajuste «Escenas inmersivas» en
+- **Build 16 (run_number 20): OK** → `releases/download/build-20/PTVisionPro-20.ipa` (la recomendada; sin probar en el visor). **Escenas inmersivas** (`vr_play.cpp/.h` en el parche; ajuste «Escenas inmersivas» en
   `PTSettings.immersiveCutscenes` → `PT_VP_CUTSCENES`, `SettingsView` sección Juego; por defecto sí):
   - `ScreenMode`: con cámara de demo y ajuste activo → `cutscene_` (estéreo), no pantalla virtual. La mirilla
     (`IsPeepholeTheaterActive`) sigue en pantalla. Log `vr: cutscene in stereo from the scene's camera`.
