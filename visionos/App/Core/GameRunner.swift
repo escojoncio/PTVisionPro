@@ -135,6 +135,8 @@ final class GameRunner: @unchecked Sendable {
         case "resolution_scale": s.resolutionScale = Double(value) ?? s.resolutionScale
         case "target_fps": s.targetFPS = Int(value) ?? s.targetFPS
         case "foveation": s.foveation = flag
+        case "metalfx": s.metalFX = flag
+        case "fov": s.fov = Int(value) ?? s.fov
         case "shadows": s.shadows = value
         case "ssao": s.ssao = flag
         case "bloom": s.bloom = flag
@@ -158,6 +160,9 @@ final class GameRunner: @unchecked Sendable {
             detach()
             return
         }
+        // The PlayStation VR2 Sense controllers connected now, tracked in space (does nothing
+        // while they are the same ones).
+        SenseTracking.shared.track(PlayStationController.shared.senses)
         var raw = pt_vp_stats()
         pt_vp_stats_get(&raw)
         let stats = GameStats(fps: raw.fps, frameMs: raw.frame_ms, gpuMs: raw.gpu_ms,
@@ -175,6 +180,7 @@ final class GameRunner: @unchecked Sendable {
     @MainActor
     private func detach() {
         HandTracking.shared.stop()
+        SenseTracking.shared.stop()
         timer?.invalidate()
         timer = nil
         for observer in observers {

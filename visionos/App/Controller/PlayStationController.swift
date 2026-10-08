@@ -103,6 +103,13 @@ final class PlayStationController: @unchecked Sendable {
                       kind: .sense, isPlayStation: true, batteryLevel: battery, isCharging: false)
     }
 
+    /// The PlayStation VR2 Sense controllers connected now, left one first.
+    var senses: [GCController] {
+        lock.lock()
+        defer { lock.unlock() }
+        return [senseLeft, senseRight].compactMap { $0 }
+    }
+
     static func isSense(_ controller: GCController) -> Bool {
         controller.productCategory == spatialCategory
     }
@@ -281,6 +288,8 @@ final class PlayStationController: @unchecked Sendable {
         new.dpad_right = gamepad.dpad.right.isPressed
         new.l1 = gamepad.leftShoulder.isPressed
         new.r1 = gamepad.rightShoulder.isPressed
+        new.l2 = gamepad.leftTrigger.isPressed
+        new.r2 = gamepad.rightTrigger.isPressed
         new.prompt_style = Self.promptStyle(controller)
         new.hand_valid = (false, false)
         publish(new)
@@ -341,6 +350,8 @@ final class PlayStationController: @unchecked Sendable {
         new.settings = pressed(left, [GCInputButtonShare, GCInputButtonMenu, GCInputButtonOptions])
         new.l1 = pressed(left, [GCInputLeftShoulder, "Grip Button", "Left Shoulder"])
         new.r1 = pressed(right, [GCInputRightShoulder, "Grip Button", "Right Shoulder"])
+        new.l2 = pressed(left, [GCInputLeftTrigger, "Trigger", "Left Trigger"])
+        new.r2 = pressed(right, [GCInputRightTrigger, "Trigger", "Right Trigger"])
         new.prompt_style = 1
         // TODO: GameController does not give a Sense controller's pose on visionOS 2 (ARKit's
         // accessory tracking arrived with visionOS 26). Until the app tracks them, the game places
