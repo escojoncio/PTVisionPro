@@ -58,6 +58,29 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
     `configuration.maxRenderQuality` y `layerRenderer.renderQuality` (visionOS 26). Se registran
     los valores por defecto del sistema ("Layer: ... system default") para calibrar. Sustituye a
     `renderQuality` (clave antigua ignorada). Selector de 60° en giro por pasos del launcher.
+- **Primera prueba en el visor (build 10): cierre silencioso al cargar el pasillo.** `pt.log` llega hasta
+  `stage .../pt14_hallway.fpk: 143 models...` (justo antes de cargar sus modelos), sin error, sin
+  `abort`, sin `exit:` (el log se vacía línea a línea: no falta nada) → jetsam por memoria (SIGKILL)
+  o fallo de acceso (SIGSEGV/SIGBUS: solo SIGABRT tenía manejador). Antes de eso todo bien: VPS4,
+  datos US, layout `layered`, foveado, drawable 4493x3604, ojos 2696x2162 (0,60), MetalFX,
+  sala inicial cargada, primer frame estéreo, sonido, subtítulos en español.
+  Nota: `StereoRenderSize` (upstream) dibuja 3419x2353 (frustum simétrico que cubre los dos ojos,
+  campos L -60 R 45 U 45 D -50) para imágenes 2696x2162: +38 % de píxeles. Candidato a optimizar
+  con proyección asimétrica por ojo.
+- Build 11 (lanzada): diagnóstico, sin cambio de comportamiento del juego:
+  - `InstallCrashSignals` (en `pt_vp_start`): SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGTRAP → escribe en
+    `pt.log` (fd propio `O_APPEND`) "`[  crash  ] error crash: <señal> at address, pc, lr, app image at,
+    thread`" + `backtrace_symbols_fd`; pila alternativa por hilo (`UseAlternateStack`, también en
+    `GameThread`); luego `SIG_DFL` + `raise` (informe del sistema intacto).
+  - `WatchMemory` (hilo propio, 250 ms): al empezar "memory: limit about N MB" (footprint +
+    `os_proc_available_memory`; dice si la firma dio el límite ampliado); línea cada vez que el
+    footprint cambia 256 MB o si quedan <600 MB; `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` → warning/CRITICAL.
+  - Launcher: fondo del menú (`Core/LauncherBackground.swift`): imagen elegida por el usuario
+    (Fotos o Archivos) guardada en Application Support/`launcher-background.jpg` (≤2400 px, JPEG
+    0,85); si no hay, `sce_sys/pic1.png`/`pic0.png` de su copia del juego; si no, degradado.
+    Sección «Fondo del menú» en Ajustes (`BackgroundSection`). Con imagen se oculta el título
+    "P.T." de Inicio. **No se sube arte del juego al repo** (público, releases públicas).
+  - Icono: pendiente de respuesta (propuesta: icono original, sin el logo).
 - **Build 10 (run_number 13): OK** → `releases/download/build-13/PTVisionPro-13.ipa` (75,8 MB). Sin probar en el visor. Panel de rendimiento en el visor
   (`PT_VP_OVERLAY`, interruptor «Panel de rendimiento dentro del juego» que antes no hacía nada):
   línea "FPS · GPU · LOOP · ojo · térmico" con fuente 5x7 (`kGlyphs`, `RasteriseOverlay`) en dos

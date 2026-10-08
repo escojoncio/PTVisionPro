@@ -3,7 +3,9 @@
 // Every setting, changed in place (there is nothing to edit in a file). Each change goes to
 // PTSettings in UserDefaults through the model; a game started afterwards uses them.
 
+import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
@@ -22,6 +24,7 @@ struct SettingsView: View {
                 headsetSection
                 controllerSection
                 gameSection
+                BackgroundSection()
                 diagnosticsSection
             }
             .navigationTitle(L("Ajustes", "Settings"))
@@ -236,5 +239,75 @@ struct SettingsView: View {
 
     private func string(_ path: WritableKeyPath<PTSettings, String>) -> Binding<String> {
         Binding(get: { model.settings[keyPath: path] }, set: { model.set(path, $0) })
+    }
+}
+
+/// The launcher's background picture: from Photos or Files, kept in the app on the headset.
+struct BackgroundSection: View {
+    @State private var photo: PhotosPickerItem?
+    @State private var choosingFile = false
+    @State private var problem: String?
+
+    var body: some View {
+        let background = LauncherBackground.shared
+        Section {
+            HStack(spacing: 16) {
+                if let picture = background.image {
+                    Image(uiImage: picture)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 160, height: 90)
+                        .clipShape(.rect(cornerRadius: 12))
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(background.isChosen ? L("Imagen elegida", "Chosen picture")
+                         : background.image != nil ? L("Portada de tu copia del juego", "Your game copy's cover art")
+                         : L("Sin imagen (degradado)", "No picture (gradient)"))
+                    if let problem {
+                        Text(problem)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            PhotosPicker(selection: $photo, matching: .images) {
+                Label(L("Elegir de Fotos", "Choose from Photos"), systemImage: "photo.on.rectangle")
+            }
+            Button {
+                choosingFile = true
+            } label: {
+                Label(L("Elegir de Archivos", "Choose from Files"), systemImage: "folder")
+            }
+            if background.isChosen {
+                Button(role: .destructive) {
+                    background.clear()
+                } label: {
+                    Label(L("Quitar imagen", "Remove picture"), systemImage: "trash")
+                }
+            }
+        } header: {
+            Text(L("Fondo del menú", "Menu background"))
+        } footer: {
+            Text(L("La imagen se guarda solo en este visor, dentro de la app.", "The picture is kept on this headset only, inside the app."))
+        }
+        .onChange(of: photo) { _, item in
+            guard let item else { return }
+            Task {
+                let data = try? await item.loadTransferable(type: Data.self)
+                problem = data.map { LauncherBackground.shared.choose($0) } == true
+                    ? nil : L("No se pudo usar esa imagen.", "That picture could not be used.")
+                photo = nil
+            }
+        }
+        .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.image]) { result in
+            guard case .success(let url) = result else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer {
+                if scoped { url.stopAccessingSecurityScopedResource() }
+            }
+            let data = try? Data(contentsOf: url)
+            problem = data.map { LauncherBackground.shared.choose($0) } == true
+                ? nil : L("No se pudo usar esa imagen.", "That picture could not be used.")
+        }
     }
 }

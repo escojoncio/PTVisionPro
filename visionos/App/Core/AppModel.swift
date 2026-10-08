@@ -75,6 +75,7 @@ final class AppModel {
     func findGame() {
         gameData = GameData.find(settingPath: settings.gamePath)
         dataStatus = gameData?.status ?? .missing
+        LauncherBackground.shared.setGameFolder(gameData?.folder)
         if let gameData {
             LogFiles.log("Game data: \(gameData.folder.path), \(GameData.format(bytes: gameData.totalBytes)), "
                          + "missing \(gameData.missingRequired + gameData.missingOptional)")

@@ -20,9 +20,12 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 28) {
                 Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("P.T.")
-                        .font(.extraLargeTitle)
-                        .fontWeight(.heavy)
+                    if LauncherBackground.shared.image == nil {
+                        // (A background picture usually carries the title already.)
+                        Text("P.T.")
+                            .font(.extraLargeTitle)
+                            .fontWeight(.heavy)
+                    }
                     Text(L("Teaser jugable · PlayStation 4 · en VR", "Playable Teaser · PlayStation 4 · in VR"))
                         .font(.title2)
                         .foregroundStyle(.secondary)
@@ -57,6 +60,29 @@ struct HomeView: View {
     // MARK: - Background
 
     private var background: some View {
+        ZStack {
+            if let picture = LauncherBackground.shared.image {
+                // The player's picture (or their game's cover art), darkened low down so that the
+                // title and the cards stay readable over it.
+                GeometryReader { geometry in
+                    Image(uiImage: picture)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                }
+                LinearGradient(stops: [.init(color: .black.opacity(0.15), location: 0.0),
+                                       .init(color: .black.opacity(0.45), location: 0.45),
+                                       .init(color: .black.opacity(0.85), location: 1.0)],
+                               startPoint: .top, endPoint: .bottom)
+            } else {
+                gradient
+            }
+        }
+        .ignoresSafeArea()
+    }
+
+    private var gradient: some View {
         ZStack {
             LinearGradient(colors: [Color(red: 0.16, green: 0.12, blue: 0.08),
                                     Color(red: 0.03, green: 0.02, blue: 0.02)],
