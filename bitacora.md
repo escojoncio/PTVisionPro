@@ -75,7 +75,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   memoria, sin señal capturada, muerte antes de 10 s → no es memoria. Sospecha: `abort()`/
   `std::terminate` (el juego solo los registra en Windows: `InstallCrashReporting` va bajo
   `#ifdef _WIN32` en `main.cpp`) o `exit()`.
-- **Build 13 (run_number 17): OK** → `releases/download/build-17/PTVisionPro-17.ipa` (75,9 MB; la recomendada). Sin probar en el visor.
+- **Build 13 (run_number 17): OK** → `releases/download/build-17/PTVisionPro-17.ipa` (75,9 MB; probada: se cierra al cargar el pasillo, ver abajo). Sin probar en el visor.
   Hipótesis a contrastar con su log: el pasillo carga 143 modelos + texturas en el hilo del juego
   (`StageManager::Load` → `models_.Get` → `TextureManager::Create`, subida síncrona), que es el mismo
   que presenta frames al compositor → varios segundos sin `cp_frame` → posible cierre del espacio
@@ -97,7 +97,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   pasa 2,0 s sin enviar fotogramas** (mensaje de sistema "hasn't been sending frames for 2.0s"; mismo caso
   documentado en Unity para cargas y compilación de shaders). En `VrPlay::BeginLoop` el juego abre el frame
   (WaitFrame+BeginFrame) ANTES de su update, así que la carga ocurre con un frame abierto.
-- **Build 14 (lanzada): "keeper" de fotogramas** (`xr_host_visionos.mm`):
+- **Build 14 (run_number 18): OK** → `releases/download/build-18/PTVisionPro-18.ipa` (la recomendada; sin probar en el visor). "Keeper" de fotogramas (`xr_host_visionos.mm`):
   - `Impl::mutex` + `GameCall()` (sella `game_call_ns` antes y después de bloquear) en PollEvents, WaitFrame,
     BeginFrame, LocateViews, SyncActions, Acquire, EndFrame, SetFrameDivisor. Ninguno llama a otro con guarda.
   - Hilo `KeepPresenting` (arranca al final de `StartSession`, `join` al principio de `Shutdown`; QoS
@@ -306,7 +306,7 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 
 ## Pendiente (siguiente sesión, en orden)
 
-0. Probar build 14 hasta pasado el pasillo: en `pt.log` deben salir las líneas del keeper durante las
+0. Probar build 14 (build-18) hasta pasado el pasillo: en `pt.log` deben salir las líneas del keeper durante las
    cargas y ningún cierre. Si sigue cerrándose, buscar la última línea `where:`/`vr:`.
 1. Primera prueba en el visor (build 8): ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
    -Z adelante, igual que OpenXR; si la imagen sale girada revisar `QuatOf`/tangentes) y la
