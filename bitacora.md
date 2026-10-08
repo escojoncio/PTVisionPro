@@ -12,7 +12,15 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   compilaron y enlazaron en `libpt_visionos.a`**. Falló solo Swift: `LayerRenderer.Configuration.maxRenderQuality`
   no existe en el SDK de visionOS 2 (Xcode 16) → quitado (también el deslizador de calidad de
   renderizado, MetalFX y resolución dinámica del launcher: no implementados aún).
-- Build 4: lanzada con commit `[build]` tras los menús/manos (abajo). Pendiente de leer.
+- Build 4 (run 37793895782, run_number 7): **compila todo, incluido Swift**; falla al enlazar:
+  faltaban SDL3, zlib, whisper y ggml porque FetchContent los compila en `build/deps/*-build` y
+  el paso "collect" solo buscaba en `build/visionos`. Arreglo: `find` también en `build/deps`
+  (sin `*-subbuild`, sin bibliotecas de test) + comprobación de `libSDL3.a libz.a libwhisper.a`.
+  Además: `-DSDL_OPENGLES=OFF -DSDL_OPENGL=OFF` y frameworks de SDL3 en `project.yml`
+  (CoreMotion, CoreBluetooth, UniformTypeIdentifiers débil). Aviso inocuo: MoltenVK compilado
+  para visionOS 2.5 y la app para 2.0.
+- Build 5: VPS4 + arreglo de enlazado. Log completo: `git show origin/ci-logs:run-N.log`
+  (`latest.log` por la API se trunca a ~900 KB).
 - Logs de CI: `gh api "repos/escojoncio/PTVisionPro/contents/latest.log?ref=ci-logs" --jq .content | base64 -d`
   (los logs de jobs están en Azure, bloqueado). Lanzar: `gh api -X POST repos/escojoncio/PTVisionPro/actions/workflows/visionos.yml/dispatches -f ref=main`.
 
