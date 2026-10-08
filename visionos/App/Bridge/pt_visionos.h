@@ -35,6 +35,10 @@ typedef struct pt_vp_controller {
     bool hand_valid[2];
     float hand_pos[2][3];
     float hand_rot[2][4];     // quaternion x,y,z,w
+    // Menus.
+    bool dpad_up, dpad_down, dpad_left, dpad_right;
+    bool l1, r1;
+    int prompt_style;         // the button glyphs shown: 0 Xbox (A B X Y), 1 PlayStation, 2 Nintendo
 } pt_vp_controller;
 
 /// What the launcher's performance panel shows.
@@ -75,6 +79,34 @@ void pt_vp_stats_get(pt_vp_stats* out);
 /// Whether the app is in front (false: the player took the headset off or left the space; the
 /// game pauses its clock and its audio as the settings say).
 void pt_vp_set_foreground(bool active);
+
+/// One hand, as hand tracking sees it (ARKit's HandTrackingProvider), in the immersive space's
+/// coordinates (metres): the joints the game points and pinches with.
+typedef struct pt_vp_hand {
+    bool tracked;
+    float index_knuckle[3];   // the index finger's knuckle (where the hand's ray starts)
+    float index_tip[3];
+    float thumb_tip[3];
+    float wrist[3];
+} pt_vp_hand;
+
+/// The newest state of one hand (0 left, 1 right), copied. While a menu is open the game draws
+/// a ray from each tracked hand and a pinch clicks where it points.
+void pt_vp_set_hand(int hand, const pt_vp_hand* state);
+
+/// A look and pinch (or a direct touch) in the immersive space, for pointing at the game's menus
+/// when the hands are not tracked (the player did not allow hand tracking):
+/// phase 0 began or moved, 1 ended, 2 cancelled; the selection ray in the immersive space's
+/// coordinates (metres; the direction need not be normalized). A pinch that starts and ends on
+/// the panel the menu is on clicks where it started.
+void pt_vp_spatial_event(int phase, float origin_x, float origin_y, float origin_z,
+                         float direction_x, float direction_y, float direction_z);
+
+/// Settings changed in the game's own menu, to be kept by the launcher: key and value as text
+/// (keys: preset m2|m5|custom, resolution_scale, target_fps, foveation, shadows off|low|medium|high,
+/// ssao, bloom, reflections, turn, snap_degrees, smooth_speed, flashlight_hand -1|0|1).
+/// Called from the game thread.
+void pt_vp_settings_callback(void (*cb)(const char* key, const char* value));
 
 /// Where the core writes its log (a path inside the app's Documents, static storage), or NULL
 /// before the first start.

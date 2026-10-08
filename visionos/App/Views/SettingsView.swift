@@ -77,7 +77,6 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Toggle(L("Resolución dinámica", "Dynamic resolution"), isOn: bool(\.dynamicResolution))
             Picker(L("Imágenes por segundo", "Frames per second"), selection: int(\.targetFPS)) {
                 Text("90").tag(90)
                 Text("45").tag(45)
@@ -127,21 +126,11 @@ struct SettingsView: View {
     private var headsetSection: some View {
         Section {
             Toggle(L("Renderizado foveado", "Foveated rendering"), isOn: bool(\.foveation))
-            LabeledContent(L("Calidad de renderizado", "Render quality")) {
-                HStack {
-                    Slider(value: float(\.renderQuality), in: 0.1...1, step: 0.05)
-                        .frame(width: 240)
-                    Text(String(format: "%.2f", model.settings.renderQuality))
-                        .monospacedDigit()
-                        .frame(width: 48)
-                }
-            }
-            Toggle(L("Escalado MetalFX", "MetalFX upscaling"), isOn: bool(\.metalFX))
         } header: {
             Text(L("Visor", "Headset"))
         } footer: {
-            Text(L("La calidad de renderizado es la de Compositor Services (1: los drawables más grandes que da el sistema). MetalFX escala la imagen del juego al tamaño del drawable.",
-                   "Render quality is Compositor Services' (1: the largest drawables the system offers). MetalFX scales the game's picture to the drawable's size."))
+            Text(L("Máxima nitidez donde miras y menos detalle alrededor.",
+                   "Sharpest where you look, less detail around it."))
         }
     }
 
@@ -209,11 +198,11 @@ struct SettingsView: View {
     // MARK: - Estimates
 
     private var estimatedWidth: Int {
-        Int((Self.baseEyeWidth * model.settings.resolutionScale * Double(model.settings.renderQuality)).rounded())
+        Int((Self.baseEyeWidth * model.settings.resolutionScale).rounded())
     }
 
     private var estimatedHeight: Int {
-        Int((Self.baseEyeHeight * model.settings.resolutionScale * Double(model.settings.renderQuality)).rounded())
+        Int((Self.baseEyeHeight * model.settings.resolutionScale).rounded())
     }
 
     // MARK: - Bindings into the model's settings

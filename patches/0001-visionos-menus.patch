@@ -1,0 +1,431 @@
+diff --git a/src/engine/xr/xr_host.cpp b/src/engine/xr/xr_host.cpp
+index 5e7cee1..a2fb5c1 100644
+--- a/src/engine/xr/xr_host.cpp
++++ b/src/engine/xr/xr_host.cpp
+@@ -53,6 +53,8 @@ void Host::LocateViews() {}
+ void Host::SyncActions() {}
+ void Host::EndFrame(const FrameLayers&) {}
+ void Host::Haptic(int, float, float) {}
++void Host::SetFrameDivisor(int) {}
++void Host::SetPointerWanted(bool) {}
+ bool Host::Acquire(Swapchain&) { return false; }
+ void Host::Release(Swapchain&) {}
+ 
+@@ -864,6 +866,9 @@ void Host::Haptic(int hand, float amplitude, float seconds) {
+     x.xrApplyHapticFeedback(x.session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
+ }
+ 
++void Host::SetFrameDivisor(int) {}
++void Host::SetPointerWanted(bool) {}
++
+ #endif
+ 
+ }
+diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
+index b5bf253..474d51b 100644
+--- a/src/engine/xr/xr_host.h
++++ b/src/engine/xr/xr_host.h
+@@ -37,6 +37,18 @@ struct ControllerState {
+     bool triangle = false;
+     bool settings = false;
+     HandPose aim[2];
++    // The menus: D-pad, shoulders, the controller's family for the prompts, and a pointer on the
++    // panel the UI is drawn on (0..1 across it) with a click (a look and pinch on visionOS).
++    bool dpad_up = false;
++    bool dpad_down = false;
++    bool dpad_left = false;
++    bool dpad_right = false;
++    bool l1 = false;
++    bool r1 = false;
++    int prompt_style = 0;  // 0 Xbox, 1 PlayStation, 2 Nintendo
++    bool pointer_valid = false;
++    glm::vec2 pointer{0.0f};
++    bool click = false;
+ };
+ 
+ struct Swapchain {
+@@ -110,6 +122,11 @@ public:
+     VkExtent2D EyeExtent() const { return eye_swapchains_[0].extent; }
+ 
+     uint64_t FramesSubmitted() const { return frames_submitted_; }
++    // 1: a new picture every display refresh; 2: every other one (the compositor reprojects the
++    // previous picture in between). Only the visionOS host does anything with it.
++    void SetFrameDivisor(int divisor);
++    // Whether the game wants a pointer for its menus (a ray from the hand on visionOS).
++    void SetPointerWanted(bool wanted);
+ 
+     struct Impl;
+ 
+diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
+index 42d8b01..2307bda 100644
+--- a/src/game/ui/pc_settings.cpp
++++ b/src/game/ui/pc_settings.cpp
+@@ -16,6 +16,36 @@ struct Entry {
+ };
+ 
+ constexpr Entry kTexts[] = {
++#if PT_VISIONOS
++    {"pc_title", {"VISION PRO", "", "", "VISION PRO", "", "", ""}},
++    {"pc_entry", {"Vision Pro", "", "", "Vision Pro", "", "", ""}},
++    {"pc_vr", {"VR", "", "", "VR", "", "", ""}},
++    {"pc_note_quit", {"Return to the launcher. The game is saved at its checkpoints.", "", "", "Volver al launcher. La partida se guarda en sus puntos de control.", "", "", ""}},
++    {"pc_vr_flashlight", {"Flashlight", "", "", "Linterna", "", "", ""}},
++    {"pc_vr_head", {"Head", "", "", "Cabeza", "", "", ""}},
++    {"pc_vr_turn", {"Turning", "", "", "Giro", "", "", ""}},
++    {"pc_vr_snap", {"Steps", "", "", "Por pasos", "", "", ""}},
++    {"pc_vr_smooth", {"Smooth", "", "", "Suave", "", "", ""}},
++    {"pc_note_vr_turn", {"The right stick turns in steps or smoothly. Steps are easier on the stomach.", "", "", "El stick derecho gira por pasos o de forma continua. Por pasos marea menos.", "", "", ""}},
++    {"pc_vp_headset", {"Apple Vision Pro", "", "", "Apple Vision Pro", "", "", ""}},
++    {"pc_vp_preset", {"Preset", "", "", "Preajuste", "", "", ""}},
++    {"pc_vp_custom", {"Custom", "", "", "Personalizado", "", "", ""}},
++    {"pc_note_vp_preset", {"Settings tuned for each headset. Changing one of them makes the preset Custom. The image size and foveation apply at the next start.", "", "", "Ajustes pensados para cada visor. Al cambiar uno, el preajuste pasa a Personalizado. El tamaño de imagen y el foveado se aplican al volver a empezar.", "", "", ""}},
++    {"pc_vp_fps", {"Frame rate", "", "", "Imágenes por segundo", "", "", ""}},
++    {"pc_note_vp_fps", {"90: a new image every refresh. 45: every other refresh; the headset fills in the rest from your head movement.", "", "", "90: una imagen nueva en cada refresco. 45: una de cada dos; el visor rellena el resto con el movimiento de tu cabeza.", "", "", ""}},
++    {"pc_vp_scale", {"Image size", "", "", "Tamaño de imagen", "", "", ""}},
++    {"pc_note_vp_restart", {"Each eye's image, relative to what the headset recommends. Applies at the next start.", "", "", "La imagen de cada ojo, respecto a la que recomienda el visor. Se aplica al volver a empezar.", "", "", ""}},
++    {"pc_vp_foveation", {"Foveated rendering", "", "", "Renderizado foveado", "", "", ""}},
++    {"pc_note_vp_foveation", {"Sharpest where you look, less detail around it. Applies at the next start.", "", "", "Máxima nitidez donde miras y menos detalle alrededor. Se aplica al volver a empezar.", "", "", ""}},
++    {"pc_note_vp_vr", {"Flashlight and turning.", "", "", "Linterna y giro.", "", "", ""}},
++    {"pc_vp_left_hand", {"Left hand", "", "", "Mano izquierda", "", "", ""}},
++    {"pc_vp_right_hand", {"Right hand", "", "", "Mano derecha", "", "", ""}},
++    {"pc_note_vp_flashlight", {"The flashlight follows your head, as in the original, or the controller in one hand (PlayStation VR2 Sense).", "", "", "La linterna sigue a tu cabeza, como en el original, o al mando de una mano (PlayStation VR2 Sense).", "", "", ""}},
++    {"pc_vr_snap_degrees", {"Step size (degrees)", "", "", "Tamaño del paso (grados)", "", "", ""}},
++    {"pc_note_vr_snap_degrees", {"How far each step turns.", "", "", "Cuánto gira cada paso.", "", "", ""}},
++    {"pc_vr_smooth_speed", {"Turning speed (degrees/s)", "", "", "Velocidad de giro (grados/s)", "", "", ""}},
++    {"pc_note_vr_smooth_speed", {"How fast smooth turning turns.", "", "", "La velocidad del giro suave.", "", "", ""}},
++#endif
+     {"pc_frame_limit", {"Frame rate"}},
+     {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
+     {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
+diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
+index e8e4ae7..080b90b 100644
+--- a/src/game/vr_play.cpp
++++ b/src/game/vr_play.cpp
+@@ -64,6 +64,7 @@ bool VrPlay::ScreenMode(Game& game) {
+ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool screen, float dt) {
+     const xr::ControllerState& c = host_.Controllers();
+     const xr::ViewPose& head = host_.Head();
++    host_.SetPointerWanted(menu_open);
+     if (waited_ && host_.ViewsValid() && !centered_) {
+         rig_.Recenter(head.position, head.orientation, game.GetCamera().yaw);
+         centered_ = true;
+@@ -83,6 +84,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+             state.left_stick = move;
+             state.left_stick_from_pad = true;
+         }
++        if (c.dpad_up) raw |= kRawUp;
++        if (c.dpad_down) raw |= kRawDown;
++        if (c.dpad_left) raw |= kRawLeft;
++        if (c.dpad_right) raw |= kRawRight;
++        if (c.l1) raw |= kRawL1;
++        if (c.r1) raw |= kRawR1;
+         if (c.interact) raw |= kRawCross;
+         if (c.back) raw |= kRawCircle;
+         if (c.menu) raw |= kRawStart;
+@@ -106,7 +113,18 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+         if (raw != 0 || glm::length(c.move) > 0.2f || glm::length(c.turn) > 0.2f) {
+             state.from_gamepad = true;
+         }
+-        state.prompts = PromptStyle{PromptDevice::Xbox, {'A', 'B', 'X', 'Y'}};
++        switch (c.prompt_style) {
++        case 1: state.prompts = PromptStyle{PromptDevice::PlayStation, {}}; break;
++        case 2: state.prompts = PromptStyle{PromptDevice::Nintendo, {'B', 'A', 'Y', 'X'}}; break;
++        default: state.prompts = PromptStyle{PromptDevice::Xbox, {'A', 'B', 'X', 'Y'}}; break;
++        }
++    }
++    // A pointer on the panel the UI is on (the HUD, or the virtual screen with the UI on it): in
++    // the UI's own pixels, which are the HUD's (Renderer::kHudExtent) in both cases.
++    if (c.pointer_valid) {
++        state.pointer = c.pointer * glm::vec2(static_cast<float>(Renderer::kHudExtent.width), static_cast<float>(Renderer::kHudExtent.height));
++        state.pointer_valid = true;
++        state.click = state.click || c.click;
+     }
+     const uint32_t pressed = raw & ~raw_previous_;
+     raw_previous_ = raw;
+diff --git a/src/main.cpp b/src/main.cpp
+index d629ab3..7a36505 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -95,7 +95,7 @@
+ #include "game/vr_play.h"
+ #include "engine/xr/xr_host.h"
+ #if PT_VISIONOS
+-namespace pt::visionos { void ApplySettings(pt::AppSettings& settings); }
++#include "pt_visionos_settings.h"
+ #endif
+ 
+ namespace {
+@@ -1592,14 +1592,18 @@ public:
+             photo.link = true;
+             photo.enabled = app_.window != nullptr && !app_.xr;
+             extras.rows.push_back(std::move(photo));
++#if !PT_VISIONOS
+             extras.rows.push_back(Row(kThirdPerson, "pc_third_person", OffOn(), game_.ThirdPerson() ? 1 : 0, "pc_note_third_person"));
++#endif
+             extras.rows.push_back(Row(kSpeedrun, "pc_speedrun", {"pc_off", "pc_speedrun_real_time", "pc_speedrun_game_time"},
+                                       std::clamp(app_.settings.extras.speedrun, 0, 2), "pc_note_speedrun"));
++#if !PT_VISIONOS
+             extras.rows.push_back(Row(kLiveSplit, "pc_livesplit", OffOn(), app_.settings.extras.livesplit ? 1 : 0,
+                                       std::format("pc_note_livesplit{}{}", pt::game::kPcNoteArgument, app_.settings.extras.livesplit_port)));
+             auto vr = Row(kVr, "pc_vr", {"pc_graphics_value"}, 0, "pc_note_vr");
+             vr.link = true;
+             extras.rows.push_back(std::move(vr));
++#endif
+             if (app_.options.release_locks) {
+                 auto lock = Row(kLoopLock, "pc_loop_lock", {"pc_extras_start"}, 0, "pc_note_loop_lock");
+                 lock.action = true;
+@@ -1611,9 +1615,25 @@ public:
+         if (page_ == kVrPage) {
+             const pt::AppSettings::Vr& v = app_.settings.vr;
+             pt::game::PcSettingSection vr{"pc_vr", 0, {}};
++#if PT_VISIONOS
++            vr.rows.push_back(Row(kVrFlashlight, "pc_vr_flashlight", {"pc_vr_head", "pc_vp_left_hand", "pc_vp_right_hand"},
++                                  v.flashlight == 0 ? 0 : v.flashlight_hand == 0 ? 1 : 2, "pc_note_vp_flashlight"));
++            vr.rows.push_back(Row(kVrTurn, "pc_vr_turn", {"pc_vr_snap", "pc_vr_smooth"}, v.turn, "pc_note_vr_turn"));
++            auto snap = Row(kVrSnapDegrees, "pc_vr_snap_degrees", {"15", "30", "45", "60", "90"}, Nearest(kSnapSteps, v.snap_degrees),
++                            "pc_note_vr_snap_degrees");
++            snap.enabled = v.turn == 0;
++            snap.wrap = false;
++            vr.rows.push_back(std::move(snap));
++            auto speed = Row(kVrSmoothSpeed, "pc_vr_smooth_speed", {"45", "60", "90", "120", "180"}, Nearest(kSmoothSteps, v.smooth_speed),
++                             "pc_note_vr_smooth_speed");
++            speed.enabled = v.turn == 1;
++            speed.wrap = false;
++            vr.rows.push_back(std::move(speed));
++#else
+             vr.rows.push_back(Row(kVrMode, "pc_vr_mode", OffOn(), v.enabled ? 1 : 0, "pc_note_vr_mode"));
+             vr.rows.push_back(Row(kVrFlashlight, "pc_vr_flashlight", {"pc_vr_head", "pc_vr_controller"}, v.flashlight, "pc_note_vr_flashlight"));
+             vr.rows.push_back(Row(kVrTurn, "pc_vr_turn", {"pc_vr_snap", "pc_vr_smooth"}, v.turn, "pc_note_vr_turn"));
++#endif
+             return {std::move(vr)};
+         }
+         if (page_ == kGraphicsPage) return GraphicsSections();
+@@ -1629,6 +1649,9 @@ public:
+             test.rows.push_back(Row(kMicMonitor, "pc_mic_monitor", OffOn(), app_.microphone_monitor ? 1 : 0, "pc_mic_monitor_note"));
+             return {std::move(test)};
+         }
++#if PT_VISIONOS
++        return HeadsetSections();
++#endif
+         const pt::AppSettings& s = app_.settings;
+         std::vector<pt::game::PcSettingSection> out;
+         pt::game::PcSettingSection display{"pc_section_display", 0, {}};
+@@ -1863,12 +1886,54 @@ public:
+             s.vr.enabled = value == 1;
+             pt::LogInfo("vr: {} at the next start (PC settings)", s.vr.enabled ? "on" : "off");
+             break;
++#if PT_VISIONOS
++        case kVpPreset:
++            pt::visionos::ApplyPreset(std::clamp(value, 0, 2), s);
++            if (app_.xr) app_.xr->SetFrameDivisor(pt::visionos::Headset().target_fps == 45 ? 2 : 1);
++            break;
++        case kVpFps:
++            pt::visionos::Headset().target_fps = value == 1 ? 45 : 90;
++            if (app_.xr) app_.xr->SetFrameDivisor(value == 1 ? 2 : 1);
++            pt::visionos::SettingChanged("target_fps", std::to_string(pt::visionos::Headset().target_fps));
++            HeadsetCustom();
++            return;
++        case kVpScale:
++            pt::visionos::Headset().resolution_scale = 0.5f + 0.05f * static_cast<float>(std::clamp(value, 0, kScaleSteps - 1));
++            s.vr.resolution_scale = pt::visionos::Headset().resolution_scale;
++            pt::visionos::SettingChanged("resolution_scale", std::format("{:.2f}", s.vr.resolution_scale));
++            HeadsetCustom();
++            Save();
++            return;
++        case kVpFoveation:
++            pt::visionos::Headset().foveation = value == 1;
++            pt::visionos::SettingChanged("foveation", value == 1 ? "1" : "0");
++            HeadsetCustom();
++            return;
++        case kVrFlashlight:
++            s.vr.flashlight = value == 0 ? 0 : 1;
++            s.vr.flashlight_hand = value == 2 ? 1 : 0;
++            pt::visionos::SettingChanged("flashlight_hand", value == 0 ? "-1" : value == 1 ? "0" : "1");
++            break;
++        case kVrTurn:
++            s.vr.turn = std::clamp(value, 0, 1);
++            pt::visionos::SettingChanged("turn", std::to_string(s.vr.turn));
++            break;
++        case kVrSnapDegrees:
++            s.vr.snap_degrees = kSnapSteps[std::clamp(value, 0, static_cast<int>(std::size(kSnapSteps)) - 1)];
++            pt::visionos::SettingChanged("snap_degrees", std::to_string(static_cast<int>(s.vr.snap_degrees)));
++            break;
++        case kVrSmoothSpeed:
++            s.vr.smooth_speed = kSmoothSteps[std::clamp(value, 0, static_cast<int>(std::size(kSmoothSteps)) - 1)];
++            pt::visionos::SettingChanged("smooth_speed", std::to_string(static_cast<int>(s.vr.smooth_speed)));
++            break;
++#else
+         case kVrFlashlight:
+             s.vr.flashlight = std::clamp(value, 0, 1);
+             break;
+         case kVrTurn:
+             s.vr.turn = std::clamp(value, 0, 1);
+             break;
++#endif
+         case kFrameLimit:
+             if (!app_.options.fps_limit_override) s.display.fps_limit = value == 1 ? 60 : 30;
+             break;
+@@ -1939,7 +2004,13 @@ public:
+             std::string reason;
+             pt::ApplyGraphicsPreset(s,static_cast<pt::GraphicsPreset>(std::clamp(value,0,4)),app_.scene.RayTracingSupported(reason));
+             app_.textures.SetAnisotropy(s.graphics.anisotropy);
++#if PT_VISIONOS
++            s.graphics.enhanced_textures = false;
++            s.graphics.motion_blur = s.graphics.depth_of_field = s.graphics.lens_distortion = s.graphics.lens_ghosts = false;
++            s.graphics.film_grain = 0.0f;
++#else
+             RequestEnhancedTextures(app_,s.graphics.enhanced_textures);
++#endif
+             break;
+         }
+         case kShadowQuality:
+@@ -1995,6 +2066,11 @@ public:
+             return;
+         }
+         ApplyGraphicsSettings(app_);
++#if PT_VISIONOS
++        if (id == kGraphicsPreset || id == kShadowQuality || id == kRasterAo || id == kRasterReflections || id == kBloom) {
++            pt::visionos::GraphicsChanged(s);
++        }
++#endif
+         Save();
+     }
+ 
+@@ -2285,6 +2361,7 @@ private:
+         kArchive, kArchiveLock,
+         kVr, kVrMode, kVrFlashlight, kVrTurn,
+         kFrameLimit,
++        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed,
+         kLoopFirst = 1000,
+         kRunSplitFirst = 3000,
+         kModFirst = 2000,
+@@ -2572,6 +2649,9 @@ private:
+     int page_ = kMainPage;
+     static constexpr float kMouseSteps[] = {0.25f, 0.35f, 0.5f, 0.7f, 1.0f, 1.4f, 2.0f, 2.8f, 4.0f, 5.0f};
+     static constexpr float kDeadZoneSteps[] = {0.0f, 0.05f, 26.0f / 255.0f, 0.15f, 0.2f, 0.25f, 0.3f};
++    static constexpr float kSnapSteps[] = {15.0f, 30.0f, 45.0f, 60.0f, 90.0f};
++    static constexpr float kSmoothSteps[] = {45.0f, 60.0f, 90.0f, 120.0f, 180.0f};
++    static constexpr int kScaleSteps = 21;  // 50 % to 150 % in steps of 5
+ 
+     static pt::game::PcSettingRow Row(int id, std::string label, std::vector<std::string> values, int value, std::string note) {
+         pt::game::PcSettingRow row;
+@@ -2642,6 +2722,76 @@ private:
+         return Row(kEnhancedTextures,"pc_enhanced_textures",std::move(values),app_.settings.graphics.enhanced_textures?1:0,note);
+     }
+ 
++#if PT_VISIONOS
++    // The main page in the headset: the Vision Pro's own settings, then what the PC page has that
++    // still means something there (sound, the controller, progress). The display and upscaling
++    // rows of the PC page do not exist on visionOS: the headset paces and sizes the frames.
++    std::vector<pt::game::PcSettingSection> HeadsetSections() {
++        const pt::AppSettings& s = app_.settings;
++        const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
++        std::vector<pt::game::PcSettingSection> out;
++        pt::game::PcSettingSection headset{"pc_vp_headset", 0, {}};
++        auto preset = Row(kVpPreset, "pc_vp_preset", {"Vision Pro M2", "Vision Pro M5", "pc_vp_custom"}, std::clamp(h.preset, 0, 2), "pc_note_vp_preset");
++        headset.rows.push_back(std::move(preset));
++        headset.rows.push_back(Row(kVpFps, "pc_vp_fps", {"90 FPS", "45 FPS"}, h.target_fps == 45 ? 1 : 0, "pc_note_vp_fps"));
++        pt::game::PcSettingRow scale = Row(kVpScale, "pc_vp_scale", {}, 0, "pc_note_vp_restart");
++        for (int i = 0; i < kScaleSteps; ++i) scale.values.push_back(std::format("{}%", 50 + 5 * i));
++        scale.value = std::clamp(static_cast<int>(std::lround((h.resolution_scale - 0.5f) / 0.05f)), 0, kScaleSteps - 1);
++        scale.wrap = false;
++        headset.rows.push_back(std::move(scale));
++        headset.rows.push_back(Row(kVpFoveation, "pc_vp_foveation", OffOn(), h.foveation ? 1 : 0, "pc_note_vp_foveation"));
++        pt::game::PcSettingRow graphics = Row(kGraphics, "pc_graphics", {"pc_graphics_value"}, 0, "pc_note_graphics");
++        graphics.link = true;
++        headset.rows.push_back(std::move(graphics));
++        auto vr = Row(kVr, "pc_vr", {"pc_graphics_value"}, 0, "pc_note_vp_vr");
++        vr.link = true;
++        headset.rows.push_back(std::move(vr));
++        out.push_back(std::move(headset));
++
++        pt::game::PcSettingSection sound{"pc_section_sound", 1, {}};
++        pt::game::PcSettingRow volume = Row(kVolume, "pc_volume", {}, std::clamp(static_cast<int>(std::lround(s.audio.volume * 10.0f)), 0, 20), "");
++        for (int i = 0; i <= 20; ++i) volume.values.push_back(std::format("{}%", i * 10));
++        volume.wrap = false;
++        sound.rows.push_back(std::move(volume));
++        auto microphone_test = Row(kMicrophoneTest, "pc_microphone_test", {"pc_graphics_value"}, 0, "pc_mic_say_jack");
++        microphone_test.link = true;
++        sound.rows.push_back(std::move(microphone_test));
++        out.push_back(std::move(sound));
++
++        pt::game::PcSettingSection controls{"pc_section_controls", 1, {}};
++        controls.rows.push_back(Row(kVibration, "pc_vibration", OffOn(), s.input.rumble ? 1 : 0, ""));
++        pt::game::PcSettingRow dead_zone = Row(kDeadZone, "pc_dead_zone", {}, Nearest(kDeadZoneSteps, s.input.gamepad_dead_zone), "pc_note_dead_zone");
++        for (const float step : kDeadZoneSteps) dead_zone.values.push_back(std::format("{:.2f}", step));
++        dead_zone.wrap = false;
++        controls.rows.push_back(std::move(dead_zone));
++        out.push_back(std::move(controls));
++
++        pt::game::PcSettingSection progress{"pc_section_progress", 1, {}};
++        pt::game::PcSettingRow reset = Row(kReset, "pc_reset", {"pc_reset_value"}, 0, "pc_note_reset");
++        reset.action = true;
++        if (!game_.SavesEnabled()) {
++            reset.values = {"pc_reset_done"};
++            reset.enabled = false;
++            reset.note = "pc_note_reset_done";
++        }
++        progress.rows.push_back(std::move(reset));
++        auto extras = Row(kExtras, "pc_extras", {"pc_graphics_value"}, 0, "pc_note_extras_archive");
++        extras.link = true;
++        progress.rows.push_back(std::move(extras));
++        out.push_back(std::move(progress));
++        return out;
++    }
++
++    // A headset row was changed by hand: the preset is no longer the one shown.
++    void HeadsetCustom() {
++        pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
++        if (h.preset != 2) {
++            h.preset = 2;
++            pt::visionos::SettingChanged("preset", "custom");
++        }
++    }
++#endif
++
+     std::vector<pt::game::PcSettingSection> GraphicsSections() const {
+         const auto& s=app_.settings;
+         std::string reason;
+@@ -2690,7 +2840,9 @@ private:
+     std::vector<pt::game::PcSettingSection> TextureSections() const {
+         const auto& g=app_.settings.graphics;
+         pt::game::PcSettingSection textures{"pc_section_textures",0,{}};
++#if !PT_VISIONOS
+         textures.rows.push_back(EnhancedRow());
++#endif
+         auto anisotropy=Row(kAnisotropy,"pc_anisotropy",{"pc_off","2x","4x","8x","16x"},g.anisotropy>=16?4:g.anisotropy>=8?3:g.anisotropy>=4?2:g.anisotropy>=2?1:0,"pc_note_anisotropy");
+         anisotropy.wrap=false;textures.rows.push_back(std::move(anisotropy));
+         textures.rows.push_back(Row(kTextureDetail,"pc_texture_detail",{"pc_detail_reduced","pc_preset_original","pc_detail_fine"},g.texture_detail,"pc_note_texture_detail"));
+@@ -2724,6 +2876,14 @@ private:
+     std::vector<pt::game::PcSettingSection> EffectSections() const {
+         const auto& g=app_.settings.graphics;
+         pt::game::PcSettingSection effects{"pc_graphics_effects",0,{}};
++#if PT_VISIONOS
++        // In the headset depth of field, motion blur, lens flares, film grain, lens distortion and
++        // letterbox bars are always off (docs/vr.md), so they are not offered.
++        effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
++        pt::game::PcSettingSection image{"pc_graphics_image",1,{}};
++        image.rows.push_back(Row(kClarity,"pc_clarity",Numbers(0,10),static_cast<int>(g.clarity*10+.5f),"pc_note_clarity"));
++        return {std::move(effects),std::move(image)};
++#endif
+         effects.rows.push_back(Row(kDepthOfField,"pc_dof",OffOn(),g.depth_of_field?1:0,"pc_note_dof"));
+         effects.rows.push_back(Row(kMotionBlur,"pc_motion_blur",OffOn(),g.motion_blur?1:0,"pc_note_motion_blur"));
+         effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
+@@ -3139,7 +3299,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+     const bool pads = app.window || options.virtual_pads;
+     if (pads) {
+         input.Init();
+-    input.EnableTouch(PT_IOS);
++    input.EnableTouch(PT_IOS && !PT_VISIONOS);
+     }
+     if (app.window) {
+         ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_AutoAll);
+@@ -3554,7 +3714,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+         if (polled.pointer_valid) {
+             pending_input.pointer = polled.pointer;
+             pending_input.pointer_valid = true;
+-#if PT_IOS
++#if PT_IOS && !PT_VISIONOS
+             pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
+                 {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
+             if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;

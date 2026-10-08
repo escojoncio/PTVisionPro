@@ -6,16 +6,57 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 
 ## Estado
 
-- Repo en GitHub (`escojoncio/PTVisionPro`, rama `main`). Código escrito sin compilar en local
-  (no hay Mac en la sesión); las builds de CI van corrigiendo errores de compilación.
-- Builds: 1 y 2 fallaron en `fetchDependencies --xros` (la opción de MoltenVK es
-  `--visionos`, target `make visionos`; corregido). **Build 3 (run 37790180042) lanzada**:
-  primera compilación de MoltenVK para visionOS (30–40 min, luego en caché). Pendiente de leer.
-- Logs de CI: los logs de los jobs están en Azure y no se pueden leer desde la sesión; el
-  workflow publica el log completo en la rama `ci-logs` (`latest.log` y `run-N.log`):
-  `gh api "repos/escojoncio/PTVisionPro/contents/latest.log?ref=ci-logs" --jq .content | base64 -d`.
-- Lanzar build: `gh api -X POST repos/escojoncio/PTVisionPro/actions/workflows/visionos.yml/dispatches -f ref=main`
-  (GraphQL de `gh workflow run` no está disponible).
+- Repo `escojoncio/PTVisionPro` (rama `main`). Sin Mac en la sesión: C++ comprobado con
+  `clang++ -fsyntax-only` en Linux (ver "Comprobación local"); `.mm` y Swift solo compilan en CI.
+- Build 3 (run 37790180042): MoltenVK visionOS, **todo el juego C++ y `xr_host_visionos.mm`
+  compilaron y enlazaron en `libpt_visionos.a`**. Falló solo Swift: `LayerRenderer.Configuration.maxRenderQuality`
+  no existe en el SDK de visionOS 2 (Xcode 16) → quitado (también el deslizador de calidad de
+  renderizado, MetalFX y resolución dinámica del launcher: no implementados aún).
+- Build 4: lanzada con commit `[build]` tras los menús/manos (abajo). Pendiente de leer.
+- Logs de CI: `gh api "repos/escojoncio/PTVisionPro/contents/latest.log?ref=ci-logs" --jq .content | base64 -d`
+  (los logs de jobs están en Azure, bloqueado). Lanzar: `gh api -X POST repos/escojoncio/PTVisionPro/actions/workflows/visionos.yml/dispatches -f ref=main`.
+
+## Menús del juego en el visor (patches/0001-visionos-menus.patch + .mm + Swift)
+
+- Página "PC Settings" → "VISION PRO" (`PcSettings::HeadsetSections`, `main.cpp`): preajuste
+  M2/M5/Personalizado, 90/45 fps (en vivo), tamaño de imagen 50–150 % y foveado (al reiniciar),
+  enlaces a Gráficos y VR; Sonido (volumen, prueba de micro); Controles (vibración, zona muerta);
+  Progreso. Fuera: modo de pantalla, resolución, v-sync, upscalers, frame gen, ray tracing,
+  texturas mejoradas, ratón, inclinación de cámara, tercera persona, LiveSplit, "VR mode".
+  Efectos: solo bloom y claridad. Página VR: linterna cabeza/mano izq/mano der, giro, grados del
+  paso (15–90), velocidad de giro (45–180). Textos en/es en `pc_settings.cpp` (bloque `#if PT_VISIONOS`
+  al principio de `kTexts`, que tiene prioridad sobre las entradas originales).
+- Sincronía: cambios en el menú → `pt::visionos::SettingChanged` → callback
+  `pt_vp_settings_callback` → `GameRunner.settingFromGame` → `PTSettings` (UserDefaults). Claves en
+  `pt_visionos.h`. Tabla de preajustes duplicada en `xr_host_visionos.mm` (`kPresets`) y
+  `PTSettings.swift` (`defaults(for:)`): mantener iguales.
+- `visionos/core/pt_visionos_settings.h`: `HeadsetSettings` + funciones compartidas main.cpp/.mm.
+- Mandos: cualquier `GCExtendedGamepad` (DualSense, DS4, Xbox, Switch…) + Sense. Cruceta y L1/R1
+  añadidos a `pt_vp_controller`/`xr::ControllerState`/`VrPlay::ApplyControls`. Glifos según mando
+  (`prompt_style`: 0 Xbox, 1 PlayStation, 2 Nintendo).
+- Manos (seguimiento de manos): `HandTracking.swift` (ARKit `HandTrackingProvider`, pide permiso)
+  → `pt_vp_set_hand` (nudillo índice, puntas pulgar/índice, muñeca). En `Host::SyncActions`, con
+  menú abierto (`Host::SetPointerWanted`, desde `VrPlay`): rayo desde el nudillo, dirección
+  hombro estimado→nudillo (suavizado 0.35), pellizco <1.5 cm (suelta >3 cm) = clic en el panel
+  donde apunta. Puntero en píxeles del HUD (1920×1080) → `InputState.pointer/click` → menús.
+  Dibujo en `ComposeFrame`: láser (tira orientada a cámara, `laser_vertex/laser_fragment`) y
+  cursor anillo (relleno al pellizcar) en el panel (HUD o pantalla virtual).
+  Respaldo sin permiso de manos: mirada+pellizco del sistema (`layerRenderer.onSpatialEvent` →
+  `pt_vp_spatial_event`); se ignora cuando hay rayos de mano o no hay menú abierto.
+- 45 fps: `Host::SetFrameDivisor(2)` → en `WaitFrame`, `RepeatLastFrame` presenta el fotograma
+  anterior con el `ar_device_anchor` con el que se dibujó (el compositor reproyecta).
+- `main.cpp`: puntero sin `MapDisplayPoint` en visionOS; `input.EnableTouch(PT_IOS && !PT_VISIONOS)`
+  (sin superposición táctil del iPad).
+
+## Comprobación local (sin Mac)
+
+```
+python3 tools/prepare_source.py          # o --edit para editar el parche
+# cabeceras en /root/deps: glm volk vma imgui stb sdl vkh(Vulkan-Headers) lua51 (clones superficiales)
+clang++ -std=c++23 -fsyntax-only -w -DPT_APPLE=1 -DPT_IOS=1 -DPT_VISIONOS=1 -DVOLK_NAMESPACE -DVK_NO_PROTOTYPES \
+  -include src/engine/platform/apple_host.h -DVK_USE_PLATFORM_METAL_EXT -DSDL_MAIN_HANDLED=1 ... src/main.cpp
+```
+Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C build/port-src diff > patches/0001-visionos-menus.patch`.
 
 ## Arquitectura (decidida, no cambiar sin motivo)
 
@@ -68,7 +109,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 
 ## Pendiente (siguiente sesión, en orden)
 
-1. Leer el log de la build 3 y corregir errores de compilación (riesgos conocidos: ggml/whisper con `CMAKE_SYSTEM_NAME=visionOS`; SDL3 sin
+1. Leer el log de la build 4 y corregir errores (Swift/.mm nuevos sin compilar; riesgos: ggml/whisper con `CMAKE_SYSTEM_NAME=visionOS`; SDL3 sin
    vídeo en visionOS; nombres exactos de la C API de Compositor Services; `GCProductCategory`
    de los Sense; `IOKit` en visionOS).
 2. Primera prueba en el visor: ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,

@@ -32,6 +32,37 @@ final class GameRunner: @unchecked Sendable {
         let environment = settings.environment
         LogFiles.log("Starting the core: \(arguments.joined(separator: " "))")
 
+        // Looks and pinches, for the game's menus: the selection ray of each one to the core,
+        // which clicks the menu where a pinch starts and ends on it.
+        layerRenderer.onSpatialEvent = { events in
+            for event in events {
+                let phase: Int32
+                switch event.phase {
+                case .active: phase = 0
+                case .ended: phase = 1
+                default: phase = 2
+                }
+                guard let ray = event.selectionRay else {
+                    if phase != 0 {
+                        pt_vp_spatial_event(phase, 0, 0, 0, 0, 0, -1)
+                    }
+                    continue
+                }
+                pt_vp_spatial_event(phase,
+                                    Float(ray.origin.x), Float(ray.origin.y), Float(ray.origin.z),
+                                    Float(ray.direction.x), Float(ray.direction.y), Float(ray.direction.z))
+            }
+        }
+        // Settings changed in the game's own menu: kept by the launcher like its own.
+        pt_vp_settings_callback { key, value in
+            guard let key, let value else { return }
+            let k = String(cString: key)
+            let v = String(cString: value)
+            Task { @MainActor in
+                GameRunner.shared.settingFromGame(key: k, value: v)
+            }
+        }
+
         let pointer = Unmanaged.passUnretained(layerRenderer).toOpaque()
         let result = withCStrings(arguments) { argv, argc in
             withCStrings(environment) { env, envCount in
@@ -46,6 +77,8 @@ final class GameRunner: @unchecked Sendable {
         }
         model.gameStarted()
         shared.attach(model: model)
+        // The hands, for pointing at the game's menus.
+        HandTracking.shared.start()
     }
 
     /// Everything that goes on while the game runs. On the main thread.
@@ -86,6 +119,35 @@ final class GameRunner: @unchecked Sendable {
         }
     }
 
+    /// A setting the player changed in the game's menu, into the launcher's settings (which are
+    /// saved, and given to the game the next time it starts).
+    @MainActor
+    func settingFromGame(key: String, value: String) {
+        guard let model else { return }
+        var s = model.settings
+        let flag = value != "0"
+        switch key {
+        case "preset": s.preset = PTSettings.Preset(rawValue: value) ?? .custom
+        case "resolution_scale": s.resolutionScale = Double(value) ?? s.resolutionScale
+        case "target_fps": s.targetFPS = Int(value) ?? s.targetFPS
+        case "foveation": s.foveation = flag
+        case "shadows": s.shadows = value
+        case "ssao": s.ssao = flag
+        case "bloom": s.bloom = flag
+        case "reflections": s.reflections = flag
+        case "turn": s.turnMode = Int(value) ?? s.turnMode
+        case "snap_degrees": s.snapDegrees = Int(value) ?? s.snapDegrees
+        case "smooth_speed": s.smoothSpeed = Int(value) ?? s.smoothSpeed
+        case "flashlight_hand": s.flashlightHand = Int(value) ?? s.flashlightHand
+        default:
+            LogFiles.log("Setting from the game not known to the launcher: \(key)=\(value)")
+            return
+        }
+        if s != model.settings {
+            model.settings = s
+        }
+    }
+
     @MainActor
     private func tick() {
         guard let model else {
@@ -108,6 +170,7 @@ final class GameRunner: @unchecked Sendable {
 
     @MainActor
     private func detach() {
+        HandTracking.shared.stop()
         timer?.invalidate()
         timer = nil
         for observer in observers {

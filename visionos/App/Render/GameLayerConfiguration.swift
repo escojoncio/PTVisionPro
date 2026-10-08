@@ -21,9 +21,6 @@ struct GameLayerConfiguration: CompositorLayerConfiguration {
 
         let foveated = foveation && capabilities.supportsFoveation
         configuration.isFoveationEnabled = foveated
-        if foveated {
-            configuration.maxRenderQuality = .init(min(max(renderQuality, 0.1), 1.0))
-        }
         let options: LayerRenderer.Capabilities.SupportedLayoutsOptions = foveated ? [.foveationEnabled] : []
         let layouts = capabilities.supportedLayouts(options: options)
         configuration.layout = layouts.contains(.layered) ? .layered : .dedicated

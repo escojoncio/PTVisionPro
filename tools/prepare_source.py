@@ -3,6 +3,9 @@
 18 patches) with the Vision Pro changes applied on top.
 
     python3 tools/prepare_source.py            -> build/port-src
+    python3 tools/prepare_source.py --edit     -> the same, with the edits below committed and
+                                                  patches/*.patch applied on top as uncommitted
+                                                  changes: edit, then `git diff > patches/<n>.patch`
 
 Every change is an exact text replacement; a missing anchor is an error, never a silent skip,
 so an upstream bump shows up here first.
@@ -85,12 +88,21 @@ if(PT_VISIONOS)
   target_compile_definitions(pt_engine PUBLIC PT_VISIONOS=1)
   add_library(pt_visionos STATIC src/main.cpp "${PT_VISIONOS_DIR}/core/xr_host_visionos.mm")
   target_compile_definitions(pt_visionos PRIVATE SDL_MAIN_HANDLED=1 PT_NATIVE_BUILD="${PT_APP_BUILD}")
-  target_include_directories(pt_visionos PRIVATE "${PT_VISIONOS_DIR}/App/Bridge" "${CMAKE_BINARY_DIR}/generated")
+  target_include_directories(pt_visionos PRIVATE "${PT_VISIONOS_DIR}/App/Bridge" "${PT_VISIONOS_DIR}/core" "${CMAKE_BINARY_DIR}/generated")
   set_source_files_properties("${PT_VISIONOS_DIR}/core/xr_host_visionos.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_link_libraries(pt_visionos PUBLIC pt_engine)
   add_dependencies(pt_visionos pt_shaders pt_build_id)
 endif()
 ''')
+    # --- Larger changes as ordinary patches, on top of the edits above (patches/*.patch). -------
+    if '--edit' in sys.argv:
+        git = ['git', '-c', 'user.name=prepare', '-c', 'user.email=prepare@localhost']
+        subprocess.run(git + ['add', '-A'], cwd=OUT, check=True)
+        subprocess.run(git + ['commit', '-qm', 'visionos edits (prepare_source.py)'], cwd=OUT, check=True)
+    for patch in sorted((ROOT / 'patches').glob('*.patch')):
+        subprocess.run(['git', 'apply', '--whitespace=nowarn', str(patch)], cwd=OUT, check=True)
+        print(f'Applied {patch.name}')
+
     print(f'Prepared {OUT}')
     return 0
 
