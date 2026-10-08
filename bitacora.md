@@ -70,7 +70,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - Usuario: la app entera se cierra (no se queda colgada) y no aparece informe en Datos de análisis.
   Hipótesis principal: memoria. Objetivos de escena a 3419x2353 (~25 RGBA16F/LDR a tamaño completo en
   `scene_renderer.cpp:620-654`, ≈1 GB+, 4x lo del iPad a 1080p) + texturas del pasillo.
-- **Build 11 (run_number 15): OK** → `releases/download/build-15/PTVisionPro-15.ipa`. Build 12 (run_number 16, en curso):
+- **Build 11 (run_number 15): OK** → `releases/download/build-15/PTVisionPro-15.ipa`. **Build 12 (run_number 16): OK** → `releases/download/build-16/PTVisionPro-16.ipa` (la recomendada):
   solo quita la asignación de memoria con el hilo del juego suspendido en `DumpGameThread` (array fijo).
   Build 11: diagnóstico, sin cambio de comportamiento del juego:
   - Vigilante: `pt::visionos::LoopTick()` en `Host::PollEvents`/`WaitFrame`; `g_game_thread` =
