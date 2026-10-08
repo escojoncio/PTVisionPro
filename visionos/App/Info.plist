@@ -69,7 +69,7 @@
 	<key>NSWorldSensingUsageDescription</key>
 	<string>El seguimiento de la cabeza sitúa al jugador en el pasillo.</string>
 	<key>NSHandsTrackingUsageDescription</key>
-	<string>Las manos pueden sostener la linterna y señalar en el juego.</string>
+	<string>Con tus manos apuntas y seleccionas en los menús del juego (pellizca para elegir).</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>P.T. escucha tu voz para la radio del juego</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
