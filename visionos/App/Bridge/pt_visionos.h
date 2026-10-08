@@ -38,8 +38,15 @@ typedef struct pt_vp_controller {
     // Menus.
     bool dpad_up, dpad_down, dpad_left, dpad_right;
     bool l1, r1;
+    bool l2, r2;              // the triggers (on PlayStation VR2 Sense: click where the controller points)
     int prompt_style;         // the button glyphs shown: 0 Xbox (A B X Y), 1 PlayStation, 2 Nintendo
 } pt_vp_controller;
+
+/// Where a tracked controller is (PlayStation VR2 Sense, ARKit's accessory tracking): hand 0 left,
+/// 1 right; position in metres and orientation (quaternion x, y, z, w) in the immersive space's
+/// coordinates, the controller pointing along its -Z. Not valid: not tracked now. The game holds
+/// the flashlight with it (when the settings say so) and points at its menus with it.
+void pt_vp_set_aim(int hand, bool valid, const float position[3], const float orientation[4]);
 
 /// What the launcher's performance panel shows.
 typedef struct pt_vp_stats {

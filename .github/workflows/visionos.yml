@@ -16,7 +16,8 @@ concurrency:
 jobs:
   build:
     if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[build]')
-    runs-on: macos-15
+    # Xcode 26 (visionOS 26 SDK): accessory tracking for the PlayStation VR2 Sense controllers.
+    runs-on: macos-26
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +26,8 @@ jobs:
 
       - name: Xcode
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)/Contents/Developer"
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XCODE" ] && sudo xcode-select -s "$XCODE/Contents/Developer"
           xcodebuild -version
           xcodebuild -showsdks | grep -i xros || true
 

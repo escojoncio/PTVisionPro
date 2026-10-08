@@ -3,3 +3,4 @@
 "NSHandsTrackingUsageDescription" = "Con tus manos apuntas y seleccionas en los menús del juego (pellizca para elegir).";
 "NSMicrophoneUsageDescription" = "P.T. escucha tu voz para la radio del juego";
 "NSBluetoothAlwaysUsageDescription" = "Los mandos de PlayStation se conectan por Bluetooth.";
+"NSAccessoryTrackingUsageDescription" = "Los mandos PlayStation VR2 Sense se siguen en el espacio para llevar la linterna en la mano y señalar en los menús.";
