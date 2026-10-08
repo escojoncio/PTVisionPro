@@ -27,6 +27,7 @@
 #include <mach/mach.h>
 #include <os/proc.h>
 #include <pthread.h>
+#include <dlfcn.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -56,6 +57,16 @@
 #include "pt_visionos_settings.h"
 #include "engine/platform/apple_host.h"
 #include "engine/platform/graphics_presets.h"
+
+// The game loop's last turn (steady clock, ns) and its thread: the watchdog's view of it.
+namespace pt::visionos {
+std::atomic<int64_t> g_loop_ns{0};
+std::atomic<unsigned> g_game_thread{0};
+inline void LoopTick() {
+    g_loop_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
+                    std::memory_order_relaxed);
+}
+}  // namespace pt::visionos
 
 namespace pt::xr {
 
@@ -857,6 +868,7 @@ void Host::Shutdown() {
 }
 
 void Host::PollEvents() {
+    pt::visionos::LoopTick();
     Impl& x = *impl_;
     if (!x.layer) return;
     cp_layer_renderer_state state = cp_layer_renderer_get_state(x.layer);
@@ -920,6 +932,7 @@ bool Host::FocusLost() const { return impl_->ever_focused && !impl_->was_focused
 bool Host::ShouldRender() const { return should_render_; }
 
 bool Host::WaitFrame() {
+    pt::visionos::LoopTick();
     Impl& x = *impl_;
     if (!x.running) return false;
     if (x.frame) {
@@ -1847,6 +1860,48 @@ MemoryNow QueryMemory() {
     return m;
 }
 
+// The game thread's stack while it is stuck: stopped for a moment, its frame pointers walked
+// (read with vm_read_overwrite, so a bad pointer only ends the walk), then let go before the
+// addresses are named (dladdr takes locks the stopped thread could hold).
+void DumpGameThread(double stalled_seconds) {
+    const thread_act_t thread = pt::visionos::g_game_thread.load();
+    if (!thread) return;
+    std::vector<uintptr_t> pcs;
+    if (thread_suspend(thread) != KERN_SUCCESS) return;
+    arm_thread_state64_t state{};
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(thread, ARM_THREAD_STATE64, reinterpret_cast<thread_state_t>(&state), &count) == KERN_SUCCESS) {
+        pcs.push_back(static_cast<uintptr_t>(arm_thread_state64_get_pc(state)));
+        pcs.push_back(static_cast<uintptr_t>(arm_thread_state64_get_lr(state)));
+        uintptr_t fp = static_cast<uintptr_t>(arm_thread_state64_get_fp(state));
+        for (int i = 0; i < 40 && fp; ++i) {
+            uintptr_t frame[2] = {0, 0};
+            vm_size_t got = 0;
+            if (vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(fp), sizeof(frame), reinterpret_cast<vm_address_t>(frame), &got) !=
+                    KERN_SUCCESS ||
+                got != sizeof(frame) || !frame[1]) {
+                break;
+            }
+            pcs.push_back(frame[1]);
+            if (frame[0] <= fp) break;
+            fp = frame[0];
+        }
+    }
+    thread_resume(thread);
+    pt::LogWarn("watchdog: the game loop has not run for {:.0f} s; the game thread is at:", stalled_seconds);
+    for (size_t i = 0; i < pcs.size(); ++i) {
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void*>(pcs[i]), &info) && info.dli_fname) {
+            const char* image = std::strrchr(info.dli_fname, '/');
+            pt::LogWarn("watchdog:   #{} {} +0x{:x} {}+0x{:x}", i, image ? image + 1 : info.dli_fname,
+                        pcs[i] - reinterpret_cast<uintptr_t>(info.dli_fbase), info.dli_sname ? info.dli_sname : "?",
+                        info.dli_saddr ? pcs[i] - reinterpret_cast<uintptr_t>(info.dli_saddr) : 0);
+        } else {
+            pt::LogWarn("watchdog:   #{} 0x{:x}", i, pcs[i]);
+        }
+    }
+}
+
 void WatchMemory() {
     // The game opens its log in its first milliseconds: the lines below go into it.
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -1869,10 +1924,29 @@ void WatchMemory() {
     // lines before a silent end say whether memory ran out.
     uint64_t logged = start.footprint_mb;
     uint64_t peak = start.footprint_mb;
+    auto heartbeat = std::chrono::steady_clock::now();
+    auto last_dump = heartbeat;
+    int64_t dumped_loop = -1;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         const MemoryNow m = QueryMemory();
         peak = std::max(peak, m.footprint_mb);
+        const auto now = std::chrono::steady_clock::now();
+        const int64_t loop = pt::visionos::g_loop_ns.load(std::memory_order_relaxed);
+        const double stalled =
+            loop ? static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count() - loop) / 1.0e9 : 0.0;
+        // Alive (a hang leaves these lines; a killed process does not).
+        if (now - heartbeat >= std::chrono::seconds(10)) {
+            heartbeat = now;
+            pt::LogInfo("alive: footprint {} MB, available {} MB, peak {} MB, game loop last ran {:.1f} s ago", m.footprint_mb, m.available_mb, peak,
+                        stalled);
+        }
+        // Stuck: where, once per stall and again every 30 s while it lasts.
+        if (stalled > 10.0 && pt::visionos::g_game_thread.load() && (loop != dumped_loop || now - last_dump >= std::chrono::seconds(30))) {
+            dumped_loop = loop;
+            last_dump = now;
+            DumpGameThread(stalled);
+        }
         const bool moved = m.footprint_mb > logged + 256 || m.footprint_mb + 256 < logged;
         if (moved || m.available_mb < 600) {
             pt::LogInfo("memory: footprint {} MB, available {} MB, peak {} MB", m.footprint_mb, m.available_mb, peak);
@@ -1883,6 +1957,8 @@ void WatchMemory() {
 
 void GameThread() {
     UseAlternateStack();
+    pt::visionos::g_game_thread = mach_thread_self();
+    pt::visionos::LoopTick();
     pt::xr::Bridge& b = pt::xr::bridge();
     b.running = true;
     g_argv.clear();
