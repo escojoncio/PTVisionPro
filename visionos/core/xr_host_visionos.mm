@@ -183,7 +183,7 @@ constexpr Glyph kGlyphs[] = {
     {'(', {0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02}},
     {')', {0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08}},
 };
-constexpr uint32_t kOverlayWidth = 640;
+constexpr uint32_t kOverlayWidth = 800;  // 65 characters: the longest line fits
 constexpr uint32_t kOverlayHeight = 28;
 constexpr int kOverlayScale = 2;
 
@@ -1348,8 +1348,8 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 const simd_float4x4 world_from_view = simd_mul(origin_from_device, cp_view_get_transform(view));
                 const simd_float4x4 view_projection = simd_mul(projection, Inverse(world_from_view));
                 const glm::quat head = QuatOf(origin_from_device);
-                const glm::vec3 position = PositionOf(origin_from_device) + head * glm::vec3(0.0f, -0.30f, -1.0f);
-                const float width = 0.6f;
+                const glm::vec3 position = PositionOf(origin_from_device) + head * glm::vec3(0.0f, -0.18f, -1.0f);  // ~10° low: still sharp with foveation
+                const float width = 0.75f;
                 Uniforms q{};
                 q.mvp = simd_mul(view_projection, ModelMatrix(head, position, glm::vec2(width, width * kOverlayHeight / kOverlayWidth)));
                 q.rect = simd_make_float4(0.0f, 0.0f, 1.0f, 1.0f);
