@@ -91,6 +91,10 @@ targets:
           - -framework CoreVideo
           - -framework IOKit
           - -framework Security
+          # What SDL3 (audio, events) links on visionOS.
+          - -framework CoreMotion
+          - -framework CoreBluetooth
+          - -weak_framework UniformTypeIdentifiers
         ENABLE_BITCODE: NO
         DEAD_CODE_STRIPPING: YES
         MTL_ENABLE_DEBUG_INFO: NO

@@ -66,7 +66,8 @@ cmake -S "$ROOT/build/port-src" -B "$BUILD" -G Ninja \
   "-DPT_APP_BUILD=$BUILD_NUMBER" -DPT_BUNDLE_IDENTIFIER=com.kdt.livecontainer \
   "-DPT_HOST_GLSLC=$GLSLC" "-DPT_VOICE_DIR=$VOICE" \
   "-DPT_MOLTENVK_LIBRARY=$LIB" "-DPT_MOLTENVK_INCLUDE_DIR=$HEADERS" "-DPT_MOLTENVK_LICENSE=$MOLTENVK/LICENSE" \
-  -DPT_UPSCALERS=OFF -DPT_STREAMLINE=OFF -DPT_OPENXR=OFF -DPT_ENHANCED_TEXTURES=OFF -DPT_GAMEPLUS=OFF -DPT_NETWORK_UPDATES=OFF
+  -DPT_UPSCALERS=OFF -DPT_STREAMLINE=OFF -DPT_OPENXR=OFF -DPT_ENHANCED_TEXTURES=OFF -DPT_GAMEPLUS=OFF -DPT_NETWORK_UPDATES=OFF \
+  -DSDL_OPENGLES=OFF -DSDL_OPENGL=OFF
 step "build"
 cmake --build "$BUILD" --target pt_visionos pt_shaders -j"$(sysctl -n hw.ncpu)"
 
@@ -74,21 +75,29 @@ cmake --build "$BUILD" --target pt_visionos pt_shaders -j"$(sysctl -n hw.ncpu)"
 step "collect"
 rm -rf "$BUILD/lib" "$ROOT/visionos/Resources"
 mkdir -p "$BUILD/lib" "$ROOT/visionos/Resources/licenses"
-find "$BUILD" -name '*.a' -not -path "$BUILD/lib/*" -exec cp {} "$BUILD/lib/" \;
+# The game's libraries (build/visionos) and its dependencies' (SDL3, zlib, whisper and ggml, ogg:
+# FetchContent builds them in build/deps/<name>-build). Test libraries are left out.
+find "$BUILD" "$ROOT/build/deps" -name '*.a' -not -path "$BUILD/lib/*" -not -path '*-subbuild/*' \
+  -not -name '*_test*.a' -not -name '*test_*.a' -exec cp {} "$BUILD/lib/" \;
 cp "$LIB" "$BUILD/lib/"
+echo "libraries:"; ls -1 "$BUILD/lib"
+# Every dependency the game links must be here.
+for need in libSDL3.a libz.a libwhisper.a; do
+  [ -f "$BUILD/lib/$need" ] || { echo "missing $need in the collected libraries"; exit 1; }
+done
 cp -R "$BUILD/shaders" "$ROOT/visionos/Resources/shaders"
 cp -R "$VOICE" "$ROOT/visionos/Resources/voice"
 cp -R "$ROOT/build/port-src/assets/fonts" "$ROOT/visionos/Resources/fonts"
 cp "$ROOT/build/port-src/LICENSE" "$ROOT/visionos/Resources/licenses/pt-pc-MIT.txt"
 cp "$ROOT/upstream/pt-ipad/LICENSE" "$ROOT/visionos/Resources/licenses/pt-ipad-MIT.txt"
 cp "$MOLTENVK/LICENSE" "$ROOT/visionos/Resources/licenses/MoltenVK-LICENSE.txt"
-# The game first, then its engine and the rest; the list twice for the archives that need each other.
+# The game first, then its engine and the rest (ld64 searches every archive for what is still
+# missing, so the order and a second pass are not needed).
 LINK=""
 for a in libpt_visionos.a libpt_engine.a libpt_thirdparty.a; do LINK="$LINK $BUILD/lib/$a"; done
 for a in "$BUILD"/lib/*.a; do
   case "$(basename "$a")" in libpt_visionos.a|libpt_engine.a|libpt_thirdparty.a) ;; *) LINK="$LINK $a";; esac
 done
-LINK="$LINK $LINK"
 echo "link: $LINK"
 
 # --- The app ----------------------------------------------------------------------------------
