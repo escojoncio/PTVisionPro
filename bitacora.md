@@ -26,7 +26,11 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (la instancia se crea tal cual la pide el motor; la extensión solo en `CreateDevice`).
 - **Build 7 (run_number 10): OK** con Xcode 26.6 / SDK XROS 26.5 → `releases/download/build-10/PTVisionPro-10.ipa`.
   Avisos: `cp_frame_query_drawable` obsoleta en visionOS 26 (usar `cp_frame_query_drawables`;
-  sigue funcionando). Build 8: claves VPS4 de AstroVisionPro + `withLock` en `SenseTracking`.
+  sigue funcionando).
+- **Build 8 (run_number 11): OK** → `releases/download/build-11/PTVisionPro-11.ipa` (75,8 MB).
+  Claves VPS4 de AstroVisionPro (`vps4FolderBookmark`, llavero `astroquest.vps4`/`folder-bookmark`)
+  + `withLock` en `SenseTracking` (sin avisos de Swift). Solo quedan avisos de terceros y
+  `cp_frame_query_drawable` obsoleta. Es la build recomendada para la primera prueba.
 - Build 7: Xcode 26 / visionOS 26 (runner `macos-26`, deployment 26.0 en
   `project.yml` y CMake). Cambios (todo sin probar en el visor):
   - Correcciones "sin ventana" en `main.cpp` (parche): sonido (`sound.Init` exigía ventana),
@@ -169,12 +173,12 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
   `SDL_SetMainReady` + `SDL_INIT_EVENTS|AUDIO`, `ApplySettings`, sin `SDL_CreateWindow`,
   forward decl), `cmake/Apple.cmake` (visionOS cuenta como PT_IOS), `CMakeLists.txt` (opción
   `PT_VISIONOS`, target `pt_visionos`, deps `pt_shaders pt_build_id`).
-- `tools/build_visionos.sh`: MoltenVK `make xros` (commit de `source-lock.json`), modelos de voz
+- `tools/build_visionos.sh`: MoltenVK `./fetchDependencies --visionos && make visionos` (commit de `source-lock.json`), modelos de voz
   (sha256 del dependency-lock), cmake `-DCMAKE_SYSTEM_NAME=visionOS -DCMAKE_OSX_SYSROOT=xros`,
   recoge `*.a` en `build/visionos/lib`, recursos en `visionos/Resources/{shaders,voice,fonts,
   licenses}`, `PT_LINK_FLAGS` = lista de archivos .a (dos veces), xcodegen + xcodebuild sin
   firma → `build/visionos/ipa/PTVisionPro-N.ipa`.
-- `.github/workflows/visionos.yml`: macos-15, solo `workflow_dispatch` o commit con `[build]`;
+- `.github/workflows/visionos.yml`: macos-26 (Xcode 26.6), solo `workflow_dispatch` o commit con `[build]`;
   cachés MoltenVK (clave: source-lock) y deps+voz (clave: dependency-lock); artefacto IPA +
   pre-release `build-N`.
 - `visionos/App/*`: launcher SwiftUI (presets M2/M5/Personalizado en `PTSettings.swift`,
@@ -185,13 +189,11 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 
 ## Pendiente (siguiente sesión, en orden)
 
-1. Leer el log de la build 4 y corregir errores (Swift/.mm nuevos sin compilar; riesgos: ggml/whisper con `CMAKE_SYSTEM_NAME=visionOS`; SDL3 sin
-   vídeo en visionOS; nombres exactos de la C API de Compositor Services; `GCProductCategory`
-   de los Sense; `IOKit` en visionOS).
-2. Primera prueba en el visor: ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
+1. Primera prueba en el visor (build 8): ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
    -Z adelante, igual que OpenXR; si la imagen sale girada revisar `QuatOf`/tangentes) y la
    altura (ARKit origen en el suelo; `VrPlay` recentra en la cabeza).
-3. Profundidad real al drawable (hoy constante "lejos"): mejora la reproyección a 45 fps.
-4. Resolución dinámica (el renderer recrea objetivos al cambiar de tamaño: hacerlo con viewport).
-5. Calibrar presets M2/M5 con las líneas `vr pace:` del registro.
+2. Profundidad real al drawable (hoy constante "lejos"): mejora la reproyección a 45 fps.
+3. Resolución dinámica (el renderer recrea objetivos al cambiar de tamaño: hacerlo con viewport).
+4. Calibrar presets M2/M5 con las líneas `vr pace:` del registro.
+5. Migrar a `cp_frame_query_drawables` (visionOS 26).
 6. Comprobación de datos en el launcher: hecha (chunk1.psarc, texture.qar); probar con los datos reales.
