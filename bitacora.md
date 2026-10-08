@@ -19,7 +19,13 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Además: `-DSDL_OPENGLES=OFF -DSDL_OPENGL=OFF` y frameworks de SDL3 en `project.yml`
   (CoreMotion, CoreBluetooth, UniformTypeIdentifiers débil). Aviso inocuo: MoltenVK compilado
   para visionOS 2.5 y la app para 2.0.
-- Build 5: VPS4 + arreglo de enlazado. Log completo: `git show origin/ci-logs:run-N.log`
+- **Build 5 (run_number 8): primera build completa** → `releases/download/build-8/PTVisionPro-8.ipa`
+  (76 MB; 128 shaders, voz, fuentes en la raíz del bundle; bundle `com.kdt.livecontainer`).
+  Fallo detectado en revisión: `Host::CreateInstance` añadía `VK_EXT_metal_objects` (extensión
+  de DISPOSITIVO) a la instancia → `vkCreateInstance` fallaría. Corregido en build 6
+  (la instancia se crea tal cual la pide el motor; la extensión solo en `CreateDevice`).
+- Build 6: ese arreglo. Primera prueba real en el visor pendiente.
+- (Build 5:) VPS4 + arreglo de enlazado. Log completo: `git show origin/ci-logs:run-N.log`
   (`latest.log` por la API se trunca a ~900 KB).
 - Logs de CI: `gh api "repos/escojoncio/PTVisionPro/contents/latest.log?ref=ci-logs" --jq .content | base64 -d`
   (los logs de jobs están en Azure, bloqueado). Lanzar: `gh api -X POST repos/escojoncio/PTVisionPro/actions/workflows/visionos.yml/dispatches -f ref=main`.

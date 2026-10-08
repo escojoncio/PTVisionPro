@@ -467,17 +467,9 @@ bool Host::Init(const std::string&) {
 }
 
 VkResult Host::CreateInstance(const VkInstanceCreateInfo& info, VkInstance& instance) {
-    std::vector<const char*> extensions(info.ppEnabledExtensionNames, info.ppEnabledExtensionNames + info.enabledExtensionCount);
-    const auto add = [&](const char* name) {
-        if (std::none_of(extensions.begin(), extensions.end(), [&](const char* e) { return std::strcmp(e, name) == 0; })) extensions.push_back(name);
-    };
-    add("VK_EXT_metal_objects");
-    add("VK_KHR_portability_enumeration");
-    VkInstanceCreateInfo copy = info;
-    copy.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-    copy.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
-    copy.ppEnabledExtensionNames = extensions.data();
-    return vkCreateInstance(&copy, nullptr, &instance);
+    // As the engine asks for it (it already adds VK_KHR_portability_enumeration when MoltenVK
+    // offers it). VK_EXT_metal_objects is a device extension: CreateDevice adds it.
+    return vkCreateInstance(&info, nullptr, &instance);
 }
 
 VkPhysicalDevice Host::PhysicalDevice(VkInstance instance) {
