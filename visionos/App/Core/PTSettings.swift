@@ -41,8 +41,9 @@ struct PTSettings: Codable, Equatable {
     var reflections = false
     /// Foveated rendering (where the eyes look is drawn at the drawable's full resolution).
     var foveation = true
-    /// Compositor Services' render quality, 0.1 to 1 (1: the largest drawables the system offers).
-    var renderQuality: Float = 1.0
+    /// Compositor Services' render quality with foveation (visionOS 26): 0 leaves the system's
+    /// own; 0.5 to 1 asks for that much (1: the sharpest, largest drawables the system offers).
+    var compositorQuality: Float = 0
     /// MetalFX upscaling of the game's picture to the drawable.
     var metalFX = true
     /// Sharpening of the picture on its way to the headset, 0 to 1.
@@ -88,7 +89,7 @@ struct PTSettings: Codable, Equatable {
             settings.bloom = true
             settings.reflections = false
             settings.foveation = true
-            settings.renderQuality = 1.0
+            settings.compositorQuality = 0
             settings.metalFX = true
         case .m5:
             settings.preset = .m5
@@ -102,7 +103,7 @@ struct PTSettings: Codable, Equatable {
             settings.bloom = true
             settings.reflections = true
             settings.foveation = true
-            settings.renderQuality = 1.0
+            settings.compositorQuality = 0
             settings.metalFX = false
         }
         return settings
@@ -153,7 +154,7 @@ struct PTSettings: Codable, Equatable {
         bloom = base.bloom
         reflections = base.reflections
         foveation = base.foveation
-        renderQuality = base.renderQuality
+        compositorQuality = base.compositorQuality
         metalFX = base.metalFX
         sharpen = base.sharpen
         self.preset = preset
@@ -166,7 +167,7 @@ struct PTSettings: Codable, Equatable {
             && targetFPS == base.targetFPS && fov == base.fov && graphicsPreset == base.graphicsPreset
             && shadows == base.shadows && ssao == base.ssao && bloom == base.bloom
             && reflections == base.reflections && foveation == base.foveation
-            && renderQuality == base.renderQuality && metalFX == base.metalFX && sharpen == base.sharpen
+            && compositorQuality == base.compositorQuality && metalFX == base.metalFX && sharpen == base.sharpen
     }
 
     /// Changes one setting. A preset-governed setting that leaves the preset's values makes the
@@ -205,7 +206,7 @@ struct PTSettings: Codable, Equatable {
     // Every key is optional when decoding, so that settings saved by an older version still load.
     enum CodingKeys: String, CodingKey {
         case preset, resolutionScale, dynamicResolution, targetFPS, fov, graphicsPreset, shadows
-        case ssao, bloom, reflections, foveation, renderQuality, metalFX, sharpen
+        case ssao, bloom, reflections, foveation, compositorQuality, metalFX, sharpen
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -226,7 +227,7 @@ struct PTSettings: Codable, Equatable {
         bloom = (try? c.decodeIfPresent(Bool.self, forKey: .bloom)) ?? base.bloom
         reflections = (try? c.decodeIfPresent(Bool.self, forKey: .reflections)) ?? base.reflections
         foveation = (try? c.decodeIfPresent(Bool.self, forKey: .foveation)) ?? base.foveation
-        renderQuality = (try? c.decodeIfPresent(Float.self, forKey: .renderQuality)) ?? base.renderQuality
+        compositorQuality = (try? c.decodeIfPresent(Float.self, forKey: .compositorQuality)) ?? base.compositorQuality
         metalFX = (try? c.decodeIfPresent(Bool.self, forKey: .metalFX)) ?? base.metalFX
         sharpen = (try? c.decodeIfPresent(Double.self, forKey: .sharpen)) ?? base.sharpen
         turnMode = (try? c.decodeIfPresent(Int.self, forKey: .turnMode)) ?? base.turnMode
@@ -268,7 +269,7 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_BLOOM=\(flag(bloom))",
             "PT_VP_REFLECTIONS=\(flag(reflections))",
             "PT_VP_FOVEATION=\(flag(foveation))",
-            "PT_VP_RENDER_QUALITY=\(String(format: "%.2f", renderQuality))",
+            "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
             "PT_VP_METALFX=\(flag(metalFX))",
             "PT_VP_SHARPEN=\(String(format: "%.1f", sharpen))",
             "PT_VP_TURN=\(turnMode)",

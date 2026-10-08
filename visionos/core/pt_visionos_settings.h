@@ -36,6 +36,9 @@ void GraphicsChanged(const AppSettings& settings);
 // A preset (0 M2, 1 M5, 2 custom) into the settings, and to the app.
 void ApplyPreset(int preset, AppSettings& settings);
 
+// The menu's "recentre": the game centres on the head again at the next frame.
+void RequestRecenter();
+
 // After each eye is drawn: the GPU time of the eye's last measured frame (and of its passes:
 // shadows, mirror, gbuffer, lighting, compose, post) and the CPU time it took to record it, for
 // the launcher's performance panel and a summary in the log every ten seconds.
