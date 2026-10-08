@@ -29,7 +29,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
     desde `cp_view_get_transform`/`cp_view_get_tangents` → `encode_present` + `end_submission`
     (EndFrame). Profundidad limpiada al valor "lejos" calculado con `cp_drawable_compute_projection`.
   - Shaders Metal compilados en runtime (`newLibraryWithSource`), sin .metallib.
-- `main.cpp` compilado como librería estática `libpt_visionos.a` con `-Dmain=pt_game_main` y
+- `main.cpp` compilado como librería estática `libpt_visionos.a` con `main` renombrado a `pt_game_main` (edición de prepare_source) y
   `SDL_MAIN_HANDLED`; la app Swift llama `pt_vp_start` (hilo del juego). SDL solo
   `EVENTS|AUDIO` (sin vídeo, sin ventana: `app.window = nullptr`; el bucle VR ya lo soporta).
 - Mando: GameController en Swift (`PlayStationController.swift`) → `pt_vp_set_controller` →
@@ -64,7 +64,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 1. Crear el remoto `PTVisionPro` en GitHub, push, lanzar workflow y corregir errores de
    compilación (riesgos conocidos: ggml/whisper con `CMAKE_SYSTEM_NAME=visionOS`; SDL3 sin
    vídeo en visionOS; nombres exactos de la C API de Compositor Services; `GCProductCategory`
-   de los Sense; `-Dmain=` chocando con algún token `main`; `IOKit` en visionOS).
+   de los Sense; `IOKit` en visionOS).
 2. Primera prueba en el visor: ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
    -Z adelante, igual que OpenXR; si la imagen sale girada revisar `QuatOf`/tangentes) y la
    altura (ARKit origen en el suelo; `VrPlay` recentra en la cabeza).

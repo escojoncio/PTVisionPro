@@ -65,6 +65,9 @@ def main() -> int:
             '        ApplyFullscreen(app);\n    }\n    MountMods(app);\n',
             '        ApplyFullscreen(app);\n#endif\n    }\n    MountMods(app);\n')
     replace(main_cpp,
+            'int main(int argc, char** argv) {\n',
+            '#if PT_VISIONOS\nint pt_game_main(int argc, char** argv) {  // the app calls it (visionos/core)\n#else\nint main(int argc, char** argv) {\n#endif\n')
+    replace(main_cpp,
             '#include "engine/xr/xr_host.h"\n',
             '#include "engine/xr/xr_host.h"\n#if PT_VISIONOS\nnamespace pt::visionos { void ApplySettings(pt::AppSettings& settings); }\n#endif\n')
 
@@ -81,7 +84,7 @@ if(PT_VISIONOS)
   enable_language(OBJCXX)
   target_compile_definitions(pt_engine PUBLIC PT_VISIONOS=1)
   add_library(pt_visionos STATIC src/main.cpp "${PT_VISIONOS_DIR}/core/xr_host_visionos.mm")
-  target_compile_definitions(pt_visionos PRIVATE main=pt_game_main SDL_MAIN_HANDLED=1 PT_NATIVE_BUILD="${PT_APP_BUILD}")
+  target_compile_definitions(pt_visionos PRIVATE SDL_MAIN_HANDLED=1 PT_NATIVE_BUILD="${PT_APP_BUILD}")
   target_include_directories(pt_visionos PRIVATE "${PT_VISIONOS_DIR}/App/Bridge" "${CMAKE_BINARY_DIR}/generated")
   set_source_files_properties("${PT_VISIONOS_DIR}/core/xr_host_visionos.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
   target_link_libraries(pt_visionos PUBLIC pt_engine)
