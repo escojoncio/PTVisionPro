@@ -24,7 +24,7 @@ if [ ! -f "$LIB" ]; then
     git clone https://github.com/KhronosGroup/MoltenVK.git "$MOLTENVK"
   fi
   git -C "$MOLTENVK" checkout --quiet "$MOLTENVK_COMMIT"
-  (cd "$MOLTENVK" && ./fetchDependencies --xros --no-parallel-build && make xros)
+  (cd "$MOLTENVK" && ./fetchDependencies --visionos --no-parallel-build && make visionos)
 fi
 [ -f "$LIB" ] || { echo "MoltenVK xros archive missing"; exit 1; }
 HEADERS="$MOLTENVK/Package/Release/MoltenVK/include"
