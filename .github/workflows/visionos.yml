@@ -36,9 +36,11 @@ jobs:
           brew install shaderc xcodegen
           cmake --version; glslc --version | head -1
 
+      # The caches are restored and saved by hand: actions/cache only saves when the whole job
+      # succeeds, and a failed game build would otherwise throw away a 10-minute MoltenVK build.
       - name: MoltenVK cache
         id: moltenvk
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: build/moltenvk/Package/Release/MoltenVK
           key: moltenvk-xros-${{ hashFiles('upstream/pt-ipad/source-lock.json') }}-v1
@@ -49,8 +51,20 @@ jobs:
           mkdir -p build/moltenvk
           curl -sL https://raw.githubusercontent.com/KhronosGroup/MoltenVK/main/LICENSE -o build/moltenvk/LICENSE
 
+      - name: MoltenVK
+        if: steps.moltenvk.outputs.cache-hit != 'true'
+        run: tools/build_visionos.sh --moltenvk-only
+
+      - name: Save MoltenVK cache
+        if: steps.moltenvk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/moltenvk/Package/Release/MoltenVK
+          key: ${{ steps.moltenvk.outputs.cache-primary-key }}
+
       - name: Dependency and voice cache
-        uses: actions/cache@v4
+        id: deps
+        uses: actions/cache/restore@v4
         with:
           path: |
             build/deps
@@ -61,6 +75,15 @@ jobs:
         run: |
           set -o pipefail
           tools/build_visionos.sh ${{ github.run_number }} 2>&1 | tee build.log
+
+      - name: Save dependency and voice cache
+        if: always() && steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/deps
+            build/voice
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       # The full build log on the ci-logs branch (readable through the API, unlike the job logs).
       - name: Publish log

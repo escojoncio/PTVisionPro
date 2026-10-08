@@ -28,7 +28,11 @@ final class GameRunner: @unchecked Sendable {
                      + "foveation \(configuration.isFoveationEnabled), colour \(configuration.colorFormat.rawValue)")
 
         let gamePath = model.gameData?.folder.path ?? ""
-        let arguments = ["--game", gamePath]
+        var arguments = ["--game", gamePath]
+        // The saves in VPS4/Partidas/CUSA01127 (they outlive the app); without VPS4, in the app.
+        if let saves = VPS4Folder.shared.saves(for: GameData.folderName) {
+            arguments += ["--save-dir", saves.path]
+        }
         let environment = settings.environment
         LogFiles.log("Starting the core: \(arguments.joined(separator: " "))")
 

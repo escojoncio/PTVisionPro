@@ -143,7 +143,7 @@ index e8e4ae7..080b90b 100644
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..7a36505 100644
+index d629ab3..93b9109 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -429,3 +429,28 @@ index d629ab3..7a36505 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
+@@ -4568,6 +4728,16 @@ int main(int argc, char** argv) {
+         pt::LogError("SDL_Init: {}", SDL_GetError());
+         return 1;
+     }
++#if PT_VISIONOS
++    // The launcher found and checked the game's folder (VPS4/Juegos/CUSA01127 or the app's
++    // Documents, by the files' sizes) and gives it as --game: it is used as it is, without the
++    // iPad's manifest-verified installation.
++    if (!options.game_dir_given || !LooksLikeGameDir(options.game_dir)) {
++        pt::LogError("visionos: no game folder from the launcher (--game {})", options.game_dir.string());
++        return 1;
++    }
++    pt::LogInfo("visionos: game folder {}", options.game_dir.string());
++#else
+     {
+         const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
+         if (!documents) {
+@@ -4604,6 +4774,7 @@ int main(int argc, char** argv) {
+         app.options.game_dir = verified.directory;
+         app.options.game_dir_given = true;
+     }
++#endif  // PT_VISIONOS
+ #endif
+     pt::Vfs vfs;
+     const std::filesystem::path game_dir = FindGameDir(options);
