@@ -10,8 +10,8 @@
 // An app cannot look outside its own folder by itself: the player picks VPS4 once (a folder
 // picker that only accepts that name) and the app keeps a bookmark to it, in its settings and
 // in the keychain (which outlives a reinstall; whether the bookmark still opens then is up to
-// the system: if not, the player picks it again). The same keys are used by the other ports, so
-// with the same bundle ID one pick serves all of them.
+// the system: if not, the player picks it again). The keys are AstroVisionPro's
+// (visionos/App/Core/GameFolder.swift there): with the same bundle ID one pick serves both apps.
 
 import Foundation
 import Security
@@ -23,9 +23,10 @@ final class VPS4Folder: @unchecked Sendable {
     static let gamesName = "Juegos"
     static let savesName = "Partidas"
 
-    private static let defaultsKey = "vps4.bookmark"
-    private static let keychainService = "VPS4"
-    private static let keychainAccount = "bookmark"
+    // Shared with AstroVisionPro's GameFolder: keep them the same.
+    private static let defaultsKey = "vps4FolderBookmark"
+    private static let keychainService = "astroquest.vps4"
+    private static let keychainAccount = "folder-bookmark"
 
     private let lock = NSLock()
     private var opened: URL?
@@ -39,25 +40,31 @@ final class VPS4Folder: @unchecked Sendable {
         if let opened {
             return opened
         }
-        guard let data = UserDefaults.standard.data(forKey: Self.defaultsKey) ?? Self.keychainBookmark() else {
-            return nil
+        // The app's settings first, then the keychain (which outlives a reinstall).
+        let stored: [(String, Data?)] = [("settings", UserDefaults.standard.data(forKey: Self.defaultsKey)),
+                                         ("keychain", Self.keychainBookmark())]
+        for (source, data) in stored {
+            guard let data else { continue }
+            var stale = false
+            guard let resolved = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
+                LogFiles.log("VPS4: the folder kept in the \(source) no longer opens")
+                continue
+            }
+            let accessing = resolved.startAccessingSecurityScopedResource()
+            guard accessing || FileManager.default.isReadableFile(atPath: resolved.path) else {
+                LogFiles.log("VPS4: no access to \(resolved.path) (kept in the \(source))")
+                continue
+            }
+            if stale || source != "settings",
+               let fresh = try? resolved.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                Self.save(fresh)
+            }
+            opened = resolved
+            Self.makeSubfolders(resolved)
+            LogFiles.log("VPS4: \(resolved.path) (kept in the \(source))")
+            return resolved
         }
-        var stale = false
-        guard let resolved = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else {
-            LogFiles.log("VPS4: the saved folder no longer opens; it has to be chosen again")
-            return nil
-        }
-        guard resolved.startAccessingSecurityScopedResource() else {
-            LogFiles.log("VPS4: no access to \(resolved.path); it has to be chosen again")
-            return nil
-        }
-        if stale, let fresh = try? resolved.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            Self.save(fresh)
-        }
-        opened = resolved
-        Self.makeSubfolders(resolved)
-        LogFiles.log("VPS4: \(resolved.path)")
-        return resolved
+        return nil
     }
 
     /// The folder the player picked. Nil and a reason when it is not one the app can use.
@@ -66,7 +73,8 @@ final class VPS4Folder: @unchecked Sendable {
             return L("Esa carpeta se llama «\(picked.lastPathComponent)». Elige la carpeta llamada VPS4.",
                      "That folder is called “\(picked.lastPathComponent)”. Choose the folder called VPS4.")
         }
-        guard picked.startAccessingSecurityScopedResource() else {
+        let accessing = picked.startAccessingSecurityScopedResource()
+        guard accessing || FileManager.default.isReadableFile(atPath: picked.path) else {
             return L("No se pudo abrir la carpeta VPS4.", "The VPS4 folder could not be opened.")
         }
         guard let data = try? picked.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else {
@@ -109,7 +117,8 @@ final class VPS4Folder: @unchecked Sendable {
     // MARK: - Storage
 
     private static func makeSubfolders(_ root: URL) {
-        for name in [gamesName, savesName] {
+        // Cachés is AstroVisionPro's (its shader cache); made here too so the folder looks the same.
+        for name in [gamesName, savesName, "Cachés"] {
             try? FileManager.default.createDirectory(at: root.appendingPathComponent(name, isDirectory: true),
                                                      withIntermediateDirectories: true)
         }
