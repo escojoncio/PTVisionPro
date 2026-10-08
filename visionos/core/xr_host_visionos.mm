@@ -27,6 +27,7 @@
 #include <mach/mach.h>
 #include <os/proc.h>
 #include <pthread.h>
+#include <pthread/qos.h>
 #include <dlfcn.h>
 #include <exception>
 #include <signal.h>
@@ -357,7 +358,7 @@ PFN_vkExportMetalObjectsEXT ExportMetalObjects(VkDevice device) {
 bool Available() { return true; }
 
 static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, const FrameLayers& layers, const simd_float4x4& origin_from_device,
-                         bool render, id<MTLCommandBuffer> cb, bool enlarge = true);
+                         bool render, id<MTLCommandBuffer> cb, bool enlarge = true, const uint32_t* indices = nullptr);
 
 // A frame's drawables (visionOS 26): the headset's own first, and while a high-quality video is
 // being recorded a second one for the recording. False when the frame was cancelled: it has no
@@ -411,6 +412,32 @@ struct Host::Impl {
     cp_drawable_t drawable = nil;
     cp_drawable_t capture = nil;
     bool submitting = false;
+
+    // Frames while the game loop is busy for a while (a load runs on the thread that draws):
+    // visionOS ends an immersive app that sends no frame for 2 s. The game thread's calls into
+    // the host hold `mutex` and note when they came; once none has come for a moment, a helper
+    // thread (`keeper`) shows the last picture again, with the head pose it was drawn for (the
+    // compositor turns it to where the head is now), until the game is back.
+    std::mutex mutex;
+    std::atomic<int64_t> game_call_ns{0};
+    std::thread keeper;
+    std::atomic<bool> keeper_stop{false};
+    bool have_last = false;
+    FrameLayers last_layers{};
+    simd_float4x4 last_origin_from_device = matrix_identity_float4x4;
+    ar_device_anchor_t last_anchor = nil;  // the pose of the last picture (swapped with `anchor`)
+    ar_device_anchor_t idle_anchor = nil;  // the head now, for black frames before any picture
+    uint32_t last_index[4] = {0, 0, 0, 0};  // its images: eye 0, eye 1, HUD, screen
+
+    // A call of the game's into the host: noted (the keeper stops after the frame it is on),
+    // then the host is the game's.
+    std::unique_lock<std::mutex> GameCall() {
+        game_call_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        std::unique_lock<std::mutex> lock(mutex);
+        game_call_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+        return lock;
+    }
+
     // The field of view each eye image covers (tangents: left, right, down, up), as the game
     // drew it: placed by it in the views of any drawable.
     simd_float4 eye_tangents[2] = {simd_make_float4(-1.0f, 1.0f, -1.0f, 1.0f), simd_make_float4(-1.0f, 1.0f, -1.0f, 1.0f)};
@@ -652,11 +679,118 @@ static void StartTracking(Host::Impl& x) {
 // for: what a drawable holds before it is drawn is undefined.
 static void PresentBlank(Host& host, Host::Impl& x, cp_drawable_t drawable) {
     if (!drawable) return;
+    // A frame of the game's left without a picture: the pose it was opened with (set here, as
+    // only the one who presents a drawable sets its anchor).
+    if (drawable == x.drawable || drawable == x.capture) {
+        if (x.anchor_valid) cp_drawable_set_device_anchor(drawable, x.anchor);
+    }
     id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
     cb.label = @"P.T. blank";
     ComposeFrame(host, x, drawable, FrameLayers{}, matrix_identity_float4x4, false, cb, false);
     cp_drawable_encode_present(drawable, cb);
     [cb commit];
+}
+
+static int64_t SteadyNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The keeper's picture on one drawable: the game's last one with the pose it was drawn for, or
+// black (with the head now) before there is one.
+static void ShowHeld(Host& host, Host::Impl& x, cp_drawable_t drawable) {
+    if (!drawable) return;
+    if (!x.have_last) {
+        const CFTimeInterval when = cp_time_to_cf_time_interval(cp_frame_timing_get_presentation_time(cp_drawable_get_frame_timing(drawable)));
+        if (ar_world_tracking_provider_query_device_anchor_at_timestamp(x.world_tracking, when, x.idle_anchor) == ar_device_anchor_query_status_success) {
+            cp_drawable_set_device_anchor(drawable, x.idle_anchor);
+        }
+        PresentBlank(host, x, drawable);
+        return;
+    }
+    cp_drawable_set_device_anchor(drawable, x.last_anchor);
+    id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
+    cb.label = @"P.T. held";
+    // enlarge=false: MetalFX's images still hold the last picture enlarged.
+    ComposeFrame(host, x, drawable, x.last_layers, x.last_origin_from_device, true, cb, false, x.last_index);
+    cp_drawable_encode_present(drawable, cb);
+    [cb commit];
+}
+
+// One frame from the keeper (with `x.mutex` held). The frame the game opened before it got busy
+// (the game draws after its update, which is where loads run) is finished here: the game then
+// finds it gone and skips drawing it. Otherwise a new frame, paced by the compositor.
+static bool PresentHeldFrame(Host& host, Host::Impl& x) {
+    cp_frame_t frame = nil;
+    cp_drawable_t drawable = nil;
+    cp_drawable_t capture = nil;
+    if (x.frame) {
+        frame = x.frame;
+        const bool submitting = x.submitting;
+        drawable = x.drawable;
+        capture = x.capture;
+        x.frame = nil;
+        x.drawable = nil;
+        x.capture = nil;
+        x.submitting = false;
+        if (!submitting) {
+            cp_frame_start_submission(frame);
+            if (!QueryDrawables(frame, drawable, capture)) return false;  // cancelled: not to be touched
+        }
+    } else {
+        frame = cp_layer_renderer_query_next_frame(x.layer);
+        if (!frame) return false;
+        cp_frame_timing_t timing = cp_frame_predict_timing(frame);
+        cp_frame_start_update(frame);
+        cp_frame_end_update(frame);
+        cp_time_wait_until(cp_frame_timing_get_optimal_input_time(timing));
+        cp_frame_start_submission(frame);
+        if (!QueryDrawables(frame, drawable, capture)) return false;
+    }
+    ShowHeld(host, x, drawable);
+    ShowHeld(host, x, capture);
+    cp_frame_end_submission(frame);
+    return true;
+}
+
+// The keeper thread: idle while the game calls into the host; once it has not for 0.7 s, it
+// sends frames itself until the game is back (well inside visionOS's 2 s).
+static void KeepPresenting(Host& host, Host::Impl& x) {
+    pthread_setname_np("P.T. frame keeper");
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    // 0.7 s: past a frame's usual hitches (a first draw compiling pipelines), with 1.3 s to spare.
+    constexpr int64_t kBusyNs = 700'000'000;
+    bool covering = false;
+    int64_t covering_since = 0;
+    uint64_t covered_frames = 0;
+    while (!x.keeper_stop.load()) {
+        @autoreleasepool {
+            bool presented = false;
+            bool covered = false;
+            bool busy = SteadyNs() - x.game_call_ns.load() >= kBusyNs;
+            if (busy) {
+                std::unique_lock<std::mutex> lock(x.mutex);
+                busy = SteadyNs() - x.game_call_ns.load() >= kBusyNs;  // the game may have come back meanwhile
+                if (busy && x.running && x.layer && !x.space_gone && cp_layer_renderer_get_state(x.layer) == cp_layer_renderer_state_running) {
+                    if (!covering) {
+                        covering = true;
+                        covering_since = SteadyNs();
+                        covered_frames = 0;
+                        LogInfo("vr: the game loop is busy (a load); the {} is shown until it is back", x.have_last ? "last picture" : "black view");
+                    }
+                    covered = true;
+                    presented = PresentHeldFrame(host, x);
+                    if (presented) ++covered_frames;
+                }
+            }
+            if (covering && !covered) {
+                covering = false;
+                LogInfo("vr: the game loop is back after {:.1f} s; {} frames were shown for it", (SteadyNs() - covering_since) / 1.0e9, covered_frames);
+            }
+            // Between the keeper's frames the host is free for the game (each frame waits on the
+            // compositor's pacing); idle, it looks again a moment later.
+            if (!presented) std::this_thread::sleep_for(std::chrono::milliseconds(busy ? 5 : 20));
+        }
+    }
 }
 
 Host::Host() : impl_(std::make_unique<Impl>()) {}
@@ -684,6 +818,8 @@ bool Host::Init(const std::string&) {
     // ARKit: the head.
     StartTracking(*impl_);
     impl_->anchor = ar_device_anchor_create();
+    impl_->last_anchor = ar_device_anchor_create();
+    impl_->idle_anchor = ar_device_anchor_create();
     return true;
 }
 
@@ -831,12 +967,18 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
     x.divisor = pt::visionos::Headset().target_fps == 45 ? 2 : 1;
     cp_layer_renderer_set_minimum_frame_repeat_count(x.layer, x.divisor - 1);
     x.last_stats = std::chrono::steady_clock::now();
+    // From here on the game's frames are watched: a busy loop gets frames from the keeper.
+    x.game_call_ns.store(SteadyNs());
+    x.keeper_stop.store(false);
+    x.keeper = std::thread([this] { KeepPresenting(*this, *impl_); });
     LogInfo("vr: session created");
     return true;
 }
 
 void Host::Shutdown() {
     Impl& x = *impl_;
+    x.keeper_stop.store(true);
+    if (x.keeper.joinable()) x.keeper.join();
     if (x.frame) {
         if (x.submitting && !x.space_gone) {
             PresentBlank(*this, x, x.drawable);
@@ -871,6 +1013,7 @@ void Host::Shutdown() {
 void Host::PollEvents() {
     pt::visionos::LoopTick();
     Impl& x = *impl_;
+    auto guard = x.GameCall();
     if (!x.layer) return;
     cp_layer_renderer_state state = cp_layer_renderer_get_state(x.layer);
     Bridge& b = bridge();
@@ -899,6 +1042,7 @@ void Host::PollEvents() {
             x.submitting = false;
             frame_open_ = false;
             x.have_head = false;
+            x.have_last = false;  // a picture of the old space, with poses of its tracking
         };
         if (next) {
             // A new immersive space (the player came back to the game): drawn to from now on,
@@ -935,6 +1079,7 @@ bool Host::ShouldRender() const { return should_render_; }
 bool Host::WaitFrame() {
     pt::visionos::LoopTick();
     Impl& x = *impl_;
+    auto guard = x.GameCall();
     if (!x.running) return false;
     if (x.frame) {
         // A frame left open by a loop iteration that drew nothing.
@@ -985,6 +1130,7 @@ bool Host::WaitFrame() {
 
 bool Host::BeginFrame() {
     Impl& x = *impl_;
+    auto guard = x.GameCall();
     if (!x.frame) return false;
     cp_frame_start_submission(x.frame);
     x.submitting = true;
@@ -999,17 +1145,16 @@ bool Host::BeginFrame() {
     cp_frame_timing_t timing = cp_drawable_get_frame_timing(x.drawable);
     const CFTimeInterval when = cp_time_to_cf_time_interval(cp_frame_timing_get_presentation_time(timing));
     x.anchor_valid = ar_world_tracking_provider_query_device_anchor_at_timestamp(x.world_tracking, when, x.anchor) == ar_device_anchor_query_status_success;
-    if (x.anchor_valid) {
-        cp_drawable_set_device_anchor(x.drawable, x.anchor);
-        if (x.capture) cp_drawable_set_device_anchor(x.capture, x.anchor);
-        x.origin_from_device = ar_anchor_get_origin_from_anchor_transform(x.anchor);
-    }
+    // The drawables get their anchor from whoever presents them (EndFrame, or the keeper with the
+    // pose of the picture it shows): one anchor per drawable.
+    if (x.anchor_valid) x.origin_from_device = ar_anchor_get_origin_from_anchor_transform(x.anchor);
     frame_open_ = true;
     return true;
 }
 
 void Host::LocateViews() {
     Impl& x = *impl_;
+    auto guard = x.GameCall();
     views_valid_ = false;
     if (!x.drawable || !x.anchor_valid) return;
     const size_t count = cp_drawable_get_view_count(x.drawable);
@@ -1056,6 +1201,7 @@ void Host::LocateViews() {
 }
 
 void Host::SyncActions() {
+    auto guard = impl_->GameCall();
     Bridge& b = bridge();
     pt_vp_controller c;
     {
@@ -1239,9 +1385,14 @@ void Host::SyncActions() {
 bool Host::Acquire(Swapchain& swapchain) {
     if (swapchain.images.empty()) return false;
     Impl& x = *impl_;
+    auto guard = x.GameCall();
     int which = &swapchain == &eye_swapchains_[0] ? 0 : &swapchain == &eye_swapchains_[1] ? 1 : &swapchain == &hud_swapchain_ ? 2 : 3;
+    const uint32_t count = static_cast<uint32_t>(swapchain.images.size());
+    // Never the image of the picture the keeper would show again (it keeps the last one, which
+    // frames the keeper took over did not replace).
+    if (x.have_last && count > 2 && x.next_image[which] == x.last_index[which]) x.next_image[which] = (x.next_image[which] + 1) % count;
     swapchain.index = x.next_image[which];
-    x.next_image[which] = (x.next_image[which] + 1) % static_cast<uint32_t>(swapchain.images.size());
+    x.next_image[which] = (x.next_image[which] + 1) % count;
     swapchain.acquired = true;
     return true;
 }
@@ -1252,13 +1403,18 @@ void Host::Release(Swapchain& swapchain) { swapchain.acquired = false; }
 // HUD as quads in the world. `origin_from_device` is the head pose the drawable is set to (the
 // one the eye images were drawn for). Encoded into `cb`; the caller presents.
 static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, const FrameLayers& layers, const simd_float4x4& origin_from_device,
-                         bool render, id<MTLCommandBuffer> cb, bool enlarge) {
+                         bool render, id<MTLCommandBuffer> cb, bool enlarge, const uint32_t* indices) {
+    // The image of each swapchain to show: this frame's, or given (a picture shown again).
+    const auto image = [&](int which) -> uint32_t {
+        if (indices) return indices[which];
+        return which < 2 ? host.EyeSwapchain(which).index : which == 2 ? host.HudSwapchain().index : host.ScreenSwapchain().index;
+    };
     // MetalFX first: the eye images enlarged (a recording's drawable reuses the enlarged images).
     const bool use_enlarged = x.metalfx && layers.projection;
     if (use_enlarged && enlarge && render) {
         for (int eye = 0; eye < 2; ++eye) {
             id<MTLFXSpatialScaler> scaler = x.scalers[eye];
-            scaler.colorTexture = x.textures[eye][host.EyeSwapchain(eye).index];
+            scaler.colorTexture = x.textures[eye][image(eye)];
             scaler.outputTexture = x.enlarged[eye];
             scaler.inputContentWidth = x.eye_width;
             scaler.inputContentHeight = x.eye_height;
@@ -1321,7 +1477,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 [enc setRenderPipelineState:x.eye_pipeline];
                 [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
                 [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
-                [enc setFragmentTexture:use_enlarged ? x.enlarged[v] : x.textures[v][host.EyeSwapchain(static_cast<int>(v)).index] atIndex:0];
+                [enc setFragmentTexture:use_enlarged ? x.enlarged[v] : x.textures[v][image(static_cast<int>(v))] atIndex:0];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             }
             if (layers.screen || layers.hud) {
@@ -1334,7 +1490,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                                                    : x.rays[1 - x.primary_hand].active && x.rays[1 - x.primary_hand].hit ? &x.rays[1 - x.primary_hand]
                                                                                                                         : nullptr;
                 const int cursor_panel = layers.hud ? 2 : 3;
-                auto quad = [&](int which, const Swapchain& sc, const glm::quat& orientation, const glm::vec3& position, const glm::vec2& size, bool alpha) {
+                auto quad = [&](int which, const glm::quat& orientation, const glm::vec3& position, const glm::vec2& size, bool alpha) {
                     Uniforms q{};
                     q.mvp = simd_mul(view_projection, ModelMatrix(orientation, position, size));
                     q.rect = simd_make_float4(0.0f, 0.0f, 1.0f, 1.0f);
@@ -1345,11 +1501,11 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     }
                     [enc setVertexBytes:&q length:sizeof(q) atIndex:0];
                     [enc setFragmentBytes:&q length:sizeof(q) atIndex:0];
-                    [enc setFragmentTexture:x.textures[which][sc.index] atIndex:0];
+                    [enc setFragmentTexture:x.textures[which][image(which)] atIndex:0];
                     [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 };
-                if (layers.screen) quad(3, host.ScreenSwapchain(), layers.screen_orientation, layers.screen_position, layers.screen_size, false);
-                if (layers.hud) quad(2, host.HudSwapchain(), layers.hud_orientation, layers.hud_position, layers.hud_size, true);
+                if (layers.screen) quad(3, layers.screen_orientation, layers.screen_position, layers.screen_size, false);
+                if (layers.hud) quad(2, layers.hud_orientation, layers.hud_position, layers.hud_size, true);
                 // The lasers from the hands.
                 [enc setRenderPipelineState:x.laser_pipeline];
                 for (int h = 0; h < 2; ++h) {
@@ -1392,7 +1548,13 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
 
 void Host::EndFrame(const FrameLayers& layers) {
     Impl& x = *impl_;
-    if (!frame_open_ || !x.frame) return;
+    auto guard = x.GameCall();
+    if (!x.frame) {
+        // None open, or the keeper finished it while the game was busy: nothing to send.
+        frame_open_ = false;
+        return;
+    }
+    if (!frame_open_) return;
     if (!x.drawable) {
         if (x.submitting) cp_frame_end_submission(x.frame);
         x.submitting = false;
@@ -1421,6 +1583,10 @@ void Host::EndFrame(const FrameLayers& layers) {
                                     bytesPerRow:kOverlayWidth * sizeof(uint32_t)];
         x.overlay_current = next;
         x.overlay_updated = std::chrono::steady_clock::now();
+    }
+    if (x.anchor_valid) {
+        cp_drawable_set_device_anchor(x.drawable, x.anchor);
+        if (x.capture) cp_drawable_set_device_anchor(x.capture, x.anchor);
     }
     id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
     cb.label = @"P.T. composite";
@@ -1453,6 +1619,17 @@ void Host::EndFrame(const FrameLayers& layers) {
             x.panel_centre = layers.screen_position;
             x.panel_size = layers.screen_size;
         }
+        // Kept for the keeper: shown again with this pose while the game is busy.
+        if (x.anchor_valid) {
+            x.last_layers = layers;
+            x.last_origin_from_device = x.origin_from_device;
+            std::swap(x.anchor, x.last_anchor);
+            x.last_index[0] = eye_swapchains_[0].index;
+            x.last_index[1] = eye_swapchains_[1].index;
+            x.last_index[2] = hud_swapchain_.index;
+            x.last_index[3] = screen_swapchain_.index;
+            x.have_last = true;
+        }
     }
     x.frame = nil;
     x.drawable = nil;
@@ -1472,6 +1649,7 @@ bool Host::TakeRecenter() {
 
 void Host::SetFrameDivisor(int divisor) {
     Impl& x = *impl_;
+    auto guard = x.GameCall();
     x.divisor = std::clamp(divisor, 1, 2);
     if (x.layer) cp_layer_renderer_set_minimum_frame_repeat_count(x.layer, x.divisor - 1);
     LogInfo("vr: {} frames a second", x.divisor == 2 ? 45 : 90);

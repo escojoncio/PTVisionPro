@@ -89,6 +89,33 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Simbolizar: el binario de la IPA conserva la tabla de símbolos →
   `unzip PTVisionPro-N.ipa Payload/PTVisionPro.app/PTVisionPro`, luego
   `llvm-symbolizer --obj=PTVisionPro 0x1<offset>` (dirección = 0x100000000 + offset) o `llvm-nm -C -n`.
+- **Prueba build 13: causa encontrada.** Sin crash/abort/exit; memoria 3023 MB de 8191. Últimas `where:`
+  (simbolizadas con `llvm-nm -n` del binario de la IPA; `llvm-symbolizer` no resuelve) = carga normal del
+  pasillo en el hilo del juego: `Game::Update → StageManager::Update → LoadStage → Load → ModelCache::Load →
+  BuildMaterial → TextureManager::LoadFox → LoadFtex → uncompress` y luego `Surfaces → BuildSurfaces → LoadFmdl`;
+  bucle >1,1 s sin dibujar y fin. **visionOS mata (SIGKILL, no capturable, motivo 0x27) una app inmersiva que
+  pasa 2,0 s sin enviar fotogramas** (mensaje de sistema "hasn't been sending frames for 2.0s"; mismo caso
+  documentado en Unity para cargas y compilación de shaders). En `VrPlay::BeginLoop` el juego abre el frame
+  (WaitFrame+BeginFrame) ANTES de su update, así que la carga ocurre con un frame abierto.
+- **Build 14 (lanzada): "keeper" de fotogramas** (`xr_host_visionos.mm`):
+  - `Impl::mutex` + `GameCall()` (sella `game_call_ns` antes y después de bloquear) en PollEvents, WaitFrame,
+    BeginFrame, LocateViews, SyncActions, Acquire, EndFrame, SetFrameDivisor. Ninguno llama a otro con guarda.
+  - Hilo `KeepPresenting` (arranca al final de `StartSession`, `join` al principio de `Shutdown`; QoS
+    user-interactive; `@autoreleasepool` por vuelta): si no hay llamada del juego en 0,7 s, con el mutex,
+    `PresentHeldFrame`: termina el frame abierto del juego (lo vacía: `BeginFrame`/`LocateViews`/`EndFrame`
+    ven `x.frame` nil y no hacen nada; el render de ese frame se pierde) o pide uno nuevo
+    (query/update/wait/submission). `ShowHeld`: última imagen (`last_layers`, `last_origin_from_device`,
+    `last_index[4]`, `last_anchor`) con su pose → el compositor la reproyecta (escena congelada y estable);
+    sin imagen aún: negro con la cabeza actual (`idle_anchor`). Log: `vr: the game loop is busy (a load)...` /
+    `vr: the game loop is back after X s; N frames were shown for it`.
+  - El ancla del dispositivo se pone una sola vez por drawable, quien lo presenta: `EndFrame` (antes en
+    `BeginFrame`), `PresentBlank` para frames del juego sobrantes, el keeper con `last_anchor`/`idle_anchor`.
+  - `EndFrame` guarda `last_*` si `anything && anchor_valid` (swap `anchor`↔`last_anchor`); sin `x.frame`
+    pone `frame_open_ = false`. `Acquire` salta la imagen `last_index` (3 imágenes: alterna las otras dos).
+    `have_last = false` al cambiar o cerrarse el espacio. `ComposeFrame` acepta `indices` (imágenes dadas).
+  - Riesgo sin verificar: el keeper termina en su hilo un `cp_frame` empezado en el hilo del juego (orden
+    garantizado por el mutex). Si el log del sistema se queja: terminar el frame abierto en la siguiente
+    llamada del juego y que el keeper solo pida frames nuevos.
 - **Build 11 (run_number 15): OK** → `releases/download/build-15/PTVisionPro-15.ipa`. **Build 12 (run_number 16): OK** → `releases/download/build-16/PTVisionPro-16.ipa` (la recomendada):
   solo quita la asignación de memoria con el hilo del juego suspendido en `DumpGameThread` (array fijo).
   Build 11: diagnóstico, sin cambio de comportamiento del juego:
@@ -279,6 +306,8 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 
 ## Pendiente (siguiente sesión, en orden)
 
+0. Probar build 14 hasta pasado el pasillo: en `pt.log` deben salir las líneas del keeper durante las
+   cargas y ningún cierre. Si sigue cerrándose, buscar la última línea `where:`/`vr:`.
 1. Primera prueba en el visor (build 8): ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
    -Z adelante, igual que OpenXR; si la imagen sale girada revisar `QuatOf`/tangentes) y la
    altura (ARKit origen en el suelo; `VrPlay` recentra en la cabeza).
