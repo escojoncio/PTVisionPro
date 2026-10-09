@@ -151,7 +151,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 25 (run 29):** igual que 24 (30 ms inicio, 36–42 ms después). Anisotrópico 8x OK. Luces ~3 ms/vista,
   sombras hasta 3,5 ms/frame. Partida con brillo 4 (`kBrightness[4]` = 0,76 → oscurece; 7 = neutro). El patrón de
   calibración (UI) no cambiaba: el HUD no recibía el brillo.
-- **Build 26:**
+- **Build 26 (run 30): OK** (sin probar):
   - Luces en una pasada: `shaders/light_all.frag` (hasta 32 luces, máscaras `ids.z` dibujadas / `ids.w` con sombra, mismo
     `EvaluateLight`), pipeline `light_all_` (Additive, 2 colores, profundidad solo lectura), en `RecordLighting` para
     `view_bit == 1` sin RT/contacto ni `PT_LIGHT_DRAW_ONLY/NO_SHADOW/PT_LIGHT_VOLUMES`; si no, volúmenes como antes.
