@@ -92,7 +92,7 @@ struct PTSettings: Codable, Equatable {
             settings.targetFPS = 90
             settings.fov = 100
             settings.graphicsPreset = "medium"
-            settings.shadows = "low"
+            settings.shadows = "high"
             settings.ssao = true
             settings.bloom = true
             settings.reflections = true
@@ -106,7 +106,7 @@ struct PTSettings: Codable, Equatable {
             settings.targetFPS = 90
             settings.fov = 100
             settings.graphicsPreset = "high"
-            settings.shadows = "medium"
+            settings.shadows = "high"
             settings.ssao = true
             settings.bloom = true
             settings.reflections = true

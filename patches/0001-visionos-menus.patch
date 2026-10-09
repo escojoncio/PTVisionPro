@@ -1,8 +1,67 @@
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..75a84b6 100644
+index 40d339d..79e162a 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
-@@ -2099,9 +2099,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -610,6 +610,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+         }
+     }
+ 
++    // Stereo views that share one shadow atlas (an eye's inset reuses the eye's): lights and shadow
++    // views are chosen for the cull camera (the eye's wide view), so every view of the frame gets
++    // the same ones; draws are still culled to the view itself.
++    const Camera& cull_camera = vr_cull_valid_ ? vr_cull_camera_ : camera;
++    const glm::mat4 cull_projection = vr_cull_valid_ ? cull_camera.Projection(aspect) : unjittered;
++    glm::vec4 view_planes[6];
++    std::copy(std::begin(main_view_.planes), std::begin(main_view_.planes) + 6, view_planes);
++    const glm::vec3 view_eye = main_view_.eye;
++    if (vr_cull_valid_) {
++        ExtractPlanes(cull_projection * cull_camera.View(), main_view_.planes);
++        main_view_.eye = cull_camera.position;  // shadow candidates are ranked from it
++    }
+     static const bool legacy_cull = [] {
+         const char* s = std::getenv("PT_LIGHT_CULL_LEGACY");
+         return s && std::string_view(s) == "1";
+@@ -624,8 +636,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+     mirror_occluders_ = {};
+     if (!legacy_cull) {
+         const lightcull::OccluderLimits& limits = lightcull::LimitsFromEnv();
+-        main_cull_view_projection_ = unjittered * gl_view;
+-        main_occluders_ = lightcull::BuildOccluderVolumes(lighting.occluders, main_cull_view_projection_, camera.position, limits);
++        main_cull_view_projection_ = cull_projection * cull_camera.View();
++        main_occluders_ = lightcull::BuildOccluderVolumes(lighting.occluders, main_cull_view_projection_, cull_camera.position, limits);
+         if (mirror_active_) {
+             mirror_occluders_ = lightcull::BuildOccluderVolumes(lighting.occluders, mirror_current_view_projection_, mirror_view_.eye, limits);
+         }
+@@ -664,7 +676,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+                 drop = "box outside the view planes";
+             } else if (!mirror_active_) {
+                 for (size_t oi = 0; oi < lighting.occluders.size(); ++oi) {
+-                    if (BoxOccluded(box.lo, box.hi, camera.position, lighting.occluders[oi])) {
++                    if (BoxOccluded(box.lo, box.hi, cull_camera.position, lighting.occluders[oi])) {
+                         const glm::vec3 q = lighting.occluders[oi].points[0];
+                         drop = explain ? std::format("occluder {} at ({:.2f} {:.2f} {:.2f}) hides box ({:.2f} {:.2f} {:.2f})-({:.2f} {:.2f} {:.2f})", oi, q.x,
+                                                      q.y, q.z, box.lo.x, box.lo.y, box.lo.z, box.hi.x, box.hi.y, box.hi.z)
+@@ -698,7 +710,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+             }
+         }
+         const glm::vec3 cull_rank = l.has_rank_point ? l.rank_point : (box.lo + box.hi) * 0.5f;
+-        const glm::vec3 cull_lod = LightLodScales(l, cull_rank, camera.position, camera.Forward(), projection[0][0]);
++        const glm::vec3 cull_lod = LightLodScales(l, cull_rank, cull_camera.position, cull_camera.Forward(), cull_projection[0][0]);
+         const float cull_gate = glm::pi<float>() * (l.intensity.x + l.intensity.y + l.intensity.z) * exposure_;
+         if (trace_cull_frame) {
+             std::string reason = drop;
+@@ -796,7 +808,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+         }
+         LogInfo("probe at: blend ({:.4f} {:.4f} {:.4f})", blend.x, blend.y, blend.z);
+     }
+-    BuildShadowViews(lighting, camera.position);
++    BuildShadowViews(lighting, cull_camera.position);
++    std::copy(view_planes, view_planes + 6, main_view_.planes);
++    main_view_.eye = view_eye;
+     if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
+         std::map<std::string, std::pair<bool, float>> now;
+         for (uint32_t i = 0; i < light_count_; ++i) {
+@@ -2099,9 +2113,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -17,7 +76,7 @@ index 40d339d..75a84b6 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2249,6 +2251,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2265,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -33,7 +92,7 @@ index 40d339d..75a84b6 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2333,7 +2344,41 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2333,7 +2358,41 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
      Stamp(cmd, 0);
      BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      BeginLabel(cmd, "shadows");
@@ -76,7 +135,7 @@ index 40d339d..75a84b6 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2458,11 +2503,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2458,11 +2517,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
      queries_ = VK_NULL_HANDLE;
      last_timed_slot_ = renderer_->FrameIndex();
      slot.timed = true;
@@ -106,24 +165,32 @@ index 1f96981..189bf74 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..bbca747 100644
+index 6c9b165..608a609 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,9 @@ public:
+@@ -206,6 +206,15 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
 +    // A view drawn wide at low density under an inset (visionOS foveation): no screen-space AO,
 +    // reflections or subsurface scattering in it.
 +    void SetVrLowDetail(bool low) { vr_low_detail_ = low; }
++    // The camera lights and shadow views are chosen for (stereo views sharing one shadow atlas):
++    // nullptr, the view's own.
++    void SetVrCullCamera(const Camera* camera) {
++        vr_cull_valid_ = camera != nullptr;
++        if (camera) vr_cull_camera_ = *camera;
++    }
  
  private:
      struct FrameSlot {
-@@ -636,6 +639,12 @@ private:
+@@ -636,6 +645,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
 +    bool vr_low_detail_ = false;
++    bool vr_cull_valid_ = false;
++    Camera vr_cull_camera_;
 +    // The left eye's shadow views of this frame: when the right eye's are the same (the lights'
 +    // shadows do not depend on the eye), the shadow atlas the left eye drew is used again.
 +    std::vector<ShadowView> vr_shadow_views_;
@@ -578,7 +645,7 @@ index d1485b2..7ace4f3 100644
      uint32_t raw_previous_ = 0;
      bool snap_armed_ = true;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..deaf759 100644
+index d629ab3..3b40ce4 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -974,7 +1041,7 @@ index d629ab3..deaf759 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4125,21 +4344,36 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4125,21 +4344,45 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  last_scene_time = game.Time();
                  vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
                                    lighting, vfx_pass, blend);
@@ -982,6 +1049,14 @@ index d629ab3..deaf759 100644
 +                // Views 0 and 1: the eyes; with the game's foveation they are the wide, low-density
 +                // views (no screen-space AO or reflections) and 2 and 3 their sharp centres.
 +                const int views = stereo.inset ? 4 : 2;
++#if PT_VISIONOS
++                // Lights and shadow views for the head's wide view in all of them: one atlas a frame.
++                // (Moved back 10 cm along the view so its frustum holds both eyes' views, which sit
++                // a few centimetres to each side of the head.)
++                pt::Camera cull_camera = stereo.head;
++                cull_camera.position -= cull_camera.Forward() * 0.1f;
++                app.scene.SetVrCullCamera(&cull_camera);
++#endif
 +                for (int eye = 0; eye < views; ++eye) {
                      if (!begin(eye == 0)) {
                          continue;
@@ -1011,11 +1086,12 @@ index d629ab3..deaf759 100644
                  app.scene.SetVrEye(-1);
 +#if PT_VISIONOS
 +                app.scene.SetVrLowDetail(false);
++                app.scene.SetVrCullCamera(nullptr);
 +#endif
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4802,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4811,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -1032,7 +1108,7 @@ index d629ab3..deaf759 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4848,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4857,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }
