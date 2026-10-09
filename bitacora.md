@@ -121,7 +121,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   reflejos (SSR) aunque bailen entre ojos. Culling existente: frustum por vista para draws (`Visible`, esferas
   vs planos) y luces (frustum + volúmenes oclusores de autor, `light_cull`); sin occlusion culling de geometría
   (el gbuffer es ~10 % del coste; el coste es por píxel).
-- **Build 18 (lanzada): foveado del juego (*quad views*)**:
+- **Build 18 (run_number 22): OK** → `releases/download/build-22/PTVisionPro-22.ipa` (sin probar). **Foveado del juego (*quad views*)**:
   - Por fotograma 4 renders al mismo tamaño R: vistas 0/1 = ojos (frustum unión de siempre) con imágenes de ojo a
     `periphery`% del tamaño de imagen (`SetupEyes(..., eye_factor)`, `EyeFactor(h)`); vistas 2/3 = centros:
     frustum simétrico `tan_y = center * frusta_[0].tan_y`, `tan_x = tan_y * aspect(R)`, cámara del ojo con otro
