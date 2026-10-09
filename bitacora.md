@@ -125,6 +125,18 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (~17–20 fps), térmico serious. Por vista ~10–13 ms (gbuffer 1–2, lighting 3–4, compose 3–4,7, post 2,3 ancha /
   3,4 centro). Ajuste lineal frente a build 17: ~5 ms/MP + ~2,4 ms fijos por vista (sobre todo post). Los centros
   regrababan el atlas de sombras (2,5–3,5 ms más) porque la selección de luces/sombras depende del frustum.
+- **Prueba build 19:** sin mejora apreciable (18–22 fps): las sombras ya se comparten (centros 0,02 ms) pero el total
+  sigue 44–55 ms GPU (4 vistas) + composición 1–1,6 ms. Por vista ~10–12 ms a 1,6 MP. Subtítulos de la radio
+  desplazados a un lado (HUD con seguimiento perezoso de 20°).
+- **Build 20 (lanzada):**
+  - HUD sin menú pegado a la cabeza (orientación completa, 1,6 m, como el panel de rendimiento): `VrPlay::Place`
+    (`head_orientation_local`, `hud_orientation_`); con menú abierto, colocado en el mundo como antes. `ScreenMode`
+    reinicia `menu_was_open_` en pantalla.
+  - Perfilador GPU por etiquetas (`PT_GPU_LABELS`, activado en `pt_vp_start`): gancho global en `BeginLabel/EndLabel`
+    (`render_util`), pool de 256 timestamps por `FrameSlot`, 1 render de cada 13 (recorre todas las vistas), nombres
+    `wide/`, `inset/`, `eye/` + ruta de etiquetas anidadas; `ReadLabelTimes` registra cada 10 s
+    `gpu labels (ms per view, ...)` con las 24 más caras, promediadas por tipo de vista. Ojo: en Apple los
+    timestamps caen en fronteras de encoder (las etiquetas solo-compute pueden salir ~0).
 - **Build 19 (run_number 23): OK** → `releases/download/build-23/PTVisionPro-23.ipa` (sin probar):
   - `SceneRenderer::SetVrCullCamera(const Camera*)`: en `PrepareFrame`, culling de luces (planos, oclusores,
     `main_cull_view_projection_`, `LightLodScales`) y `BuildShadowViews` usan la cámara de culling;

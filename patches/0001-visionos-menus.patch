@@ -1,5 +1,44 @@
+diff --git a/src/engine/render/render_util.cpp b/src/engine/render/render_util.cpp
+index c327bd9..1a26215 100644
+--- a/src/engine/render/render_util.cpp
++++ b/src/engine/render/render_util.cpp
+@@ -39,7 +39,11 @@ void UseTargets(VkCommandBuffer cmd, std::initializer_list<TargetUse> uses) {
+     vkCmdPipelineBarrier2(cmd, &dependency);
+ }
+ 
++LabelHook g_label_hook = nullptr;
++void* g_label_user = nullptr;
++
+ void BeginLabel(VkCommandBuffer cmd, const char* name) {
++    if (g_label_hook) g_label_hook(g_label_user, cmd, true, name);
+     if (g_checkpoints && vkCmdSetCheckpointNV) {
+         vkCmdSetCheckpointNV(cmd, name);
+     }
+@@ -54,6 +58,7 @@ void EndLabel(VkCommandBuffer cmd) {
+     if (vkCmdEndDebugUtilsLabelEXT) {
+         vkCmdEndDebugUtilsLabelEXT(cmd);
+     }
++    if (g_label_hook) g_label_hook(g_label_user, cmd, false, nullptr);
+ }
+ 
+ void SetViewport(VkCommandBuffer cmd, VkRect2D area) {
+diff --git a/src/engine/render/render_util.h b/src/engine/render/render_util.h
+index 7486360..0bc0581 100644
+--- a/src/engine/render/render_util.h
++++ b/src/engine/render/render_util.h
+@@ -35,6 +35,10 @@ void BeginPass(VkCommandBuffer cmd, VkExtent2D extent, std::initializer_list<Col
+ void BeginPass(VkCommandBuffer cmd, VkRect2D area, std::span<const ColorOutput> colors, RenderTarget* depth, bool depth_read_only, bool clear_depth);
+ void SetViewport(VkCommandBuffer cmd, VkRect2D area);
+ void BeginLabel(VkCommandBuffer cmd, const char* name);
++// A GPU profiler's hook into the labels (begin: true, name; end: false, nullptr), when set.
++using LabelHook = void (*)(void* user, VkCommandBuffer cmd, bool begin, const char* name);
++extern LabelHook g_label_hook;
++extern void* g_label_user;
+ extern bool g_checkpoints;
+ void EndLabel(VkCommandBuffer cmd);
+ 
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..79e162a 100644
+index 40d339d..d084162 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -610,6 +610,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -92,7 +131,25 @@ index 40d339d..79e162a 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2333,7 +2358,41 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2355,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+         vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
+     }
+     queries_ = slot.queries;
++    // The labelled passes' GPU times, one render in thirteen (PT_GPU_LABELS): thirteen so the timed
++    // render moves through every view of a stereo frame (two or four of them).
++    static const bool label_profile = std::getenv("PT_GPU_LABELS") != nullptr;
++    if (label_profile && slot.label_queries && !slot.label_timed && label_counter_++ % 13 == 0) {
++        label_prefix_ = vr_eye_ < 0 ? std::string() : vr_eye_ >= 2 ? std::string("inset/") : vr_low_detail_ ? std::string("wide/") : std::string("eye/");
++        slot.label_class = label_prefix_;
++        label_cmd_ = cmd;
++        vkCmdResetQueryPool(cmd, slot.label_queries, 0, kLabelQueries);
++        slot.label_spans.clear();
++        slot.label_count = 0;
++        label_stack_.clear();
++        label_slot_ = &slot;
++        g_label_user = this;
++        g_label_hook = &SceneRenderer::LabelHook;
++    }
      Stamp(cmd, 0);
      BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      BeginLabel(cmd, "shadows");
@@ -135,7 +192,17 @@ index 40d339d..79e162a 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2458,11 +2517,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2529,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+         EndLabel(cmd);
+     }
+     Stamp(cmd, 6);
++    if (label_slot_ == &slot) {
++        g_label_hook = nullptr;
++        g_label_user = nullptr;
++        label_slot_ = nullptr;
++        label_cmd_ = VK_NULL_HANDLE;
++        slot.label_timed = slot.label_count > 0;
++    }
      queries_ = VK_NULL_HANDLE;
      last_timed_slot_ = renderer_->FrameIndex();
      slot.timed = true;
@@ -150,10 +217,113 @@ index 40d339d..79e162a 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..189bf74 100644
+index 1f96981..f757cdd 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
-@@ -1189,7 +1189,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
+         vkCreateQueryPool(device_, &query, nullptr, &slot.queries);
+         query.queryCount = 4;
+         vkCreateQueryPool(device_, &query, nullptr, &slot.upscale_queries);
++        query.queryCount = kLabelQueries;
++        vkCreateQueryPool(device_, &query, nullptr, &slot.label_queries);
+     }
+     frame_ = new gpu::FrameData();
+     CreateBuiltinResources();
+@@ -555,6 +557,7 @@ void SceneRenderer::Shutdown() {
+         ctx.DestroyBuffer(slot.luminance);
+         vkDestroyQueryPool(device_, slot.queries, nullptr);
+         vkDestroyQueryPool(device_, slot.upscale_queries, nullptr);
++        if (slot.label_queries) vkDestroyQueryPool(device_, slot.label_queries, nullptr);
+     }
+     vkDestroyPipelineLayout(device_, layout_, nullptr);
+     vkDestroyDescriptorPool(device_, pool_, nullptr);
+@@ -1174,10 +1177,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+     stats_.gpu_ms = span(0, 6);
+ }
+ 
++void SceneRenderer::LabelHook(void* user, VkCommandBuffer cmd, bool begin, const char* name) {
++    SceneRenderer& r = *static_cast<SceneRenderer*>(user);
++    FrameSlot* slot = r.label_slot_;
++    if (!slot || !slot->label_queries || cmd != r.label_cmd_) return;
++    if (begin) {
++        size_t open = 0;
++        for (size_t i : r.label_stack_) open += i != SIZE_MAX ? 1 : 0;
++        if (slot->label_count + 2 + open > kLabelQueries) {
++            r.label_stack_.push_back(SIZE_MAX);
++            return;
++        }
++        FrameSlot::LabelSpan span;
++        span.name = r.label_stack_.empty() || r.label_stack_.back() == SIZE_MAX ? r.label_prefix_ + (name ? name : "?")
++                                                                               : slot->label_spans[r.label_stack_.back()].name + "/" + (name ? name : "?");
++        span.begin = slot->label_count++;
++        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot->label_queries, span.begin);
++        r.label_stack_.push_back(slot->label_spans.size());
++        slot->label_spans.push_back(std::move(span));
++        return;
++    }
++    if (r.label_stack_.empty()) return;
++    const size_t index = r.label_stack_.back();
++    r.label_stack_.pop_back();
++    if (index == SIZE_MAX || slot->label_count >= kLabelQueries) return;
++    FrameSlot::LabelSpan& span = slot->label_spans[index];
++    span.end = slot->label_count++;
++    vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot->label_queries, span.end);
++}
++
++void SceneRenderer::ReadLabelTimes(FrameSlot& slot) {
++    slot.label_timed = false;
++    if (!slot.label_queries || slot.label_count == 0) return;
++    std::vector<uint64_t> stamps(slot.label_count, 0);
++    if (vkGetQueryPoolResults(device_, slot.label_queries, 0, slot.label_count, stamps.size() * sizeof(uint64_t), stamps.data(), sizeof(uint64_t),
++                              VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
++        return;
++    }
++    const double period = renderer_->Context().properties.limits.timestampPeriod * 1.0e-6;
++    for (const FrameSlot::LabelSpan& span : slot.label_spans) {
++        if (span.end <= span.begin || span.end >= slot.label_count || stamps[span.end] < stamps[span.begin]) continue;
++        auto& sum = label_sums_[span.name];
++        sum.first += static_cast<double>(stamps[span.end] - stamps[span.begin]) * period;
++        sum.second += 1;
++    }
++    ++label_renders_;
++    ++label_class_renders_[slot.label_class];
++    const auto now = std::chrono::steady_clock::now();
++    if (label_since_ == std::chrono::steady_clock::time_point{}) label_since_ = now;
++    if (now - label_since_ < std::chrono::seconds(10) || label_renders_ == 0) return;
++    std::vector<std::pair<std::string, double>> rows;
++    for (const auto& [name, sum] : label_sums_) {
++        // Averaged over the timed views of the same kind (the prefix up to the first '/').
++        const size_t cut = name.find('/');
++        const std::string kind = cut == std::string::npos ? std::string() : name.substr(0, cut + 1);
++        const auto renders = label_class_renders_.find(label_class_renders_.contains(kind) ? kind : std::string());
++        const double n = renders != label_class_renders_.end() && renders->second ? static_cast<double>(renders->second)
++                                                                                    : static_cast<double>(label_renders_);
++        rows.emplace_back(name, sum.first / n);
++    }
++    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
++    std::string line;
++    for (size_t i = 0; i < rows.size() && i < 24; ++i) {
++        if (rows[i].second < 0.05) break;
++        line += std::format("{}{} {:.2f}", i ? ", " : "", rows[i].first, rows[i].second);
++    }
++    LogInfo("gpu labels (ms per view, {} timed views, {}x{}): {}", label_renders_, extent_.width, extent_.height, line);
++    label_sums_.clear();
++    label_class_renders_.clear();
++    label_renders_ = 0;
++    label_since_ = now;
++}
++
+ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSettings& settings) {
+     if (slot.timed) {
+         ReadTimestamps(slot);
+     }
++    if (slot.label_timed) {
++        ReadLabelTimes(slot);
++    }
+     if (slot.reflection_sampled) {
+         vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
+         const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
+@@ -1189,7 +1267,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -165,7 +335,7 @@ index 1f96981..189bf74 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..608a609 100644
+index 6c9b165..c06b228 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
 @@ -206,6 +206,15 @@ public:
@@ -184,7 +354,38 @@ index 6c9b165..608a609 100644
  
  private:
      struct FrameSlot {
-@@ -636,6 +645,14 @@ private:
+@@ -222,7 +231,30 @@ private:
+         bool measured = false;
+         bool timed = false;
+         bool reflection_sampled = false;
++        // GPU profile of the labelled passes (PT_GPU_LABELS): one render in so many is timed.
++        VkQueryPool label_queries = VK_NULL_HANDLE;
++        struct LabelSpan {
++            std::string name;  // "parent/child" for nested labels
++            uint32_t begin = 0;
++            uint32_t end = 0;
++        };
++        std::vector<LabelSpan> label_spans;
++        uint32_t label_count = 0;
++        bool label_timed = false;
++        std::string label_class;
+     };
++    static constexpr uint32_t kLabelQueries = 256;
++    static void LabelHook(void* user, VkCommandBuffer cmd, bool begin, const char* name);
++    void ReadLabelTimes(FrameSlot& slot);
++    FrameSlot* label_slot_ = nullptr;
++    std::vector<size_t> label_stack_;
++    std::map<std::string, std::pair<double, uint64_t>> label_sums_;
++    uint64_t label_renders_ = 0;
++    std::map<std::string, uint64_t> label_class_renders_;  // timed renders per kind of view
++    std::string label_prefix_;                            // the kind of view being timed ("eye/", "inset/")
++    VkCommandBuffer label_cmd_ = VK_NULL_HANDLE;
++    uint64_t label_counter_ = 0;
++    std::chrono::steady_clock::time_point label_since_{};
+ 
+     struct Draw {
+         const GpuMesh* mesh = nullptr;
+@@ -636,6 +668,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -368,7 +569,7 @@ index 42d8b01..873a582 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..5867754 100644
+index e8e4ae7..24e2635 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -379,7 +580,7 @@ index e8e4ae7..5867754 100644
  
  #include "engine/core/log.h"
  #include "engine/physics/collision_world.h"
-@@ -50,11 +51,26 @@ bool VrPlay::ScreenMode(Game& game) {
+@@ -50,23 +51,50 @@ bool VrPlay::ScreenMode(Game& game) {
      glm::vec3 position;
      glm::quat rotation;
      float fov = 0.0f;
@@ -408,8 +609,10 @@ index e8e4ae7..5867754 100644
 +    if (!cutscene_) cutscene_entered_ = false;
      if (!screen_) {
          screen_placed_ = false;
++    } else {
++        menu_was_open_ = false;  // back in stereo, an open menu is placed again in front of the head
      }
-@@ -62,11 +78,21 @@ bool VrPlay::ScreenMode(Game& game) {
+     return screen_;
  }
  
  void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool screen, float dt) {
@@ -431,7 +634,7 @@ index e8e4ae7..5867754 100644
          LogInfo("vr: centred on the head at ({:.3f} {:.3f} {:.3f}), world yaw {:.1f}", head.position.x, head.position.y, head.position.z,
                  glm::degrees(rig_.BaseYaw()));
      }
-@@ -83,6 +109,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -83,6 +111,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
              state.left_stick = move;
              state.left_stick_from_pad = true;
          }
@@ -444,7 +647,7 @@ index e8e4ae7..5867754 100644
          if (c.interact) raw |= kRawCross;
          if (c.back) raw |= kRawCircle;
          if (c.menu) raw |= kRawStart;
-@@ -106,8 +138,21 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -106,8 +140,21 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          if (raw != 0 || glm::length(c.move) > 0.2f || glm::length(c.turn) > 0.2f) {
              state.from_gamepad = true;
          }
@@ -467,7 +670,7 @@ index e8e4ae7..5867754 100644
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
      state.raw_held |= raw;
-@@ -150,8 +195,11 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -150,8 +197,11 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          return false;
      }
      const glm::vec4 tangents[2] = {host_.Eye(0).tangents, host_.Eye(1).tangents};
@@ -481,7 +684,7 @@ index e8e4ae7..5867754 100644
          render_size_ = xr::StereoRenderSize(tangents, glm::uvec2(swapchain.width, swapchain.height));
          LogInfo("vr: eyes drawn at {}x{} for {}x{} images (fields L {:.1f} R {:.1f} U {:.1f} D {:.1f} degrees, left eye)", render_size_.x,
                  render_size_.y, swapchain.width, swapchain.height, glm::degrees(host_.Eye(0).angles.x), glm::degrees(host_.Eye(0).angles.y),
-@@ -160,7 +208,67 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -160,7 +210,67 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
      for (int i = 0; i < 2; ++i) {
          frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
      }
@@ -523,7 +726,7 @@ index e8e4ae7..5867754 100644
 +                                        glm::normalize(heading * rig_.ToWorld(pose.orientation)), frusta_[i], kNearPlane);
 +        }
 +        out.render = {render_size_.x, render_size_.y};
-+        Place(head.position, xr::AnglesOf(head.orientation).yaw, menu_open, dt);
++        Place(head.position, head.orientation, menu_open, dt);
 +        auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
 +            if (!host_.Acquire(sc)) return false;
 +            t.image = sc.images[sc.index];
@@ -550,7 +753,16 @@ index e8e4ae7..5867754 100644
      const glm::vec3 feet = player.Feet();
      const glm::vec3 eye = player.Eye();
      const float height = eye.y - feet.y;
-@@ -207,6 +315,35 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -192,7 +302,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+         out.eyes[i] = xr::EyeCamera(anchor + rig_.Offset(pose.position) + correction, rig_.ToWorld(pose.orientation), frusta_[i], kNearPlane);
+     }
+     out.render = {render_size_.x, render_size_.y};
+-    Place(head.position, xr::AnglesOf(head.orientation).yaw, menu_open, dt);
++    Place(head.position, head.orientation, menu_open, dt);
+     auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
+         if (!host_.Acquire(sc)) return false;
+         t.image = sc.images[sc.index];
+@@ -207,6 +317,35 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
          return false;
      }
@@ -586,7 +798,7 @@ index e8e4ae7..5867754 100644
      return true;
  }
  
-@@ -215,6 +352,12 @@ void VrPlay::FinishStereo(const Stereo& stereo) {
+@@ -215,11 +354,17 @@ void VrPlay::FinishStereo(const Stereo& stereo) {
      host_.Release(host_.EyeSwapchain(1));
      host_.Release(host_.HudSwapchain());
      xr::FrameLayers layers;
@@ -599,8 +811,46 @@ index e8e4ae7..5867754 100644
      layers.projection = true;
      layers.eyes[0] = stereo.poses[0];
      layers.eyes[1] = stereo.poses[1];
+     layers.hud = true;
+-    layers.hud_orientation = xr::YawRotation(hud_yaw_);
++    layers.hud_orientation = hud_orientation_;
+     layers.hud_position = hud_position_;
+     layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
+     host_.EndFrame(layers);
+@@ -277,7 +422,20 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
+     host_.Haptic(1, amplitude, 0.05f);
+ }
+ 
+-void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_open, float dt) {
++void VrPlay::Place(const glm::vec3& head_local, const glm::quat& head_orientation_local, bool menu_open, float dt) {
++    const float head_yaw_local = xr::AnglesOf(head_orientation_local).yaw;
++    if (!menu_open) {
++        // In play the HUD (subtitles, prompts) rides with the head, like the performance panel:
++        // always straight ahead, never left to one side.
++        hud_yaw_ = head_yaw_local;
++        hud_placed_ = true;
++        menu_was_open_ = false;
++        hud_orientation_ = head_orientation_local;
++        hud_position_ = head_local + head_orientation_local * glm::vec3(0.0f, -kHudDrop, -kHudDistance);
++        return;
++    }
++    // A menu stays where it opened (in the world, turning after the head beyond a dead zone),
++    // so the hand can point at it.
+     if (!hud_placed_ || (menu_open && !menu_was_open_)) {
+         hud_yaw_ = head_yaw_local;
+         hud_placed_ = true;
+@@ -289,7 +447,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
+         }
+     }
+     menu_was_open_ = menu_open;
+-    hud_position_ = head_local + xr::YawRotation(hud_yaw_) * glm::vec3(0.0f, -kHudDrop, -kHudDistance);
++    hud_orientation_ = xr::YawRotation(hud_yaw_);
++    hud_position_ = head_local + hud_orientation_ * glm::vec3(0.0f, -kHudDrop, -kHudDistance);
+ }
+ 
+ }
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index d1485b2..7ace4f3 100644
+index d1485b2..957a603 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
 @@ -34,6 +34,12 @@ public:
@@ -616,16 +866,18 @@ index d1485b2..7ace4f3 100644
      };
      bool PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_open, Stereo& out);
      void FinishStereo(const Stereo& stereo);
-@@ -46,6 +52,8 @@ public:
+@@ -45,7 +51,9 @@ public:
+     VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
  
  private:
-     void Place(const glm::vec3& head_local, float head_yaw_local, bool menu_open, float dt);
+-    void Place(const glm::vec3& head_local, float head_yaw_local, bool menu_open, float dt);
++    void Place(const glm::vec3& head_local, const glm::quat& head_orientation_local, bool menu_open, float dt);
 +    // The insets of `out` (its eyes already set): false when there are none this frame.
 +    bool PrepareInsets(Stereo& out);
  
      xr::Host& host_;
      const AppSettings::Vr& settings_;
-@@ -53,6 +61,10 @@ private:
+@@ -53,17 +61,23 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -636,7 +888,12 @@ index d1485b2..7ace4f3 100644
      bool screen_placed_ = false;
      glm::quat screen_orientation_{1.0f, 0.0f, 0.0f, 0.0f};
      glm::vec3 screen_position_{0.0f};
-@@ -64,6 +76,7 @@ private:
+     bool hud_placed_ = false;
+     bool menu_was_open_ = false;
+     float hud_yaw_ = 0.0f;
++    glm::quat hud_orientation_{1.0f, 0.0f, 0.0f, 0.0f};
+     glm::vec3 hud_position_{0.0f};
+     float eye_height_ = -1.0f;
      glm::vec3 last_anchor_{0.0f};
      glm::vec3 last_correction_{0.0f};
      glm::uvec2 render_size_{0, 0};
