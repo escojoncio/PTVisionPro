@@ -2514,6 +2514,9 @@ int pt_vp_start(void* layer_renderer, const char* const* argv, int argc, const c
     setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "1", 1);
     // The game's status line every ten seconds (fps, GPU, memory, thermal state) without a window.
     setenv("PT_STATUS_LOG", "1", 0);
+    // GPU time of every labelled pass, one view in twelve, summed up in pt.log every 10 s: where the
+    // frame goes, to cut it.
+    setenv("PT_GPU_LABELS", "1", 0);
     for (int i = 0; i < env_count; ++i) {
         const std::string pair = env[i];
         const size_t eq = pair.find('=');
