@@ -401,6 +401,10 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 
 ## Pendiente (siguiente sesión, en orden)
 
+Objetivo de rendimiento: **45 fps reales estables** (modo 45 FPS, `SetFrameDivisor(2)`, el compositor reproyecta a 90),
+con sombras altas, SSAO, bloom y reflejos (estándar mínimo M2); presupuesto GPU ≈ 22 ms por fotograma para las 4 vistas
+más la composición. Clave para que no maree: profundidad real al drawable (reproyección posicional).
+
 0. Medir build 18 (log `vr pace` con 4 vistas) y calibrar periphery/center por defecto. Siguiente: resolución
    dinámica por tiempo de GPU, caché de sombras estáticas, profundidad al drawable (reproyección posicional),
    inset por ojo (hoy simétrico sobre la tangente unión: el lado nasal se dibuja de más), anillo en el borde del
