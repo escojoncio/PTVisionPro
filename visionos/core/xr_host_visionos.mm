@@ -532,6 +532,14 @@ struct Host::Impl {
     // 45 frames a second: the compositor shows each picture over two display refreshes
     // (reprojecting it to the head's movement) and gives the game twice the time to draw it.
     int divisor = 1;
+    // The display's real refresh rate (the system chooses it: 90, 96 or 100 Hz, 120 on an M5),
+    // worked out from the presentation times of the game's frames: each is a whole number of
+    // refreshes after the one before, so the rate whose refreshes fit them best is the one.
+    int display_hz = 0;  // 0: not known yet (taken as 90)
+    int Hz() const { return display_hz > 0 ? display_hz : 90; }
+    double last_presentation = 0.0;
+    double rate_error[4] = {};
+    int rate_samples = 0;
 
     // MetalFX: each eye image enlarged to the size the headset's views have, before composing.
     bool metalfx = false;
@@ -746,6 +754,36 @@ static void PresentBlank(Host& host, Host::Impl& x, cp_drawable_t drawable) {
 
 static int64_t SteadyNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The display's refresh rate from the game's frames (Impl::display_hz). Only the game thread
+// calls it (WaitFrame).
+static void MeasureRefresh(Host::Impl& x, double presentation) {
+    static constexpr int kRates[4] = {90, 96, 100, 120};
+    const double gap = presentation - x.last_presentation;
+    const bool first = x.last_presentation <= 0.0;
+    x.last_presentation = presentation;
+    if (first || gap < 0.005 || gap > 0.1) return;
+    for (int i = 0; i < 4; ++i) {
+        const double refreshes = gap * kRates[i];
+        const double whole = std::round(refreshes);
+        x.rate_error[i] += whole < 1.0 ? 1.0 : std::abs(refreshes - whole);
+    }
+    if (++x.rate_samples < 120) return;
+    // 120 Hz only on an M5 (on the first headset 4/120 s and 3/90 s are the same gap).
+    const int rates = pt::visionos::Headset().device_m5 ? 4 : 3;
+    int best = 0;
+    for (int i = 1; i < rates; ++i) {
+        if (x.rate_error[i] < x.rate_error[best]) best = i;
+    }
+    const double average = x.rate_error[best] / x.rate_samples;
+    x.rate_samples = 0;
+    for (double& e : x.rate_error) e = 0.0;
+    // A clear fit only (each gap within a tenth of a refresh on average).
+    if (average > 0.1 || kRates[best] == x.display_hz) return;
+    LogInfo("vr: the display refreshes at {} Hz{}: {} frames a second", kRates[best], x.display_hz > 0 ? std::format(" (was {} Hz)", x.display_hz) : "",
+            kRates[best] / x.divisor);
+    x.display_hz = kRates[best];
 }
 
 // The keeper's picture on one drawable: the game's last one with the pose it was drawn for, or
@@ -1291,6 +1329,7 @@ bool Host::WaitFrame() {
     const cp_time_t presentation = cp_frame_timing_get_presentation_time(timing);
     const cp_time_t rendering_deadline = cp_frame_timing_get_rendering_deadline(timing);
     display_time_ = static_cast<int64_t>(cp_time_to_cf_time_interval(presentation) * 1.0e9);
+    MeasureRefresh(x, cp_time_to_cf_time_interval(presentation));
     const double period = cp_time_to_cf_time_interval(rendering_deadline) - cp_time_to_cf_time_interval(cp_frame_timing_get_optimal_input_time(timing));
     if (period > 0.0) display_period_ = std::clamp(period, 1.0 / 240.0, 1.0 / 30.0);
     should_render_ = true;
@@ -1924,7 +1963,16 @@ void Host::SetFrameDivisor(int divisor) {
     auto guard = x.GameCall();
     x.divisor = std::clamp(divisor, 1, 2);
     if (x.layer) cp_layer_renderer_set_minimum_frame_repeat_count(x.layer, x.divisor - 1);
-    LogInfo("vr: {} frames a second", x.divisor == 2 ? 45 : 90);
+    LogInfo("vr: a picture every {} refresh(es): {} frames a second at {} Hz", x.divisor, x.Hz() / x.divisor, x.Hz());
+}
+
+float Host::GpuBudgetMs() const {
+    const Impl& x = *impl_;
+    if (!pt::visionos::Headset().dynamic_resolution) return 0.0f;
+    // The frame's time, less a margin for the composition (about a millisecond) and the copies
+    // into the eye images: what the views may take.
+    const float frame_ms = 1000.0f * static_cast<float>(x.divisor) / static_cast<float>(x.Hz());
+    return frame_ms * 0.9f - 1.0f;
 }
 
 void Host::Haptic(int hand, float amplitude, float seconds) {
@@ -1985,6 +2033,7 @@ bool MatchesPreset(int preset, const AppSettings& s, const HeadsetSettings& h) {
     if (preset < 0 || preset > 1) return false;
     const Preset& p = kPresets[preset];
     return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == 90 && h.foveation && h.metalfx == p.metalfx && h.fov == 100 &&
+           !h.dynamic_resolution &&
            s.graphics.shadow_quality == p.shadow_quality && s.graphics.ambient_occlusion == p.ssao && s.graphics.bloom == p.bloom &&
            s.graphics.reflections == p.reflections;
 }
@@ -2021,6 +2070,8 @@ void GraphicsChanged(const AppSettings& s) {
 void ApplyPreset(int preset, AppSettings& s) {
     HeadsetSettings& h = Headset();
     h.preset = std::clamp(preset, 0, 2);
+    // The M5's preset is too much for the first headset.
+    if (h.preset == 1 && !h.device_m5) h.preset = 0;
     if (h.preset == 2) {
         SettingChanged("preset", "custom");
         return;
@@ -2031,6 +2082,7 @@ void ApplyPreset(int preset, AppSettings& s) {
     h.foveation = true;
     h.metalfx = p.metalfx;
     h.fov = 100;
+    h.dynamic_resolution = false;
     s.vr.resolution_scale = p.resolution_scale;
     s.graphics.shadow_quality = p.shadow_quality;
     s.graphics.ambient_occlusion = p.ssao;
@@ -2042,6 +2094,7 @@ void ApplyPreset(int preset, AppSettings& s) {
     SettingChanged("foveation", "1");
     SettingChanged("metalfx", p.metalfx ? "1" : "0");
     SettingChanged("fov", "100");
+    SettingChanged("dynamic_resolution", "0");
     SettingChanged("shadows", ShadowName(p.shadow_quality));
     SettingChanged("ssao", p.ssao ? "1" : "0");
     SettingChanged("bloom", p.bloom ? "1" : "0");
@@ -2050,10 +2103,14 @@ void ApplyPreset(int preset, AppSettings& s) {
 
 void ApplySettings(AppSettings& s) {
     HeadsetSettings& h = Headset();
+    if (const char* device = Env("PT_VP_DEVICE")) h.device_m5 = std::string(device) == "m5";
     if (const char* preset = Env("PT_VP_PRESET")) {
         const std::string v = preset;
         h.preset = v == "m2" ? 0 : v == "m5" ? 1 : 2;
     }
+    // (The launcher already never gives the M5's preset to another headset.)
+    if (h.preset == 1 && !h.device_m5) h.preset = 0;
+    h.dynamic_resolution = Flag("PT_VP_DYNAMIC_RES", false);
     h.resolution_scale = std::clamp(Number("PT_VP_RESOLUTION_SCALE", 0.6f), 0.5f, 2.0f);
     h.target_fps = static_cast<int>(Number("PT_VP_TARGET_FPS", 90.0f)) == 45 ? 45 : 90;
     h.foveation = Flag("PT_VP_FOVEATION", true);
@@ -2104,9 +2161,10 @@ void ApplySettings(AppSettings& s) {
     s.ray_tracing = {};
     s.camera.third_person = false;
     s.extras.livesplit = false;
-    LogInfo("visionos: preset {}, image {:.0f} %, {} frames a second, foveation {}, MetalFX {}, shadows {}, SSAO {}, bloom {}, reflections {}",
-            h.preset == 0 ? "M2" : h.preset == 1 ? "M5" : "custom", h.resolution_scale * 100.0f, h.target_fps, h.foveation ? "on" : "off",
-            h.metalfx ? "on" : "off",
+    LogInfo("visionos: {} headset, preset {}, image {:.0f} %, {} frames a second, dynamic resolution {}, foveation {}, MetalFX {}, shadows {}, SSAO {}, bloom {}, "
+            "reflections {}",
+            h.device_m5 ? "M5" : "M2", h.preset == 0 ? "M2" : h.preset == 1 ? "M5" : "custom", h.resolution_scale * 100.0f, h.target_fps,
+            h.dynamic_resolution ? "on" : "off", h.foveation ? "on" : "off", h.metalfx ? "on" : "off",
             ShadowName(s.graphics.shadow_quality), s.graphics.ambient_occlusion, s.graphics.bloom, s.graphics.reflections);
 }
 

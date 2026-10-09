@@ -26,8 +26,9 @@ struct PTSettings: Codable, Equatable {
     var preset: Preset = .m2
     /// Each eye's picture, relative to the size the headset recommends (0.5 to 2.0).
     var resolutionScale: Double = 0.6
-    /// The game draws smaller by itself while the GPU cannot keep up.
-    var dynamicResolution = true
+    /// The game draws smaller by itself while the GPU cannot keep up (off unless chosen: it
+    /// trades sharpness for smoothness).
+    var dynamicResolution = false
     /// 90 (every refresh) or 45 (every other one).
     var targetFPS = 90
     /// How much of the headset's field of view the game draws, in percent (70 to 100).
@@ -88,7 +89,7 @@ struct PTSettings: Codable, Equatable {
         case .m2, .custom:
             settings.preset = preset
             settings.resolutionScale = 0.6
-            settings.dynamicResolution = true
+            settings.dynamicResolution = false
             settings.targetFPS = 90
             settings.fov = 100
             settings.graphicsPreset = "medium"
@@ -102,7 +103,7 @@ struct PTSettings: Codable, Equatable {
         case .m5:
             settings.preset = .m5
             settings.resolutionScale = 0.85
-            settings.dynamicResolution = true
+            settings.dynamicResolution = false
             settings.targetFPS = 90
             settings.fov = 100
             settings.graphicsPreset = "high"
@@ -200,6 +201,10 @@ struct PTSettings: Codable, Equatable {
     static func load() -> PTSettings {
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
            var saved = try? JSONDecoder().decode(PTSettings.self, from: data) {
+            // The M5's preset only on an M5: on another headset it falls back to the M2's.
+            if saved.preset == .m5 && detectedPreset() != .m5 {
+                saved.apply(preset: .m2)
+            }
             // A headset preset keeps following its values when a new version changes them.
             if saved.preset != .custom {
                 saved.apply(preset: saved.preset)
@@ -217,7 +222,9 @@ struct PTSettings: Codable, Equatable {
 
     // Every key is optional when decoding, so that settings saved by an older version still load.
     enum CodingKeys: String, CodingKey {
-        case preset, resolutionScale, dynamicResolution, targetFPS, fov, graphicsPreset, shadows
+        case preset, resolutionScale, targetFPS, fov, graphicsPreset, shadows
+        // A new key: the old one was saved as on by versions in which it did nothing.
+        case dynamicResolution = "dynamicResolutionChosen"
         case ssao, bloom, reflections, foveation, compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
@@ -275,6 +282,7 @@ struct PTSettings: Codable, Equatable {
         func flag(_ value: Bool) -> String { value ? "1" : "0" }
         return [
             "PT_VP_PRESET=\(preset.rawValue)",
+            "PT_VP_DEVICE=\(Self.detectedPreset() == .m5 ? "m5" : "m2")",
             "PT_VP_RESOLUTION_SCALE=\(String(format: "%.2f", min(max(resolutionScale, 0.5), 2.0)))",
             "PT_VP_DYNAMIC_RES=\(flag(dynamicResolution))",
             "PT_VP_TARGET_FPS=\(targetFPS)",
