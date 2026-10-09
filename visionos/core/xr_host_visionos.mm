@@ -1049,15 +1049,16 @@ bool Host::Impl::BuildVrr(Host& host) {
         }
         physical[e] = [maps[e] physicalSizeForLayer:0];
     }
-    // Both eyes share the scene's targets: the same physical size (mirrored fields).
-    if (physical[0].width != physical[1].width || physical[0].height != physical[1].height || physical[0].width < 16 || physical[0].height < 16) {
-        LogError("vrr: the eyes' rate maps differ in size ({}x{} and {}x{}); the insets instead", physical[0].width, physical[0].height,
-                 physical[1].width, physical[1].height);
+    // Both eyes share the scene's targets: the larger of the two physical sizes (Metal rounds each
+    // map's zones to its own tiles, so mirrored maps can differ by a few pixels; a map renders
+    // into the top left of targets at least its size, and the tables are each map's own).
+    if (physical[0].width < 16 || physical[0].height < 16 || physical[1].width < 16 || physical[1].height < 16) {
+        LogError("vrr: the rate maps came out empty; the insets instead");
         vrr_failed = true;
         return false;
     }
-    const uint32_t pw = static_cast<uint32_t>(physical[0].width);
-    const uint32_t ph = static_cast<uint32_t>(physical[0].height);
+    const uint32_t pw = static_cast<uint32_t>(std::max(physical[0].width, physical[1].width));
+    const uint32_t ph = static_cast<uint32_t>(std::max(physical[0].height, physical[1].height));
     // The tables: a value per whole pixel, four rows an eye (physical x, y to logical; logical x, y
     // to physical), each axis on its own (a rate map's are).
     const uint32_t width = std::max({pw, ph, lw, lh}) + 2;
@@ -1065,13 +1066,15 @@ bool Host::Impl::BuildVrr(Host& host) {
     for (int e = 0; e < 2; ++e) {
         float* rows[4];
         for (int k = 0; k < 4; ++k) rows[k] = tables.data() + static_cast<size_t>(e * 4 + k) * width;
+        const uint32_t own_w = static_cast<uint32_t>(physical[e].width);
+        const uint32_t own_h = static_cast<uint32_t>(physical[e].height);
         for (uint32_t i = 0; i < width; ++i) {
-            const float px = static_cast<float>(std::min(i, pw));
-            const float py = static_cast<float>(std::min(i, ph));
+            const float px = static_cast<float>(std::min(i, own_w));
+            const float py = static_cast<float>(std::min(i, own_h));
             const float sx = static_cast<float>(std::min(i, lw));
             const float sy = static_cast<float>(std::min(i, lh));
-            rows[0][i] = static_cast<float>([maps[e] mapPhysicalToScreenCoordinates:MTLCoordinate2DMake(px, ph * 0.5f) forLayer:0].x);
-            rows[1][i] = static_cast<float>([maps[e] mapPhysicalToScreenCoordinates:MTLCoordinate2DMake(pw * 0.5f, py) forLayer:0].y);
+            rows[0][i] = static_cast<float>([maps[e] mapPhysicalToScreenCoordinates:MTLCoordinate2DMake(px, own_h * 0.5f) forLayer:0].x);
+            rows[1][i] = static_cast<float>([maps[e] mapPhysicalToScreenCoordinates:MTLCoordinate2DMake(own_w * 0.5f, py) forLayer:0].y);
             rows[2][i] = static_cast<float>([maps[e] mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(sx, lh * 0.5f) forLayer:0].x);
             rows[3][i] = static_cast<float>([maps[e] mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(lw * 0.5f, sy) forLayer:0].y);
         }
@@ -1102,9 +1105,10 @@ bool Host::Impl::BuildVrr(Host& host) {
     info.tables = std::move(tables);
     info.table_width = width;
     const double before = 2.0 * eye_width * eye_height / 1.0e6;
-    LogInfo("vrr: each eye one view through a rate map: a {}x{} picture in {}x{} pixels ({:.2f} MP; wide view and inset {:.2f} MP), centre {:.0f} %, "
-            "its edge at {:.0f} % density",
-            lw, lh, pw, ph, pw * ph / 1.0e6, before, center * 100.0f, center * 100.0f);
+    LogInfo("vrr: each eye one view through a rate map: a {}x{} picture in {}x{} pixels (maps {}x{} and {}x{}; {:.2f} MP; wide view and inset {:.2f} MP), "
+            "centre {:.0f} %, its edge at {:.0f} % density",
+            lw, lh, pw, ph, physical[0].width, physical[0].height, physical[1].width, physical[1].height, pw * ph / 1.0e6, before, center * 100.0f,
+            center * 100.0f);
     return true;
 }
 
