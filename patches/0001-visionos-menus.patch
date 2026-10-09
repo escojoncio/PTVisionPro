@@ -1,32 +1,80 @@
+diff --git a/shaders/reflection_depth.glsl b/shaders/reflection_depth.glsl
+index fc1c963..b0eb8e4 100644
+--- a/shaders/reflection_depth.glsl
++++ b/shaders/reflection_depth.glsl
+@@ -1,6 +1,6 @@
+ float ReflectionSceneDepth(View view, vec2 uv) {
+     float point_depth = ImgLod(IMG_DEPTH, SMP_POINT_CLAMP, uv, 0.0).x;
+-    if (all(equal(view.jitter.xy, vec2(0.0)))) return point_depth;
++    if (view.projection_param.w != 3.0) return point_depth;  // no upscaler jitter (an off-centre view still has jitter.xy)
+     ivec2 size = ivec2(ImgSize(IMG_DEPTH));
+     vec2 sample_pixel = uv * vec2(size) - 0.5;
+     ivec2 p = ivec2(floor(sample_pixel));
+@@ -17,7 +17,7 @@ bool g_reflection_depth_legacy = false;
+ float ReflectionFloorDepth(View view, vec2 uv) {
+     if (g_reflection_depth_legacy) return ReflectionSceneDepth(view, uv);
+     float point_depth = ImgLod(IMG_DEPTH, SMP_POINT_CLAMP, uv, 0.0).x;
+-    if (all(equal(view.jitter.xy, vec2(0.0)))) return point_depth;
++    if (view.projection_param.w != 3.0) return point_depth;  // no upscaler jitter (an off-centre view still has jitter.xy)
+     ivec2 size = ivec2(ImgSize(IMG_DEPTH));
+     vec2 sample_pixel = uv * vec2(size) - 0.5;
+     ivec2 p = ivec2(floor(sample_pixel));
 diff --git a/shaders/tonemap.frag b/shaders/tonemap.frag
-index d39d6a6..f86f228 100644
+index d39d6a6..4c2b603 100644
 --- a/shaders/tonemap.frag
 +++ b/shaders/tonemap.frag
-@@ -29,7 +29,9 @@ void main() {
+@@ -29,7 +29,10 @@ void main() {
      } else {
          vec3 hdr = ImgFetch(IMG_HDR, pixel).rgb * pass.f0.z;
          vec3 x = min(SrgbEncode(clamp(hdr, 0.0, 1.0)) + max(ImgFetch(IMG_FLARE, pixel).rgb, vec3(0.0)), vec3(1.0));
 -        vec2 bloom_uv = in_uv + 0.5 / ImgSize(IMG_BLOOM_SUM);
-+        // f2.x > 0: the bloom is a wider view's (a stereo inset's eye), this view the middle f2.x of it.
-+        vec2 view_uv = pass.f2.x > 0.0 ? 0.5 + (in_uv - 0.5) * pass.f2.x : in_uv;
++        // f2.x > 0: the bloom is a wider view's (a stereo inset's eye); this view is the part of it at
++        // 0.5 + (uv - 0.5) * f2.xy + f2.zw.
++        vec2 view_uv = pass.f2.x > 0.0 ? 0.5 + (in_uv - 0.5) * pass.f2.xy + pass.f2.zw : in_uv;
 +        vec2 bloom_uv = view_uv + 0.5 / ImgSize(IMG_BLOOM_SUM);
          vec3 b = pass.f0.x > 0.0 ? min(vec3(0.5), Img(IMG_BLOOM_SUM, SMP_LINEAR_CLAMP, bloom_uv).rgb) : vec3(0.0);
          vec3 x2 = x * x;
          vec3 r = clamp(x2 + b - x2 * b, 0.0, 1.0);
 diff --git a/shaders/vfx_composite.frag b/shaders/vfx_composite.frag
-index 1be202c..2ce4fe1 100644
+index 1be202c..25df602 100644
 --- a/shaders/vfx_composite.frag
 +++ b/shaders/vfx_composite.frag
-@@ -15,7 +15,8 @@ layout(location = 0) out vec4 out_color;
+@@ -15,7 +15,10 @@ layout(location = 0) out vec4 out_color;
  void main() {
      ivec2 pixel = ivec2(gl_FragCoord.xy);
      vec4 scene = ImgFetch(IMG_HDR_COPY, pixel);
 -    vec4 particles = ImgFetch(IMG_PARTICLES, pixel);
-+    // f2.x > 0: the particles are a wider view's (a stereo inset's eye), this view the middle f2.x of it.
-+    vec4 particles = pass.f2.x > 0.0 ? Img(IMG_PARTICLES, SMP_LINEAR_CLAMP, 0.5 + (in_uv - 0.5) * pass.f2.x) : ImgFetch(IMG_PARTICLES, pixel);
++    // f2.x > 0: the particles are a wider view's (a stereo inset's eye); this view is the part of
++    // it at 0.5 + (uv - 0.5) * f2.xy + f2.zw.
++    vec4 particles = pass.f2.x > 0.0 ? Img(IMG_PARTICLES, SMP_LINEAR_CLAMP, 0.5 + (in_uv - 0.5) * pass.f2.xy + pass.f2.zw)
++                                     : ImgFetch(IMG_PARTICLES, pixel);
      if (particles.a >= 1.0 && all(equal(particles.rgb, vec3(0.0)))) {
          out_color = scene;
          return;
+diff --git a/src/engine/render/camera.h b/src/engine/render/camera.h
+index ffee464..5d15d12 100644
+--- a/src/engine/render/camera.h
++++ b/src/engine/render/camera.h
+@@ -15,6 +15,10 @@ struct Camera {
+     float near_plane = 0.05f;
+     /* Not a clip distance (the projection is reverse-Z to infinity); it only bounds the SSAO fade, which the original ends at min(far, 250). */
+     float far_plane = 100.0f;
++    // An off-centre projection (a headset eye's own field): how far the view's axis sits from the
++    // image's centre, in normalized device coordinates, in the sense of the upscalers' jitter
++    // (the projection's third column takes it away; the shaders' PixelNdc adds it back).
++    glm::vec2 offset{0.0f};
+ 
+     glm::vec3 Forward() const {
+         return glm::normalize(glm::vec3(-std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)));
+@@ -40,6 +44,8 @@ struct Camera {
+         p[1][1] = -f;
+         p[2][3] = -1.0f;
+         p[3][2] = near_plane;
++        p[2][0] = -offset.x;
++        p[2][1] = -offset.y;
+         return p;
+     }
+ };
 diff --git a/src/engine/render/render_util.cpp b/src/engine/render/render_util.cpp
 index c327bd9..1a26215 100644
 --- a/src/engine/render/render_util.cpp
@@ -67,10 +115,33 @@ index 7486360..0bc0581 100644
  void EndLabel(VkCommandBuffer cmd);
  
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..631b695 100644
+index 40d339d..645e972 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
-@@ -610,6 +610,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -329,6 +329,13 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+         v.shadow = glm::vec4(0.0f);
+         static const float shadow_rotate = std::getenv("PT_SHADOW_ROTATE") ? 1.0f : 0.0f;
+         v.jitter = up_.enabled ? glm::vec4(up_.jitter_ndc, up_.mip_bias, shadow_rotate) : glm::vec4(0.0f);
++        // An off-centre view (a headset eye's own field) shifts its projection the way the jitter
++        // does: the shaders take both away together (PixelNdc).
++        v.jitter.x += camera.offset.x;
++        v.jitter.y += camera.offset.y;
++        // 3: the upscalers' jitter is on (the reflections' depth filter keys on it, not on the
++        // offset). Shadow views use 1 and 2.
++        v.projection_param.w = up_.enabled ? 3.0f : 0.0f;
+         v.jitter.z += graphics.texture_detail==0?1.0f:graphics.texture_detail==2?-.5f:0.0f;
+         v.temporal = glm::vec4(0.0f);
+         v.dominant_light = glm::vec4(glm::mat3(v.view) * glm::vec3(0.0f, 1.0f, 0.0f), 1.0f);
+@@ -359,7 +366,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+         post_view_ = add_view(unjittered, gl_view, camera.position, glm::vec4(0.0f));
+         gpu::View& post = frame_->views[post_view_];
+         post.viewport = glm::vec4(output_extent_.width, output_extent_.height, 1.0f / output_extent_.width, 1.0f / output_extent_.height);
+-        post.jitter = glm::vec4(0.0f);
++        post.jitter = glm::vec4(camera.offset, 0.0f, 0.0f);
+         post.dominant_light = dominant_light;
+     }
+ 
+@@ -610,6 +617,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          }
      }
  
@@ -89,7 +160,7 @@ index 40d339d..631b695 100644
      static const bool legacy_cull = [] {
          const char* s = std::getenv("PT_LIGHT_CULL_LEGACY");
          return s && std::string_view(s) == "1";
-@@ -624,8 +636,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -624,8 +643,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
      mirror_occluders_ = {};
      if (!legacy_cull) {
          const lightcull::OccluderLimits& limits = lightcull::LimitsFromEnv();
@@ -100,7 +171,7 @@ index 40d339d..631b695 100644
          if (mirror_active_) {
              mirror_occluders_ = lightcull::BuildOccluderVolumes(lighting.occluders, mirror_current_view_projection_, mirror_view_.eye, limits);
          }
-@@ -664,7 +676,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -664,7 +683,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
                  drop = "box outside the view planes";
              } else if (!mirror_active_) {
                  for (size_t oi = 0; oi < lighting.occluders.size(); ++oi) {
@@ -109,7 +180,7 @@ index 40d339d..631b695 100644
                          const glm::vec3 q = lighting.occluders[oi].points[0];
                          drop = explain ? std::format("occluder {} at ({:.2f} {:.2f} {:.2f}) hides box ({:.2f} {:.2f} {:.2f})-({:.2f} {:.2f} {:.2f})", oi, q.x,
                                                       q.y, q.z, box.lo.x, box.lo.y, box.lo.z, box.hi.x, box.hi.y, box.hi.z)
-@@ -698,7 +710,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -698,7 +717,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
              }
          }
          const glm::vec3 cull_rank = l.has_rank_point ? l.rank_point : (box.lo + box.hi) * 0.5f;
@@ -118,7 +189,7 @@ index 40d339d..631b695 100644
          const float cull_gate = glm::pi<float>() * (l.intensity.x + l.intensity.y + l.intensity.z) * exposure_;
          if (trace_cull_frame) {
              std::string reason = drop;
-@@ -796,7 +808,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -796,7 +815,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          }
          LogInfo("probe at: blend ({:.4f} {:.4f} {:.4f})", blend.x, blend.y, blend.z);
      }
@@ -129,7 +200,7 @@ index 40d339d..631b695 100644
      if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
          std::map<std::string, std::pair<bool, float>> now;
          for (uint32_t i = 0; i < light_count_; ++i) {
-@@ -1422,6 +1436,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1422,6 +1443,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          }
      };
      if (probes) {
@@ -137,7 +208,7 @@ index 40d339d..631b695 100644
          UseTargets(cmd, {{&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
                           {&probe_acc_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
-@@ -1431,7 +1446,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1431,7 +1453,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          draw_probes(shrink ? 1u : 0u);
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&probe_acc_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -147,7 +218,7 @@ index 40d339d..631b695 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1490,6 +1507,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1490,6 +1514,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
      }
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&diffuse_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&specular_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -155,7 +226,7 @@ index 40d339d..631b695 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +1800,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +1807,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -206,7 +277,7 @@ index 40d339d..631b695 100644
 +        BeginPass(cmd, extent_, {{&output, false, {}}});
 +        gpu::PassPush push;
 +        // The wide view's particles under the inset's field (0: this view's own, pixel for pixel).
-+        push.f2 = glm::vec4(reuse ? vr_share_scale_ : 0.0f, 0.0f, 0.0f, 0.0f);
++        push.f2 = SharePlace(reuse);
 +        Fullscreen(cmd, vfx_composite_, push);
 +        vkCmdEndRendering(cmd);
 +        EndLabel(cmd);
@@ -224,7 +295,7 @@ index 40d339d..631b695 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +1872,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +1879,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -232,7 +303,7 @@ index 40d339d..631b695 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +1883,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +1890,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -272,7 +343,7 @@ index 40d339d..631b695 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +1908,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +1915,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -280,7 +351,7 @@ index 40d339d..631b695 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2164,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2171,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -295,7 +366,7 @@ index 40d339d..631b695 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2177,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2184,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -304,7 +375,7 @@ index 40d339d..631b695 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2202,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2209,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -321,7 +392,7 @@ index 40d339d..631b695 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2219,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2226,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -329,7 +400,7 @@ index 40d339d..631b695 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2254,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2261,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -337,7 +408,7 @@ index 40d339d..631b695 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2312,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2319,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -350,7 +421,7 @@ index 40d339d..631b695 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2329,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2336,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -366,7 +437,7 @@ index 40d339d..631b695 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2419,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2426,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -427,7 +498,7 @@ index 40d339d..631b695 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2593,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2600,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -452,7 +523,7 @@ index 40d339d..631b695 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
-index 19dd1a8..5cd6cb6 100644
+index 19dd1a8..f806dcc 100644
 --- a/src/engine/render/scene_post.cpp
 +++ b/src/engine/render/scene_post.cpp
 @@ -88,7 +88,15 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
@@ -464,7 +535,7 @@ index 19dd1a8..5cd6cb6 100644
 +    // (0, 1) worked out just before it (main.cpp draws them in that order), still in bloom_[2],
 +    // instead of working it out again. The bloom is a wide blur of a 270-line image, the same
 +    // scene seen from the same eye: the inset samples the part of it under its field
-+    // (`vr_share_scale_` of the wide one across), which also makes its glow spread as wide as the
++    // (`vr_share_place_`), which also makes its glow spread as wide as the
 +    // view around it.
 +    const bool reuse = bloom && InsetShares(shared_bloom_frame_);
 +    if (bloom && !reuse) {
@@ -514,7 +585,7 @@ index 19dd1a8..5cd6cb6 100644
          push.f0.w = 0.0f;
      }
 +    // The shared bloom read under the inset's field (0: the view's own, all of it).
-+    push.f2 = glm::vec4(reuse ? vr_share_scale_ : 0.0f, 0.0f, 0.0f, 0.0f);
++    push.f2 = SharePlace(reuse);
      Fullscreen(cmd, tonemap_, push);
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&ldr_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -743,10 +814,10 @@ index 1f96981..7fd56b9 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..ec4148b 100644
+index 6c9b165..07a571f 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,24 @@ public:
+@@ -206,6 +206,28 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
@@ -760,10 +831,14 @@ index 6c9b165..ec4148b 100644
 +        if (camera) vr_cull_camera_ = *camera;
 +    }
 +    // Insets (views 2, 3, each drawn right after its eye's wide view 0, 1) take that view's bloom
-+    // and particles; `scale`: the inset's field across as a fraction of the wide view's (0: each
-+    // view its own).
-+    void SetVrInsetShare(float scale) {
-+        vr_share_scale_ = scale;
++    // and particles; `place` (per eye, null: each view its own): where the inset sits in the wide
++    // view's image, wide uv = 0.5 + (inset uv - 0.5) * xy + zw.
++    void SetVrInsetShare(const glm::vec4* place) {
++        vr_share_scale_ = place ? 1.0f : 0.0f;
++        if (place) {
++            vr_share_place_[0] = place[0];
++            vr_share_place_[1] = place[1];
++        }
 +        // A new stereo frame (or its end): nothing is shared yet.
 +        shared_bloom_frame_[0] = shared_bloom_frame_[1] = ~0u;
 +        shared_particles_frame_[0] = shared_particles_frame_[1] = ~0u;
@@ -771,7 +846,7 @@ index 6c9b165..ec4148b 100644
  
  private:
      struct FrameSlot {
-@@ -222,7 +240,30 @@ private:
+@@ -222,7 +244,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -802,7 +877,7 @@ index 6c9b165..ec4148b 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -342,6 +383,8 @@ private:
+@@ -342,6 +387,8 @@ private:
      void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
      void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
      void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
@@ -811,14 +886,17 @@ index 6c9b165..ec4148b 100644
      void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordUpscale(VkCommandBuffer cmd, float dt);
      void ReadUpscaleTimestamps(FrameSlot& slot);
-@@ -377,6 +420,28 @@ private:
+@@ -377,6 +424,31 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
 +    RenderTarget particles_kept_;  // a wide view's particles for its inset (SetVrInsetShare)
 +    // SetVrInsetShare: for each eye, the frame whose wide view left its bloom / particles for the
 +    // inset (frame_counter_ as it stands after view 0; ~0u: none).
-+    float vr_share_scale_ = 0.0f;
++    float vr_share_scale_ = 0.0f;  // > 0: insets share (SetVrInsetShare)
++    glm::vec4 vr_share_place_[2]{};
++    // The pass constants that read a wide view's image in an inset (zero: its own image).
++    glm::vec4 SharePlace(bool reuse) const { return reuse ? vr_share_place_[vr_eye_ - 2] : glm::vec4(0.0f); }
 +    uint32_t shared_bloom_frame_[2] = {~0u, ~0u};
 +    uint32_t shared_particles_frame_[2] = {~0u, ~0u};
 +    bool shared_particles_drawn_[2] = {false, false};  // the wide view drew any (its composite ran)
@@ -840,7 +918,7 @@ index 6c9b165..ec4148b 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -636,6 +701,14 @@ private:
+@@ -636,6 +708,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -982,6 +1060,84 @@ index b5bf253..984ae53 100644
      int64_t display_time_ = 0;
      double display_period_ = 1.0 / 90.0;
      bool frame_open_ = false;
+diff --git a/src/engine/xr/xr_view.h b/src/engine/xr/xr_view.h
+index ed0632e..dcdc5a4 100644
+--- a/src/engine/xr/xr_view.h
++++ b/src/engine/xr/xr_view.h
+@@ -39,9 +39,13 @@ inline Angles AnglesOf(const glm::quat& q) {
+ 
+ struct EyeFrustum {
+     float fov_y = 1.0f;
+-    float tan_x = 1.0f;
++    float tan_x = 1.0f;  // half the field across, as tangents
+     float tan_y = 1.0f;
+     glm::vec4 rect{0.0f, 0.0f, 1.0f, 1.0f};
++    // An off-centre frustum (OwnFrustumFor): the centre of its field as tangents (x right, y up)
++    // and the projection's offset (Camera::offset); zero for a symmetric one.
++    glm::vec2 center{0.0f};
++    glm::vec2 offset{0.0f};
+ };
+ 
+ inline glm::uvec2 StereoRenderSize(const glm::vec4 tangents[2], glm::uvec2 swapchain) {
+@@ -79,6 +83,50 @@ inline EyeFrustum FrustumFor(const glm::vec4& tangents, glm::uvec2 render_size,
+     return f;
+ }
+ 
++// The size to draw each eye's own field at (OwnFrustumFor): the eye image's pixels per tangent
++// over the field itself, the larger of the two eyes, rounded to even numbers.
++inline glm::uvec2 OwnRenderSize(const glm::vec4 tangents[2], glm::uvec2 swapchain) {
++    float density = 0.0f;
++    float width = 0.0f;
++    float height = 0.0f;
++    for (int i = 0; i < 2; ++i) {
++        const float across = std::max(tangents[i].y - tangents[i].x, 1.0e-3f);
++        const float down = std::max(tangents[i].z - tangents[i].w, 1.0e-3f);
++        density = std::max({density, static_cast<float>(swapchain.x) / across, static_cast<float>(swapchain.y) / down});
++        width = std::max(width, across);
++        height = std::max(height, down);
++    }
++    auto even = [](float v) { return std::clamp(2u * static_cast<uint32_t>(std::ceil(v * 0.5f)), 16u, 8192u); };
++    return {even(width * density), even(height * density)};
++}
++
++// An eye's own, off-centre field (what a headset's runtime hands out), drawn at `render_size`:
++// nothing outside it is drawn. If the proportions differ a little from the field's, the field
++// grows around its centre in the short direction (the eye image takes `rect` of the drawing).
++inline EyeFrustum OwnFrustumFor(const glm::vec4& tangents, glm::uvec2 render_size) {
++    EyeFrustum f;
++    const float aspect = static_cast<float>(render_size.x) / static_cast<float>(std::max(render_size.y, 1u));
++    float half_x = std::max(tangents.y - tangents.x, 1.0e-3f) * 0.5f;
++    float half_y = std::max(tangents.z - tangents.w, 1.0e-3f) * 0.5f;
++    if (half_x < half_y * aspect) {
++        half_x = half_y * aspect;
++    } else {
++        half_y = half_x / aspect;
++    }
++    f.center = glm::vec2((tangents.x + tangents.y) * 0.5f, (tangents.z + tangents.w) * 0.5f);
++    f.tan_x = half_x;
++    f.tan_y = half_y;
++    f.fov_y = 2.0f * std::atan(half_y);
++    f.offset = glm::vec2(-f.center.x / half_x, f.center.y / half_y);
++    const float left = f.center.x - half_x;
++    const float top = f.center.y + half_y;
++    f.rect.x = (tangents.x - left) / (2.0f * half_x);
++    f.rect.z = (tangents.y - tangents.x) / (2.0f * half_x);
++    f.rect.y = (top - tangents.z) / (2.0f * half_y);
++    f.rect.w = (tangents.z - tangents.w) / (2.0f * half_y);
++    return f;
++}
++
+ class Rig {
+ public:
+     void Recenter(const glm::vec3& head_position, const glm::quat& head_orientation, float world_yaw) {
+@@ -112,6 +160,7 @@ inline Camera EyeCamera(const glm::vec3& position, const glm::quat& orientation,
+     c.roll = a.roll;
+     c.fov_y = frustum.fov_y;
+     c.near_plane = near_plane;
++    c.offset = frustum.offset;
+     return c;
+ }
+ 
 diff --git a/src/game/player.h b/src/game/player.h
 index 1daa3d8..34f7117 100644
 --- a/src/game/player.h
@@ -1000,7 +1156,7 @@ index 1daa3d8..34f7117 100644
          pitch = target_pitch = ClampPitch(value);
          vr_script_pitch_ = pitch;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..4de03f2 100644
+index 42d8b01..61e37b8 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
 @@ -16,6 +16,51 @@ struct Entry {
@@ -1038,7 +1194,7 @@ index 42d8b01..4de03f2 100644
 +    {"pc_vp_periphery", {"Periphery quality", "", "", "Calidad de la periferia", "", "", ""}},
 +    {"pc_note_vp_periphery", {"Resolution of the whole view around the centre, relative to the image size. Lower is much lighter for the GPU.", "", "", "Resolución de la vista entera alrededor del centro, respecto al tamaño de imagen. Más baja es mucho más ligera para la GPU.", "", "", ""}},
 +    {"pc_vp_center", {"Sharp centre", "", "", "Centro nítido", "", "", ""}},
-+    {"pc_note_vp_center", {"How much of the view the sharp centre covers. Smaller is sharper and lighter; larger hides the edge better.", "", "", "Cuánto de la vista cubre el centro nítido. Más pequeño es más nítido y ligero; más grande disimula mejor el borde.", "", "", ""}},
++    {"pc_note_vp_center", {"How much of the view the sharp centre covers, with the same pixels: smaller is sharper, larger covers more and hides the edge better. The frame rate does not change.", "", "", "Cuánto de la vista cubre el centro nítido, con los mismos píxeles: más pequeño es más nítido; más grande cubre más y disimula mejor el borde. No cambia los fps.", "", "", ""}},
 +    {"pc_vp_dynres", {"Dynamic resolution", "", "", "Resolución dinámica", "", "", ""}},
 +    {"pc_note_vp_dynres", {"While the GPU cannot keep the frame rate, the eyes are drawn smaller (down to half across), and larger again when it can. Smoother, less sharp. Applies right away.", "", "", "Mientras la GPU no llega a la frecuencia, los ojos se dibujan más pequeños (hasta la mitad de ancho) y vuelven a crecer cuando llega. Más fluido, menos nítido. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_left_hand", {"Left hand", "", "", "Mano izquierda", "", "", ""}},
@@ -1056,7 +1212,7 @@ index 42d8b01..4de03f2 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..3f03fc9 100644
+index e8e4ae7..d8fdd6b 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -1157,7 +1313,7 @@ index e8e4ae7..3f03fc9 100644
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
      state.raw_held |= raw;
-@@ -150,17 +197,83 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -150,17 +197,97 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          return false;
      }
      const glm::vec4 tangents[2] = {host_.Eye(0).tangents, host_.Eye(1).tangents};
@@ -1168,7 +1324,13 @@ index e8e4ae7..3f03fc9 100644
 +    // in the menu).
 +    if (render_size_.x == 0 || render_for_.x != swapchain.width || render_for_.y != swapchain.height) {
 +        render_for_ = glm::uvec2(swapchain.width, swapchain.height);
++#if PT_VISIONOS
++        // Each eye draws its own field (off-centre, as the headset gives it), not the symmetric
++        // one around both eyes' fields: no pixel is drawn that the eye image leaves out.
++        render_size_ = xr::OwnRenderSize(tangents, glm::uvec2(swapchain.width, swapchain.height));
++#else
          render_size_ = xr::StereoRenderSize(tangents, glm::uvec2(swapchain.width, swapchain.height));
++#endif
          LogInfo("vr: eyes drawn at {}x{} for {}x{} images (fields L {:.1f} R {:.1f} U {:.1f} D {:.1f} degrees, left eye)", render_size_.x,
                  render_size_.y, swapchain.width, swapchain.height, glm::degrees(host_.Eye(0).angles.x), glm::degrees(host_.Eye(0).angles.y),
                  glm::degrees(host_.Eye(0).angles.z), glm::degrees(host_.Eye(0).angles.w));
@@ -1176,10 +1338,18 @@ index e8e4ae7..3f03fc9 100644
 +    // Drawn at the dynamic resolution's size (same proportions): the copy into the eye images
 +    // enlarges it.
 +    const glm::uvec2 draw = DrawSize();
++#if PT_VISIONOS
++    for (int i = 0; i < 2; ++i) {
++        frusta_[i] = xr::OwnFrustumFor(tangents[i], draw);
++    }
++    head_frustum_ = xr::FrustumFor(tangents[0], draw, tangents);
++#else
      for (int i = 0; i < 2; ++i) {
 -        frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
 +        frusta_[i] = xr::FrustumFor(tangents[i], draw, tangents);
 +    }
++    head_frustum_ = frusta_[0];
++#endif
 +    if (cutscene_) {
 +        // A cutscene in stereo: the scene's camera is where the head was when it began, pointing
 +        // where the head pointed (so nothing jumps); the head then turns and leans freely
@@ -1209,7 +1379,7 @@ index e8e4ae7..3f03fc9 100644
 +            }
 +        }
 +        const glm::vec3 correction = kept - offset;
-+        out.head = xr::EyeCamera(logic.position + kept, glm::normalize(heading * rig_.ToWorld(head.orientation)), frusta_[0], kNearPlane);
++        out.head = xr::EyeCamera(logic.position + kept, glm::normalize(heading * rig_.ToWorld(head.orientation)), head_frustum_, kNearPlane);
 +        for (int i = 0; i < 2; ++i) {
 +            const xr::ViewPose& pose = host_.Eye(i);
 +            out.poses[i] = pose;
@@ -1245,7 +1415,14 @@ index e8e4ae7..3f03fc9 100644
      const glm::vec3 feet = player.Feet();
      const glm::vec3 eye = player.Eye();
      const float height = eye.y - feet.y;
-@@ -191,8 +304,8 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -185,14 +312,14 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+     const glm::vec3 correction = kept - offset;
+     last_anchor_ = anchor;
+     last_correction_ = correction;
+-    out.head = xr::EyeCamera(anchor + kept, rig_.ToWorld(head.orientation), frusta_[0], kNearPlane);
++    out.head = xr::EyeCamera(anchor + kept, rig_.ToWorld(head.orientation), head_frustum_, kNearPlane);
+     for (int i = 0; i < 2; ++i) {
+         const xr::ViewPose& pose = host_.Eye(i);
          out.poses[i] = pose;
          out.eyes[i] = xr::EyeCamera(anchor + rig_.Offset(pose.position) + correction, rig_.ToWorld(pose.orientation), frusta_[i], kNearPlane);
      }
@@ -1256,7 +1433,7 @@ index e8e4ae7..3f03fc9 100644
      auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
          if (!host_.Acquire(sc)) return false;
          t.image = sc.images[sc.index];
-@@ -207,19 +320,120 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -207,19 +334,133 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
          return false;
      }
@@ -1272,13 +1449,26 @@ index e8e4ae7..3f03fc9 100644
 +    // its field: as many times denser. (The inset images stay at the full size; a smaller
 +    // drawing is enlarged into them, as for the eyes.)
 +    const float aspect = static_cast<float>(out.render.width) / static_cast<float>(std::max(out.render.height, 1u));
-+    const float tan_y = std::clamp(center, 0.2f, 0.8f) * frusta_[0].tan_y;
++    // `center` of the wide view's field across (its pixels as many times denser), around the
++    // eye's forward axis, kept inside both eyes' wide fields.
++    float tan_y = std::clamp(center, 0.2f, 0.8f) * frusta_[0].tan_y;
++    for (int i = 0; i < 2; ++i) {
++        const glm::vec2 c = frusta_[i].center;
++        const float room_x = std::min(c.x + frusta_[i].tan_x, frusta_[i].tan_x - c.x);
++        const float room_y = std::min(c.y + frusta_[i].tan_y, frusta_[i].tan_y - c.y);
++        tan_y = std::min({tan_y, 0.98f * room_y, 0.98f * room_x / aspect});
++    }
 +    const float tan_x = tan_y * aspect;
-+    out.inset_scale = std::clamp(center, 0.2f, 0.8f);
 +    out.inset_tangents = glm::vec4(-tan_x, tan_x, tan_y, -tan_y);
++    for (int i = 0; i < 2; ++i) {
++        // The inset's field in its wide view's image (its centre is tangent 0; image y is down).
++        const xr::EyeFrustum& f = frusta_[i];
++        out.inset_share[i] = glm::vec4(tan_x / f.tan_x, tan_y / f.tan_y, -f.center.x / (2.0f * f.tan_x), f.center.y / (2.0f * f.tan_y));
++    }
 +    for (int i = 0; i < 2; ++i) {
 +        out.insets[i] = out.eyes[i];
 +        out.insets[i].fov_y = 2.0f * std::atan(tan_y);
++        out.insets[i].offset = glm::vec2(0.0f);  // centred on the eye's axis
 +        xr::Swapchain& sc = host_.InsetSwapchain(i);
 +        if (!host_.Acquire(sc)) {
 +            if (i == 1) host_.Release(host_.InsetSwapchain(0));
@@ -1378,7 +1568,7 @@ index e8e4ae7..3f03fc9 100644
      layers.hud_position = hud_position_;
      layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
      host_.EndFrame(layers);
-@@ -268,16 +482,48 @@ void VrPlay::EndEmpty() {
+@@ -268,16 +509,48 @@ void VrPlay::EndEmpty() {
  }
  
  void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
@@ -1430,7 +1620,7 @@ index e8e4ae7..3f03fc9 100644
      if (!hud_placed_ || (menu_open && !menu_was_open_)) {
          hud_yaw_ = head_yaw_local;
          hud_placed_ = true;
-@@ -289,7 +535,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
+@@ -289,7 +562,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
          }
      }
      menu_was_open_ = menu_open;
@@ -1441,7 +1631,7 @@ index e8e4ae7..3f03fc9 100644
  
  }
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index d1485b2..7099c8e 100644
+index d1485b2..4c5bd1e 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
 @@ -1,5 +1,7 @@
@@ -1452,7 +1642,7 @@ index d1485b2..7099c8e 100644
  #include <glm/glm.hpp>
  #include <glm/gtc/quaternion.hpp>
  
-@@ -34,6 +36,13 @@ public:
+@@ -34,6 +36,15 @@ public:
          XrTarget hud;
          VkExtent2D render{};
          xr::ViewPose poses[2];
@@ -1462,11 +1652,13 @@ index d1485b2..7099c8e 100644
 +        Camera insets[2];
 +        XrTarget inset_targets[2];
 +        glm::vec4 inset_tangents{0.0f};
-+        float inset_scale = 0.0f;  // the inset's field across, as a fraction of its eye's wide view
++        // Where each inset sits in its eye's wide-view image: wide uv = 0.5 + (inset uv - 0.5) *
++        // xy + zw (zw zero for a wide view centred on the eye's axis).
++        glm::vec4 inset_share[2]{};
      };
      bool PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_open, Stereo& out);
      void FinishStereo(const Stereo& stereo);
-@@ -43,9 +52,17 @@ public:
+@@ -43,9 +54,17 @@ public:
  
      void Rumble(uint8_t large_motor, uint8_t small_motor);
      VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
@@ -1485,7 +1677,7 @@ index d1485b2..7099c8e 100644
  
      xr::Host& host_;
      const AppSettings::Vr& settings_;
-@@ -53,17 +70,36 @@ private:
+@@ -53,18 +72,40 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -1520,10 +1712,14 @@ index d1485b2..7099c8e 100644
 +    bool rumble_seen_ = false;
 +    std::chrono::steady_clock::time_point rumble_since_{};
      xr::EyeFrustum frusta_[2];
++    // visionOS: the head's view (and the frame's culling) keeps the symmetric field that holds
++    // both eyes' fields; each eye draws its own, off-centre one (frusta_).
++    xr::EyeFrustum head_frustum_;
      uint32_t raw_previous_ = 0;
      bool snap_armed_ = true;
+     bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..55eec99 100644
+index d629ab3..e36de52 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -1640,7 +1836,7 @@ index d629ab3..55eec99 100644
 +            pt::visionos::SettingChanged("periphery", std::to_string(pt::visionos::Headset().periphery));
 +            return;
 +        case kVpCenter:
-+            pt::visionos::Headset().center = 30 + 5 * std::clamp(value, 0, 6);
++            pt::visionos::Headset().center = 30 + 5 * std::clamp(value, 0, 10);
 +            pt::visionos::SettingChanged("center", std::to_string(pt::visionos::Headset().center));
 +            return;
 +        case kVpDynamicRes:
@@ -1765,8 +1961,8 @@ index d629ab3..55eec99 100644
 +        for (int i = 0; i <= 8; ++i) periphery.values.push_back(std::format("{}%", 30 + 5 * i));
 +        periphery.wrap = false;
 +        headset.rows.push_back(std::move(periphery));
-+        pt::game::PcSettingRow center = Row(kVpCenter, "pc_vp_center", {}, std::clamp((h.center - 30 + 2) / 5, 0, 6), "pc_note_vp_center");
-+        for (int i = 0; i <= 6; ++i) center.values.push_back(std::format("{}%", 30 + 5 * i));
++        pt::game::PcSettingRow center = Row(kVpCenter, "pc_vp_center", {}, std::clamp((h.center - 30 + 2) / 5, 0, 10), "pc_note_vp_center");
++        for (int i = 0; i <= 10; ++i) center.values.push_back(std::format("{}%", 30 + 5 * i));
 +        center.wrap = false;
 +        headset.rows.push_back(std::move(center));
 +        headset.rows.push_back(Row(kVpDynamicRes, "pc_vp_dynres", OffOn(), h.dynamic_resolution ? 1 : 0, "pc_note_vp_dynres"));
@@ -1946,7 +2142,7 @@ index d629ab3..55eec99 100644
 +                app.scene.SetVrCullCamera(&cull_camera);
 +                // Each inset takes its eye's wide-view bloom and particles, left in the renderer by the
 +                // view drawn just before it (the order below).
-+                app.scene.SetVrInsetShare(stereo.inset ? stereo.inset_scale : 0.0f);
++                app.scene.SetVrInsetShare(stereo.inset ? stereo.inset_share : nullptr);
 +#endif
 +                // With insets: left wide, left inset, right wide, right inset (views 0, 2, 1, 3).
 +                static constexpr int kInsetOrder[4] = {0, 2, 1, 3};
@@ -1985,7 +2181,7 @@ index d629ab3..55eec99 100644
 +#if PT_VISIONOS
 +                app.scene.SetVrLowDetail(false);
 +                app.scene.SetVrCullCamera(nullptr);
-+                app.scene.SetVrInsetShare(0.0f);
++                app.scene.SetVrInsetShare(nullptr);
 +#endif
                  ui.SetVrHud(false);
                  take_reflection_readback(game);

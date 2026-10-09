@@ -139,6 +139,22 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   18–19 (48–54 ms: más geometría/luces/sombras). Vibración OK (el juego la pide en sucesos y con el reloj; llega al mando).
   Pantalla 100 Hz unos segundos y luego 90. Por vista: particles 1,2–2,0 (ancha) / 1,7–2,9 (centro), lights 1,8–2,5,
   gbuffer 1,1–2,2, effects ≈ particles + composite 0,5 + copias 0,15–0,2.
+- **Prueba build 23 (run 27):** 45/45: 25 fps al inicio (GPU 38 ms), 19–20 luego (48–51 ms); térmico fair → serious.
+  Periferia 30 / centro 60: GPU 27 ms (34 fps). Ajuste: ≈6 ms/MP + ≈10 ms fijos por frame. Centro nítido no cambia fps
+  (mismos píxeles); al usuario el 60 le da más calidad (más área nítida). Resolución dinámica: bajó a 50 % (770×530)
+  para 45 fps → borrón inaceptable; queda apagada y descartada como solución. Sombras 2,3–2,9 ms/frame.
+- **Build 24:**
+  - Encuadre propio por ojo (asimétrico) en visionOS: `xr::OwnRenderSize`/`xr::OwnFrustumFor` (xr_view.h);
+    `Camera::offset` (camera.h, mismo convenio que el jitter: `p[2][0] = -offset.x`, `p[2][1] = -offset.y`);
+    `add_view` suma `camera.offset` a `View::jitter.xy` (PixelNdc lo deshace); `EyeCamera` copia `frustum.offset`.
+    Vistas anchas 1213×973 (antes 1539×1059 con 27 % tirado). `head_frustum_` (unión simétrica al nuevo aspecto) para
+    la cámara de cabeza (culling de luces/sombras, VFX).
+  - Centros: simétricos en el eje del ojo, `tan_y = center·tan_y(ancha)` limitado al campo de ambos ojos;
+    `Stereo::inset_share[ojo]` = (escala xy, desplazamiento zw) → `SetVrInsetShare(const glm::vec4*)`, `SharePlace()`,
+    `tonemap.frag`/`vfx_composite.frag` muestrean en `0.5+(uv-0.5)·f2.xy+f2.zw`. Mismo % = misma densidad, menos ancho.
+  - `reflection_depth.glsl`: filtro de profundidad según `projection_param.w == 3` (upscaler activo), no `jitter≠0`.
+  - Centro nítido 30–80 % (antes 30–60): .mm `InsetWanted`/`ApplySettings`, Swift `SettingsView`, menú `kVpCenter`
+    (11 valores); nota corregida (no cambia fps).
 - **Build 23:**
   - Orden estéreo con insets: izquierda ancha, izquierda centro, derecha ancha, derecha centro (`kInsetOrder` en main.cpp;
     `ReportEye` con `kInsetOrder[(k+2)%4]`). El centro usa lo que acaba de dejar su vista ancha.
@@ -465,8 +481,9 @@ Frecuencias: M2 90/96/100 Hz → modos estables 45/90, 48/96, 50/100 (M2 apunta 
 120 Hz → 60/120 como PS VR. La app no puede pedir la frecuencia (comprobado, build 21 la mide y la registra).
 Preset M5 bloqueado sin M5: hecho (build 21).
 
-Siguiente (tras el log de build 21): fusionar pasadas a pantalla completa para la GPU de tiles (compose+forward+effects
-sobre la misma imagen y profundidad; cadena de post: tonemap/LUT/banding/screen), según las subetiquetas.
+Siguiente (tras el log de build 24): coste fijo por frame (~10 ms): sombras 2,3–2,9 ms (caché de sombras estáticas),
+post/bloom de las anchas, iluminación; formatos de luz más ligeros (R11G11B10F) si no cambian la imagen; máscara del
+centro en las vistas anchas (no dibujar bajo el inset). Fusionar pasadas para la GPU de tiles.
 
 0. Medir build 18 (log `vr pace` con 4 vistas) y calibrar periphery/center por defecto. Siguiente: resolución
    dinámica por tiempo de GPU, caché de sombras estáticas, profundidad al drawable (reproyección posicional),

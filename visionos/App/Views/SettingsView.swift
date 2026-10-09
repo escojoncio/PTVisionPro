@@ -149,7 +149,7 @@ struct SettingsView: View {
             }
             .disabled(!model.settings.gameFoveation)
             LabeledContent(L("Centro nítido", "Sharp centre")) {
-                Stepper("\(model.settings.center) %", value: int(\.center), in: 30...60, step: 5)
+                Stepper("\(model.settings.center) %", value: int(\.center), in: 30...80, step: 5)
             }
             .disabled(!model.settings.gameFoveation)
         } header: {

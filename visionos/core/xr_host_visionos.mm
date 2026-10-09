@@ -1903,7 +1903,7 @@ void Host::SetPointerWanted(bool wanted) { impl_->pointer_wanted = wanted; }
 
 bool Host::InsetWanted(float& center) const {
     const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
-    center = std::clamp(static_cast<float>(h.center) / 100.0f, 0.3f, 0.6f);
+    center = std::clamp(static_cast<float>(h.center) / 100.0f, 0.3f, 0.8f);
     // What the eye images are now (the setting takes effect with them, after its short wait).
     return impl_->running && impl_->eye_factor < 0.999f;
 }
@@ -2118,7 +2118,7 @@ void ApplySettings(AppSettings& s) {
     h.metalfx = Flag("PT_VP_METALFX", false);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 45.0f)), 30, 70);
-    h.center = std::clamp(static_cast<int>(Number("PT_VP_CENTER", 45.0f)), 30, 60);
+    h.center = std::clamp(static_cast<int>(Number("PT_VP_CENTER", 45.0f)), 30, 80);
     h.fov = std::clamp(static_cast<int>(Number("PT_VP_FOV", 100.0f)), 70, 100);
 
     // The game's own graphics preset first (textures, filtering, clarity...); the launcher's
