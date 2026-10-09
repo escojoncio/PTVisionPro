@@ -158,6 +158,22 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 27 (run 31):** luces como en 25 (2,2–3,6 ms/vista); 30 ms inicio (32 fps), 36–40 ms después.
   Sombras 1,2 ms al inicio (antes 1,7) pero solo ~1/3 de teselas reutilizadas: el hash dependía del orden de `draws_`
   (ordenado por cámara). El usuario quiere «BT.2020 y brillo HDR».
+- **Prueba build 28 (run 32, log pt (15)):** sin cierres; pantalla 100 Hz (modo 45 → 50); GPU 34–40 ms (4 vistas) → 24–33 fps
+  (escalones de 100 Hz: ≤30 ms = 33 fps, ≤40 ms = 25; no hay 60); térmico serious a ~190 s. Ajuste HDR cambiado en vivo
+  (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
+  Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
+  y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
+- **Build 29: OK?** (pendiente de CI; sin probar):
+  - `light_front_` (scene_renderer.cpp, mismo `PipelineDesc` que `light_` con `GREATER_OR_EQUAL`): en `RecordLighting`, si el
+    ojo de la vista está fuera del volumen por `near·4 + 0,05 m` (local por eje, filas de la inversa; determinante > 0), caras
+    delanteras (cull BACK) → la pared delante de la luz falla la profundidad antes del shader. Si no, caras traseras como
+    antes. Solo `view_bit == 1`, sin espejo, sin RT/contacto. Primero las de delante, luego las de detrás. `PT_LIGHT_FRONT=0`
+    lo apaga. Volúmenes cacheados por vista (`light_volumes_`, `light_outside_`).
+  - `light_main.glsl`: tras reconstruir `s.world`, descarta fuera de caja de área, alcance (`1/d² − d²·range.z ≤ 0`) o cono
+    (`(cos − cone.x)·cone.y ≤ 0` con `cone.z > 0`) antes de leer normal/material (mismas pruebas que `EvaluateLight`).
+  - Log `cull (per view, last 10 s): wide N draws, M light volumes (K from the front); inset ...` (`CountLights`).
+  - Parche: generar con `git add -N shaders/light_all.frag && git diff` en el árbol `--edit` (si no, se pierde el fichero
+    nuevo). Nunca generar el parche desde el árbol sin `--edit` (incluye las ediciones de prepare_source → no aplica).
 - **Build 28 (run 32): OK** (sin probar):
   - Caché de sombras: hash de casters como conjunto (suma de hashes por caster + número).
   - HDR nativo: `tonemap.frag` del juego solo recorta `IMG_HDR` en 1. `screen_fx.frag` (pasada «screen», push
@@ -531,7 +547,10 @@ Frecuencias: M2 90/96/100 Hz → modos estables 45/90, 48/96, 50/100 (M2 apunta 
 120 Hz → 60/120 como PS VR. La app no puede pedir la frecuencia (comprobado, build 21 la mide y la registra).
 Preset M5 bloqueado sin M5: hecho (build 21).
 
-Siguiente (tras el log de build 24): coste fijo por frame (~10 ms): sombras 2,3–2,9 ms (caché de sombras estáticas),
+Siguiente (tras build 29): prototipo de foveado en una pasada (VRR, `MTLRasterizationRateMap` en las pasadas de MoltenVK)
+frente a máscara del centro en las vistas anchas; medir con `cull (...)` y `gpu labels` si `lighting/lights` baja al mirar paredes.
+
+Anterior (tras el log de build 24): coste fijo por frame (~10 ms): sombras 2,3–2,9 ms (caché de sombras estáticas),
 post/bloom de las anchas, iluminación; formatos de luz más ligeros (R11G11B10F) si no cambian la imagen; máscara del
 centro en las vistas anchas (no dibujar bajo el inset). Fusionar pasadas para la GPU de tiles.
 
