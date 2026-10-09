@@ -163,6 +163,21 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
+- **Prueba build 30 (run 34, log pt (17)):** sin mejora (usuario). Inicio 30,5 ms GPU (4 vistas, 31–32 fps); pasillo
+  35–40 ms (24–26 fps); pantalla 100 Hz → el modo 45 es 50 fps y exige ≤20 ms. Sombras con huecos estables: hasta 510
+  teselas guardadas/10 s, pero en el pasillo se siguen dibujando 400–1100 (lámpara que oscila, luces que se encienden);
+  sombras 1,2–2,6 ms/frame. Reparto medio en el pasillo (4 vistas): iluminación ~14 ms, compose+forward ~9, post ~8,
+  gbuffer ~7, sombras ~2. Coste repartido: ningún ajuste fino da más de 0,3–1 ms; faltan ~18 ms.
+  **Cierre a los 150 s:** `vr: the immersive space closed` y 60 ms después `vulkan: device lost at one-time submit wait`
+  → fatal. El juego seguía vivo con el espacio cerrado (con el menú de pausa abierto no se congelaba) y mandaba trabajo a
+  la GPU sin escena visible; Metal lo rechaza (`MTLCommandBufferErrorNotPermitted`) y MoltenVK marca el dispositivo
+  perdido sin remedio (`MVK_CONFIG_RESUME_LOST_DEVICE` no cubre ese código).
+- **Build 31 (pendiente de lanzar):**
+  - main.cpp (parche): en visionOS, `vr->Host().FocusLost()` (espacio cerrado/oculto o app inactiva) → `visible = false`
+    → juego congelado (sin render, sin subidas; audio congelado); `PollEnhancedTextures` solo si `visible`. El menú de
+    pausa se sigue abriendo al perder el foco.
+  - vk_context.cpp (parche): sin capa de validación, en visionOS se activa `VK_EXT_debug_utils` y un messenger solo de
+    errores → los errores de MoltenVK (código de Metal del command buffer rechazado) llegan a pt.log.
 - **Build 30 (run 34): OK** → `releases/download/build-34/PTVisionPro-34.ipa` (sin probar):
   - Atlas de sombras estable (`BuildShadowViews`, scene_frame.cpp): `first` = primer hueco en orden de puntuación con la
     misma regla de presupuesto de vistas (decide QUÉ luces tienen sombra, igual que antes); luego esas mismas luces se

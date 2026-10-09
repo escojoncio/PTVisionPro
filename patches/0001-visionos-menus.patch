@@ -1677,6 +1677,38 @@ index 6c9b165..f0dae50 100644
  };
  
  }
+diff --git a/src/engine/render/vk_context.cpp b/src/engine/render/vk_context.cpp
+index f6a961d..de1420b 100644
+--- a/src/engine/render/vk_context.cpp
++++ b/src/engine/render/vk_context.cpp
+@@ -104,6 +104,14 @@ bool Context::Init(SDL_Window* window, bool validation) {
+     } else {
+         validation = false;
+     }
++#if PT_VISIONOS
++    // MoltenVK's own errors (a rejected Metal command buffer and its code) reach pt.log through a messenger: without
++    // the validation layer the log only said "device lost".
++    const bool driver_messages = !validation;
++    if (driver_messages) extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
++#else
++    constexpr bool driver_messages = false;
++#endif
+ 
+     uint32_t loader_version = VK_API_VERSION_1_0;
+     if (vkEnumerateInstanceVersion) vkEnumerateInstanceVersion(&loader_version);
+@@ -143,9 +151,10 @@ bool Context::Init(SDL_Window* window, bool validation) {
+     }
+     volkLoadInstance(instance);
+ 
+-    if (validation) {
++    if (validation || driver_messages) {
+         VkDebugUtilsMessengerCreateInfoEXT messenger_info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+-        messenger_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
++        messenger_info.messageSeverity = validation ? (VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
++                                                    : VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+         messenger_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                                      VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+         messenger_info.pfnUserCallback = DebugCallback;
 diff --git a/src/engine/xr/xr_host.cpp b/src/engine/xr/xr_host.cpp
 index 5e7cee1..6610b7f 100644
 --- a/src/engine/xr/xr_host.cpp
@@ -2468,7 +2500,7 @@ index d1485b2..4c5bd1e 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..844b50b 100644
+index d629ab3..dfedeb0 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -2842,7 +2874,27 @@ index d629ab3..844b50b 100644
      TickState tick_state;
      std::vector<glm::mat4> blended_skins;
      static const bool render_trace = std::getenv("PT_RENDER_TRACE") != nullptr;
-@@ -3487,6 +3711,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3434,8 +3658,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
+                 visible = false;
+                 SDL_Delay(10);
+             }
++#if PT_VISIONOS
++            // The space closed, hidden or the app inactive: nothing of the game may reach the GPU. visionOS rejects GPU
++            // work from an app without a visible scene and MoltenVK turns that into a lost device (log 17, after the
++            // Digital Crown). The game stays frozen, as on a desktop in the background, until the space is back.
++            if (vr->Host().FocusLost()) {
++                visible = false;
++            }
++#endif
++        }
++        if (visible) {
++            PollEnhancedTextures(app);
+         }
+-        PollEnhancedTextures(app);
+         const std::optional<bool> forced_focus = script.ForcedFocus(frame);
+         if (app.window || forced_focus || vr) {
+             const bool focused = forced_focus ? *forced_focus
+@@ -3487,6 +3721,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
          float dt = options.display_rate > 0.0f ? 1.0f / options.display_rate : 1.0f / options.tick_rate;
@@ -2856,7 +2908,7 @@ index d629ab3..844b50b 100644
          if (app.window) {
              const uint64_t now = SDL_GetTicksNS();
              dt = std::clamp(static_cast<float>(now - last_ticks) * 1e-9f, 0.0001f, 0.1f);
-@@ -3554,7 +3785,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3554,7 +3795,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (polled.pointer_valid) {
              pending_input.pointer = polled.pointer;
              pending_input.pointer_valid = true;
@@ -2865,7 +2917,7 @@ index d629ab3..844b50b 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
-@@ -3876,8 +4107,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3876,8 +4117,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
              previous_microphone_test = app.microphone_test;
          }
          const bool voice_file = !voice_input.empty();
@@ -2882,7 +2934,7 @@ index d629ab3..844b50b 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4125,21 +4362,64 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4125,21 +4372,64 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  last_scene_time = game.Time();
                  vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
                                    lighting, vfx_pass, blend);
@@ -2952,7 +3004,7 @@ index d629ab3..844b50b 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4848,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4858,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -2969,7 +3021,7 @@ index d629ab3..844b50b 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4894,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4904,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }
