@@ -148,6 +148,21 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   gbuffer 2,1–2,3, compose+forward 2,9–3,2 ancha / 1,8 centro, post 2,3 ancha (bloom 1,5) / 0,7 centro, shadows 1,4–1,8,
   occlusion 0,8, reflections 0,85 (centros). Anisotrópico 2→16x: gbuffer +~0,1 ms/vista. El usuario exige ≥4–8x:
   cambia el sombreado visible (normal maps a ángulos rasantes).
+- **Prueba build 25 (run 29):** igual que 24 (30 ms inicio, 36–42 ms después). Anisotrópico 8x OK. Luces ~3 ms/vista,
+  sombras hasta 3,5 ms/frame. Partida con brillo 4 (`kBrightness[4]` = 0,76 → oscurece; 7 = neutro). El patrón de
+  calibración (UI) no cambiaba: el HUD no recibía el brillo.
+- **Build 26:**
+  - Luces en una pasada: `shaders/light_all.frag` (hasta 32 luces, máscaras `ids.z` dibujadas / `ids.w` con sombra, mismo
+    `EvaluateLight`), pipeline `light_all_` (Additive, 2 colores, profundidad solo lectura), en `RecordLighting` para
+    `view_bit == 1` sin RT/contacto ni `PT_LIGHT_DRAW_ONLY/NO_SHADOW/PT_LIGHT_VOLUMES`; si no, volúmenes como antes.
+  - Brillo en el HUD: `CopyToXr` pasa el brillo también premultiplicado; `xr_copy.frag` aplica `pow(straight, 1/b)`.
+  - Composición Metal (.mm): `ToDisplayP3` (sRGB lineal → P3 lineal; el drawable rgba16Float es extended linear P3) y
+    `ExpandHighlights` (rodilla 0,5, pico `Headset().hdr/100` hasta 2,0 = EDR del visor) en ojo, centro y pantalla
+    virtual opaca; `Uniforms.grade` (MSL y C++) vía `GameGrade()`.
+  - Ajuste HDR: `HeadsetSettings.hdr` (100/140/170/200, defecto 170, fuera de presets), `PT_VP_HDR`, fila `kVpHdr`
+    (`pc_vp_hdr*`), Swift `PTSettings.hdr`, Picker en Gráficos, `GameRunner` `hdr`.
+  - Comprobación de shaders local: glslang compilado desde fuente en /tmp/claude-0/glslang (`b/StandAlone/glslang -V
+    --target-env vulkan1.2 -I. --P "#extension GL_GOOGLE_include_directive : require" f.frag`).
 - **Build 25 (run 29): OK** (sin probar): anisotrópico como ajuste del visor: `Preset.anisotropy` (M2 8, M5 16) en `kPresets`, `MatchesPreset`,
   `ApplyPreset`/`GraphicsChanged` informan `anisotropy`, `AnisotropyStep`, `PT_VP_ANISOTROPY` (por defecto 8) aplicado tras
   `ApplyGraphicsPreset` en `ApplySettings`; main.cpp: `kVpPreset` llama `textures.SetAnisotropy`, `kAnisotropy` dispara
