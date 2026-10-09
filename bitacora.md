@@ -163,6 +163,29 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
+- **Build 31 (pendiente de resultado): densidad variable (VRR) de Metal en lugar de insets.**
+  - MoltenVK (`patches/moltenvk/0001-rasterization-rate-map.patch`, lo aplica `tools/build_visionos.sh`; clave de caché
+    CI incluye `patches/moltenvk/*.patch`): extensión privada `VkRenderingRasterizationRateMapMVK` (sType 1297501008) en el
+    pNext de `VkRenderingInfo` → `MTLRenderPassDescriptor.rasterizationRateMap`, `renderTargetWidth/Height` = tamaño
+    físico, tijeras recortadas al tamaño lógico (`clipToRenderArea`), se borra en `endRendering`. Mapa sin retener.
+  - Host (.mm): `Impl::BuildVrr` (en `SetupEyes` cuando `VrrWanted()` y hay tangentes; `LocateViews` lo dispara la primera
+    vez y si cambia `center` o las tangentes > 0,02): lógico = ancha / center; 16×16 zonas, calidad 1 en el centro
+    (simétrico al eje, como el inset) y `center` fuera; patrón unido y espejado entre ojos (mismo tamaño físico). Imágenes
+    de ojo al tamaño físico. Tablas (8 filas, ancho max+2: ojo·4 + {0 fís x→lóg, 1 fís y→lóg, 2 lóg x→fís, 3 lóg y→fís})
+    sacadas de `mapPhysicalToScreen/ScreenToPhysical`, en `Host::Vrr()` (`VrrInfo`, xr_host.h) y como textura R32Float para
+    `eye_vrr_fragment` (composición: rect = `OwnFrustumFor(tangentes, lógico).rect`, `cursor` = (lógico, fila)).
+    `InsetWanted` falso con VRR; MetalFX apagado con VRR. `PT_VP_VRR=0` o fallo → insets como antes (`vrr_failed`).
+  - Motor (parche): `render_util` `SetVrrPasses/ForceVrrNextPass/VrrViewport`; `BeginPass` encadena el mapa en pasadas al
+    tamaño físico completo con la profundidad de escena (o forzadas: sondas, sin `shrink`) y pone viewport/tijera lógicos.
+    Pasadas a pantalla completa sin profundidad: físicas. `vfx_pass` usa `VrrViewport`. `gpu::View.vrr` (x on, y fila, zw
+    lógico; a cero en `add_view`, puesto en vistas main y motion), `kResVrrMap = 35`, `SetVrVrr/SetVrrTables/VrrActive`,
+    aspecto lógico en `PrepareFrame` y en `UpdateMotion` (scene_post). common.glsl: `VrrTable`, `VrrLogicalPixel`,
+    `VrrLogicalUv`, `VrrPhysicalUv`, `PixelNdc` mapea físico→lógico. SSR: `reflect_make` marcha en lógico y guarda
+    desplazamiento físico; `HistoryOffset` y `reflect_temporal` convierten. main.cpp: tablas por generación, `SetVrVrr` por
+    ojo (fila ojo·4), aspecto VFX lógico. vr_play: `Stereo::logical`, `render` = físico, rect completo.
+  - Revisión adversarial (Sonnet) aplicada: `vrr` a cero en `add_view`, aspecto previo lógico, zonas simétricas, umbral.
+  - Pendiente si funciona: ajuste de periferia en el menú (calidad fuera del centro < `center` = ahorro real), SSAO/SSS con
+    radios en lógico, comparar ms con build 30 (30 ms inicio, 35–40 pasillo).
 - **Prueba build 30 (run 34, log pt (17)):** sin mejora (usuario). Inicio 30,5 ms GPU (4 vistas, 31–32 fps); pasillo
   35–40 ms (24–26 fps); pantalla 100 Hz → el modo 45 es 50 fps y exige ≤20 ms. Sombras con huecos estables: hasta 510
   teselas guardadas/10 s, pero en el pasillo se siguen dibujando 400–1100 (lámpara que oscila, luces que se encienden);
