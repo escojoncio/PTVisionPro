@@ -115,7 +115,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 16:** estéreo y escenas inmersivas OK. Problemas: tras la escena inicial el jugador mira al
   revés; reflejos "bamboleantes"; el tamaño de imagen del menú no cambiaba nada (ojos 2696x2162 y render
   3419x2353 fijos desde el inicio). GPU 97–114 ms ambos ojos (~9 fps).
-- **Build 17 (lanzada):**
+- **Build 17 (run_number 21): OK** → `releases/download/build-21/PTVisionPro-21.ipa` (la recomendada; sin probar en el visor):
   - Mirar al revés: el centrado (base del rig = yaw de la cámara, 0) ocurre antes del spawn (yaw 180) y el primer
     look de la cabeza ignoraba el rumbo del juego. `Player::SetVrReference(yaw)` (player.h, nuevo) llamado al
     centrar en `VrPlay::ApplyControls`: `vr_last_yaw_ = yaw; vr_looked_ = true` → el spawn y la cámara que
@@ -350,6 +350,12 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
   vistas Inicio/Ajustes/Rendimiento/Registro, `pt_visionos.h` (API C). Bundle id
   `com.kdt.livecontainer`. Recursos del juego como carpetas en la raíz del bundle
   (`ExecutableDir()/shaders` etc.).
+
+## VPEngine (escojoncio/VPEngine)
+
+- Revisado hasta `c400350`: traductor AOT x86-64→C para juegos de PS4 + capa Swift común
+  (`platform/visionos`: controlador, Sense, VPS4, logs, idioma) copiada de este repo y desacoplada. Nada
+  aplicable a P.T. (que es C++ nativo, sin emulación) en ese punto.
 
 ## Pendiente (siguiente sesión, en orden)
 
