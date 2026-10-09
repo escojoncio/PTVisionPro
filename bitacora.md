@@ -168,7 +168,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   completa; antes ~0,5), lights 2,9–3,4 (antes 2,3+2,3), gbuffer 2,6–2,8 (antes 1,7+1,7), post 2,7 (antes 2,2+1,8),
   reflejos 1,7–2,2 (todo el ojo). Resolución dinámica sin efecto con VRR (DrawSize ignorado). Usuario: "artefactos raros" al
   cambiar la resolución (sin rastro en el log; preguntado). Cierre normal.
-- **Build 33 (pendiente):** sondas a media resolución LÓGICA sin mapa (pasada no "whole" → sin VRR) en la esquina de
+- **Build 33 (run 37): OK** → `releases/download/build-37/PTVisionPro-37.ipa` (sin probar). Usuario sobre los artefactos de build 32: "cuadrados cuando movía la vista" (hipótesis: borde del rectángulo nítido de las zonas, o bloques de la periferia a escala 0,50). sondas a media resolución LÓGICA sin mapa (pasada no "whole" → sin VRR) en la esquina de
   `probe_acc_`: `probe_main` (texel t ↔ lógico 2t+0.5, profundidad/normal vía `VrrPhysicalUv`), `probe_resolve` (bilineal
   con pesos de profundidad, `half_pos = (lógico − 0,5)·0,5`); solo vista principal (`vrr_view`; espejo como antes).
   Zonas con calidad fraccionaria por solape con el centro (`inside()`), unión espejada con `max`. `GpuBudgetMs` = 0 con VRR.
