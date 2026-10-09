@@ -356,6 +356,10 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 - Revisado hasta `c400350`: traductor AOT x86-64→C para juegos de PS4 + capa Swift común
   (`platform/visionos`: controlador, Sense, VPS4, logs, idioma) copiada de este repo y desacoplada. Nada
   aplicable a P.T. (que es C++ nativo, sin emulación) en ese punto.
+- Revisado hasta `cf5d774` (22 commits): FPU x87 exacta con SoftFloat, SSSE3/SSE4/SSE4a/AES/PCLMUL/CRC32,
+  caché de despacho por hilo y de veneers HLE, excepciones C++ traducidas, puntos de reanudación
+  (fibers/corrutinas), pila de 16 MiB para hilos invitados en el parche de shadPS4, CI con logs. Todo es
+  traductor/runtime AOT o emulación; `platform/visionos` sin cambios → descartado, nada aplicable.
 
 ## Pendiente (siguiente sesión, en orden)
 
