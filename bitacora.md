@@ -143,7 +143,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Periferia 30 / centro 60: GPU 27 ms (34 fps). Ajuste: ≈6 ms/MP + ≈10 ms fijos por frame. Centro nítido no cambia fps
   (mismos píxeles); al usuario el 60 le da más calidad (más área nítida). Resolución dinámica: bajó a 50 % (770×530)
   para 45 fps → borrón inaceptable; queda apagada y descartada como solución. Sombras 2,3–2,9 ms/frame.
-- **Build 24:**
+- **Build 24 (run 28): OK** → `releases/download/build-28/PTVisionPro-28.ipa` (sin probar):
   - Encuadre propio por ojo (asimétrico) en visionOS: `xr::OwnRenderSize`/`xr::OwnFrustumFor` (xr_view.h);
     `Camera::offset` (camera.h, mismo convenio que el jitter: `p[2][0] = -offset.x`, `p[2][1] = -offset.y`);
     `add_view` suma `camera.offset` a `View::jitter.xy` (PixelNdc lo deshace); `EyeCamera` copia `frustum.offset`.
