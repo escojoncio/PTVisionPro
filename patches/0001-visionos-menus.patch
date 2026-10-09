@@ -174,6 +174,77 @@ index 66d5d0c..0207546 100644
      vec4 g_normal = ImgFetch(IMG_NORMAL, pixel);
      vec4 g_material = ImgFetch(IMG_MATERIAL, pixel);
      s.N = DecodeNormal(g_normal.xyz);
+diff --git a/shaders/probe_main.glsl b/shaders/probe_main.glsl
+index bb2e1d6..2ac5fcd 100644
+--- a/shaders/probe_main.glsl
++++ b/shaders/probe_main.glsl
+@@ -55,15 +55,26 @@ void main() {
+     Probe p = frame.probes[pass.ids.y];
+     ivec2 pixel = ivec2(gl_FragCoord.xy);
+     vec2 frag = gl_FragCoord.xy;
+-    if (pass.ids.z != 0u) {
+-        pixel *= 2;
+-        frag = vec2(pixel) + 0.5;
++    vec2 ndc;
++    if (pass.ids.z != 0u && v.vrr.x > 0.5) {
++        // Variable rasterization rate: drawn at half the logical picture's size, plainly (the boxes
++        // rasterized without the rate map); the depth and normal read where that point is in the
++        // scene's physical targets.
++        vec2 logical = vec2(ivec2(frag)) * 2.0 + 0.5;
++        ndc = logical / v.vrr.zw * 2.0 - 1.0 - v.jitter.xy;
++        pixel = clamp(ivec2(VrrPhysicalUv(v, logical / v.vrr.zw) * v.viewport.xy), ivec2(0), ivec2(v.viewport.xy) - 1);
++    } else {
++        if (pass.ids.z != 0u) {
++            pixel *= 2;
++            frag = vec2(pixel) + 0.5;
++        }
++        ndc = PixelNdc(v, frag);
+     }
+     float depth = ImgFetch(IMG_DEPTH, pixel).x;
+     if (depth <= 0.0) {
+         discard;
+     }
+-    vec3 P = ViewPosition(v, PixelNdc(v, frag), depth);
++    vec3 P = ViewPosition(v, ndc, depth);
+     vec3 world = (v.inv_view * vec4(P, 1.0)).xyz;
+     vec3 q = (p.box * vec4(world, 1.0)).xyz;
+     vec3 f = min(clamp((1.0 - q) * p.positive.xyz, 0.0, 1.0), clamp((1.0 + q) * p.negative.xyz, 0.0, 1.0));
+diff --git a/shaders/probe_resolve.frag b/shaders/probe_resolve.frag
+index 7967a2e..0a39b51 100644
+--- a/shaders/probe_resolve.frag
++++ b/shaders/probe_resolve.frag
+@@ -31,6 +31,31 @@ void main() {
+     }
+     ivec2 half_size = ivec2(pass.ids.yz);
+     ivec2 full_size = ivec2(ImgSize(IMG_DEPTH));
++    View v = frame.views[pass.ids.w];
++    if (v.vrr.x > 0.5) {
++        // Variable rasterization rate: the probes were drawn at half the logical picture's size
++        // (probe_main.glsl); this physical pixel's place in it, and each sample's depth where that
++        // sample is in the physical targets.
++        vec2 half_pos = (VrrLogicalPixel(v, gl_FragCoord.xy) - 0.5) * 0.5;  // texel t at logical 2t + 0.5
++        ivec2 i0 = ivec2(floor(half_pos));
++        vec2 fr = half_pos - vec2(i0);
++        float centre_depth = ImgFetch(IMG_DEPTH, p).x;
++        vec3 vsum = vec3(0.0);
++        float vtotal = 0.0;
++        for (int k = 0; k < 4; ++k) {
++            ivec2 o = ivec2(k & 1, k >> 1);
++            ivec2 t = clamp(i0 + o, ivec2(0), half_size - 1);
++            float table = (o.x == 1 ? fr.x : 1.0 - fr.x) * (o.y == 1 ? fr.y : 1.0 - fr.y);
++            vec2 logical = vec2(t) * 2.0 + 0.5;
++            ivec2 at = clamp(ivec2(VrrPhysicalUv(v, logical / v.vrr.zw) * v.viewport.xy), ivec2(0), full_size - 1);
++            float d = ImgFetch(IMG_DEPTH, at).x;
++            float w = table / (abs(d - centre_depth) + 1e-6);
++            vsum += w * Encode(ImgFetch(IMG_PROBE_ACC, t));
++            vtotal += w;
++        }
++        out_diffuse = vec4(vtotal > 0.0 ? vsum / vtotal : vec3(0.0), 1.0);
++        return;
++    }
+     ivec2 i = p >> 1;
+     vec2 f = vec2(p & 1) * 0.5;
+     float centre = ImgFetch(IMG_DEPTH, p).x;
 diff --git a/shaders/reflect_blend_main.glsl b/shaders/reflect_blend_main.glsl
 index 2cafd35..725ac22 100644
 --- a/shaders/reflect_blend_main.glsl
@@ -534,7 +605,7 @@ index 9bb3b5d..c4444bd 100644
      float grain[4] = {0.0f, 0.0f, 0.0f, 0.0f};
      float grain_offset[2] = {0.0f, 0.0f};
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..2d2239b 100644
+index 40d339d..cea7933 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -306,7 +306,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -897,18 +968,22 @@ index 40d339d..2d2239b 100644
  }
  
  void SceneRenderer::RecordOcclusion(VkCommandBuffer cmd, const ViewSetup& view) {
-@@ -1401,7 +1611,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
-         return v && std::string_view(v) == "legacy";
+@@ -1402,7 +1612,13 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
      }();
      const bool ao = rt_ao_ready_ && view.index == main_view_.index;
--    const bool shrink = !up_.enabled && !ao && !legacy_resolve;
-+    // (Not at half size with variable rasterization rate: the probes' boxes are rasterized through
-+    // the rate map, which is the targets' size.)
-+    const bool shrink = !up_.enabled && !ao && !legacy_resolve && !VrrActive();
-     const VkExtent2D acc_area{shrink ? (area.width + 1) / 2 : area.width, shrink ? (area.height + 1) / 2 : area.height};
+     const bool shrink = !up_.enabled && !ao && !legacy_resolve;
+-    const VkExtent2D acc_area{shrink ? (area.width + 1) / 2 : area.width, shrink ? (area.height + 1) / 2 : area.height};
++    // With variable rasterization rate the probes are drawn at half the logical picture's size,
++    // plainly (no rate map: not the whole physical size), and resolved through the tables.
++    const bool vrr_view = VrrActive() && view.index == main_view_.index;  // (not the mirror's view)
++    const VkExtent2D shrink_base = vrr_view ? vrr_logical_ : area;
++    VkExtent2D acc_area{shrink ? (shrink_base.width + 1) / 2 : area.width, shrink ? (shrink_base.height + 1) / 2 : area.height};
++    acc_area.width = std::min(acc_area.width, probe_acc_.Extent().width);
++    acc_area.height = std::min(acc_area.height, probe_acc_.Extent().height);
      auto draw_probes = [&](uint32_t shrink_flag) {
          if (ao) {
-@@ -1422,16 +1634,20 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, probe_ao_);
+@@ -1422,16 +1638,20 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          }
      };
      if (probes) {
@@ -918,7 +993,7 @@ index 40d339d..2d2239b 100644
                           {&probe_acc_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          VkClearColorValue transmittance{};
          transmittance.float32[3] = 1.0f;
-+        if (VrrActive()) ForceVrrNextPass();
++        if (vrr_view && !shrink) ForceVrrNextPass();  // full size: the boxes through the rate map
          BeginPass(cmd, acc_area, {{&probe_acc_, true, transmittance}});
          draw_probes(shrink ? 1u : 0u);
          vkCmdEndRendering(cmd);
@@ -929,7 +1004,7 @@ index 40d339d..2d2239b 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1447,7 +1663,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1447,7 +1667,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          vkCmdDraw(cmd, 3, 1, 0, 0);
      }
      const bool contact = rt_contact_active_ && view.index == main_view_.index;
@@ -964,7 +1039,7 @@ index 40d339d..2d2239b 100644
          if (rt_active_ || contact) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rt_active_ ? light_rt_ : light_contact_);
              const VkDescriptorSet rt_set = rt_->Set(renderer_->FrameIndex());
-@@ -1455,8 +1697,61 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1455,8 +1701,61 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          } else {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, light_);
          }
@@ -1027,7 +1102,7 @@ index 40d339d..2d2239b 100644
              const SceneLight& l = *light_sources_[i];
              if (const char* only = std::getenv("PT_LIGHT_DRAW_ONLY"); only && l.name.find(only) == std::string::npos) {
                  continue;
-@@ -1464,15 +1759,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1464,15 +1763,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              if ((l.hidden_views & view.view_bit) != 0) {
                  continue;
              }
@@ -1059,7 +1134,7 @@ index 40d339d..2d2239b 100644
              gpu::PassPush push;
              const uint32_t mirror_light = mirror_shadow_lights_[i];
              const bool has_shadow = view.view_bit == 2 ? mirror_light != gpu::kInvalid : (light_shadow_views_[i] & view.view_bit) != 0;
-@@ -1486,10 +1790,48 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1486,10 +1794,48 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              push.m = volume;
              PushConstants(cmd, &push, sizeof(push));
              vkCmdDraw(cmd, 36, 1, 0, 0);
@@ -1108,7 +1183,7 @@ index 40d339d..2d2239b 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +2124,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +2128,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -1177,7 +1252,7 @@ index 40d339d..2d2239b 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +2196,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +2200,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -1185,7 +1260,7 @@ index 40d339d..2d2239b 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +2207,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +2211,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -1225,7 +1300,7 @@ index 40d339d..2d2239b 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +2232,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2236,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -1233,7 +1308,7 @@ index 40d339d..2d2239b 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2488,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2492,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -1248,7 +1323,7 @@ index 40d339d..2d2239b 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2501,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2505,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -1257,7 +1332,7 @@ index 40d339d..2d2239b 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2526,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2530,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -1274,7 +1349,7 @@ index 40d339d..2d2239b 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2543,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2547,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -1282,7 +1357,7 @@ index 40d339d..2d2239b 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2578,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2582,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -1290,7 +1365,7 @@ index 40d339d..2d2239b 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2636,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2640,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -1303,7 +1378,7 @@ index 40d339d..2d2239b 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2653,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2657,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -1319,7 +1394,7 @@ index 40d339d..2d2239b 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2325,15 +2738,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2325,15 +2742,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          SettleExposure(lighting_->exposure);
      }
      VkCommandBuffer cmd = renderer_->Cmd();
@@ -1398,7 +1473,7 @@ index 40d339d..2d2239b 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2930,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2934,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);

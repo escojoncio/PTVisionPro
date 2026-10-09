@@ -163,6 +163,15 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
+- **Prueba build 32 (log pt (19)):** VRR activo (`GPU 2 views`). 2022x1622 lógico en 1788x1473 físico (2,63 MP/ojo frente a 2,36:
+  zonas de 16 sobredimensionadas). Total 36–47 ms (peor). Por ojo (pasillo): probes 4–5 ms (sin `shrink`: a resolución
+  completa; antes ~0,5), lights 2,9–3,4 (antes 2,3+2,3), gbuffer 2,6–2,8 (antes 1,7+1,7), post 2,7 (antes 2,2+1,8),
+  reflejos 1,7–2,2 (todo el ojo). Resolución dinámica sin efecto con VRR (DrawSize ignorado). Usuario: "artefactos raros" al
+  cambiar la resolución (sin rastro en el log; preguntado). Cierre normal.
+- **Build 33 (pendiente):** sondas a media resolución LÓGICA sin mapa (pasada no "whole" → sin VRR) en la esquina de
+  `probe_acc_`: `probe_main` (texel t ↔ lógico 2t+0.5, profundidad/normal vía `VrrPhysicalUv`), `probe_resolve` (bilineal
+  con pesos de profundidad, `half_pos = (lógico − 0,5)·0,5`); solo vista principal (`vrr_view`; espejo como antes).
+  Zonas con calidad fraccionaria por solape con el centro (`inside()`), unión espejada con `max`. `GpuBudgetMs` = 0 con VRR.
 - **Prueba build 31 (log pt (18)):** VRR no se activó: `vrr: the eyes' rate maps differ in size (1788x1473 and 1784x1473)` →
   insets; mismos tiempos que build 30 (31 ms inicio, 37–40 pasillo). Metal redondea las zonas a sus teselas según la posición.
 - **Build 32 (run 36): OK** → `releases/download/build-36/PTVisionPro-36.ipa` (sin probar): `BuildVrr` acepta tamaños físicos distintos: objetivos/imágenes = máximo de ambos; tablas con el
