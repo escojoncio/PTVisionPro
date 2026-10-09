@@ -163,6 +163,14 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
+- **Prueba build 33 (log pt (20)):** VRR 2022x1622 en 1760x1416 (2,49 MP/ojo). GPU 2 vistas 32–37 ms (4 vistas: 31 / 35–40):
+  sin ganancia. Por ojo: compose+forward 4–5,9 (partículas 1,5–3,8), lighting 3–4,9, post 2,7–2,9 (bloom 1,35), reflejos
+  1,4–2,7 (ahora todo el ojo), occlusion 1,3, gbuffer 1,1–2,3, probes 0,25–1,3 (arreglado). Conclusión medida: coste ≈ 7 ms
+  por MP y frame, casi sin coste fijo por vista; con los mismos píxeles el foveado no gana. Usuario: cuadrados negros al girar
+  la cabeza (centro o lados) y un hueco abajo del campo; ve más resolución pero no más fps. Sin diagnosticar.
+- **Build 34 (pendiente):** VRR apagado por defecto (`VrrWanted`: solo con `PT_VP_VRR=1`); vuelven las 4 vistas. Código VRR
+  y parche de MoltenVK se quedan. Siguiente: presupuesto de píxeles (≈2,8 MP/frame para 20 ms a coste actual): periferia de
+  las anchas más baja (ajuste ya existente 30–70 %) y/o píxeles más baratos (partículas, SSR solo centro).
 - **Prueba build 32 (log pt (19)):** VRR activo (`GPU 2 views`). 2022x1622 lógico en 1788x1473 físico (2,63 MP/ojo frente a 2,36:
   zonas de 16 sobredimensionadas). Total 36–47 ms (peor). Por ojo (pasillo): probes 4–5 ms (sin `shrink`: a resolución
   completa; antes ~0,5), lights 2,9–3,4 (antes 2,3+2,3), gbuffer 2,6–2,8 (antes 1,7+1,7), post 2,7 (antes 2,2+1,8),
