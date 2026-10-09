@@ -42,9 +42,9 @@ struct PTSettings: Codable, Equatable {
     var reflections = false
     /// The textures' anisotropic filtering: 0 (off, trilinear), 2, 4, 8 or 16.
     var anisotropy = 8
-    /// HDR from the game's picture: its brightest parts up to this percent of SDR white (100: off;
+    /// Native HDR: the scene's real light above white, up to this percent of SDR white (100: off;
     /// 140, 170, 200). Not part of a preset.
-    var hdr = 100
+    var hdr = 200
     /// Foveated rendering (where the eyes look is drawn at the drawable's full resolution).
     var foveation = true
     /// Compositor Services' render quality with foveation (visionOS 26): 0 leaves the system's
@@ -234,7 +234,10 @@ struct PTSettings: Codable, Equatable {
         case preset, resolutionScale, targetFPS, fov, graphicsPreset, shadows
         // A new key: the old one was saved as on by versions in which it did nothing.
         case dynamicResolution = "dynamicResolutionChosen"
-        case ssao, bloom, reflections, anisotropy, hdr, foveation, compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
+        case ssao, bloom, reflections, anisotropy, foveation
+        // A new key: the old one held the earlier, SDR-stretching HDR's choice.
+        case hdr = "nativeHdr"
+        case compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }

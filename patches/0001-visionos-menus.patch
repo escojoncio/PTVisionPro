@@ -1,3 +1,15 @@
+diff --git a/shaders/composite.frag b/shaders/composite.frag
+index 669c207..1395df9 100644
+--- a/shaders/composite.frag
++++ b/shaders/composite.frag
+@@ -37,5 +37,6 @@ void main() {
+         out_color = vec4(pow(clamp(color, 0.0, 1.0), vec3(1.0 / params.brightness)), 1.0);
+         return;
+     }
+-    out_color = vec4(mix(color, params.fade.rgb, params.fade.a), 1.0);
++    // The alpha carries a headset's HDR gain (screen_fx.frag; 1 = none): a fade takes it to none.
++    out_color = vec4(mix(color, params.fade.rgb, params.fade.a), mix(texture(scene_color, in_uv).a, 1.0, params.fade.a));
+ }
 diff --git a/shaders/light_all.frag b/shaders/light_all.frag
 new file mode 100644
 index 0000000..b23d12b
@@ -86,6 +98,38 @@ index fc1c963..b0eb8e4 100644
      ivec2 size = ivec2(ImgSize(IMG_DEPTH));
      vec2 sample_pixel = uv * vec2(size) - 0.5;
      ivec2 p = ivec2(floor(sample_pixel));
+diff --git a/shaders/screen_fx.frag b/shaders/screen_fx.frag
+index 35ad849..144f24f 100644
+--- a/shaders/screen_fx.frag
++++ b/shaders/screen_fx.frag
+@@ -50,5 +50,26 @@ void main() {
+     vec3 seed = fract(vec3(gl_FragCoord.xyx) * vec3(0.1031, 0.1030, 0.0973));
+     seed += dot(seed, seed.yxz + 33.33);
+     float noise = fract((seed.x + seed.y) * seed.z) - 0.5;
+-    out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), 1.0);
++    // Native HDR for a headset (f0.y: the brightest it may go, times SDR white; 0 off): the game
++    // clips its scene at white (tonemap.frag: clamp, then sRGB); the scene's real light is still in
++    // IMG_HDR. How much brighter the scene is there than what the clip shows goes to the alpha, as
++    // 2 - gain (gain 1 to 2: alpha 1 is "no gain" for any path that writes a plain 1), for the
++    // headset's composition to apply above white (EDR). Where the scene is not clipped nothing
++    // changes; a clipped saturated colour gets back the brightness the clip took.
++    float alpha = 1.0;
++    if (pass.f0.y > 1.0) {
++        ivec2 hdr_size = ivec2(ImgSize(IMG_HDR));
++        ivec2 p = clamp(ivec2(in_uv * vec2(hdr_size)), ivec2(0), hdr_size - 1);
++        vec3 scene = max(ImgFetch(IMG_HDR, p).rgb * pass.f0.z, vec3(0.0));
++        float clipped = Luma709(min(scene, vec3(1.0)));
++        float y = Luma709(scene);
++        if (y > clipped + 1.0e-4 && clipped > 1.0e-3) {
++            // Above white the light rolls off smoothly towards the peak.
++            float peak = min(pass.f0.y, 2.0);
++            float over = max(y - 1.0, 0.0);
++            float shown = min(y, 1.0) + (peak - 1.0) * (1.0 - exp(-over / (peak - 1.0)));
++            alpha = 2.0 - clamp(shown / clipped, 1.0, peak);
++        }
++    }
++    out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), alpha);
+ }
 diff --git a/shaders/tonemap.frag b/shaders/tonemap.frag
 index d39d6a6..4c2b603 100644
 --- a/shaders/tonemap.frag
@@ -119,7 +163,7 @@ index 1be202c..25df602 100644
          out_color = scene;
          return;
 diff --git a/shaders/xr_copy.frag b/shaders/xr_copy.frag
-index 8ed00c4..4cc66be 100644
+index 8ed00c4..8e3f88f 100644
 --- a/shaders/xr_copy.frag
 +++ b/shaders/xr_copy.frag
 @@ -24,6 +24,7 @@ void main() {
@@ -130,6 +174,14 @@ index 8ed00c4..4cc66be 100644
          out_color = vec4(Decode(straight) * a, a);
          return;
      }
+@@ -44,5 +45,6 @@ void main() {
+         color = mix(color, noise, alpha);
+     }
+     color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / max(p.params.y, 0.1)));
+-    out_color = vec4(Decode(color), 1.0);
++    // params.z: a headset eye with native HDR, its gain in the alpha (1 = none).
++    out_color = vec4(Decode(color), p.params.z > 0.5 ? clamp(c.a, 0.0, 1.0) : 1.0);
+ }
 diff --git a/src/engine/render/camera.h b/src/engine/render/camera.h
 index ffee464..5d15d12 100644
 --- a/src/engine/render/camera.h
@@ -194,7 +246,7 @@ index 7486360..0bc0581 100644
  void EndLabel(VkCommandBuffer cmd);
  
 diff --git a/src/engine/render/renderer.cpp b/src/engine/render/renderer.cpp
-index 01f4500..631918f 100644
+index 01f4500..afeb35e 100644
 --- a/src/engine/render/renderer.cpp
 +++ b/src/engine/render/renderer.cpp
 @@ -752,7 +752,9 @@ void Renderer::CopyToXr(VkCommandBuffer cmd, VkDescriptorSet set, const XrTarget
@@ -204,12 +256,25 @@ index 01f4500..631918f 100644
 -                            premultiplied ? 1.0f : 0.0f, premultiplied ? 1.0f : brightness, 0.0f, 0.0f,
 +                            // The brightness goes on the HUD too, as on a screen, where it is applied to the whole
 +                            // picture with its UI: the brightness screen's test pattern is UI.
-+                            premultiplied ? 1.0f : 0.0f, brightness, 0.0f, 0.0f,
++                            premultiplied ? 1.0f : 0.0f, brightness, !premultiplied && xr_hdr ? 1.0f : 0.0f, 0.0f,
                              premultiplied ? 0.0f : grain[0], grain[1], grain[2], grain[3],
                              grain_offset[0], grain_offset[1], across, 0.0f};
      vkCmdPushConstants(cmd, xr_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
+diff --git a/src/engine/render/renderer.h b/src/engine/render/renderer.h
+index 9bb3b5d..c4444bd 100644
+--- a/src/engine/render/renderer.h
++++ b/src/engine/render/renderer.h
+@@ -56,6 +56,8 @@ public:
+ 
+     float exposure = 1.0f;
+     float output_brightness = 1.0f;
++    // A headset's eye picture carries native HDR's gain in its alpha (CopyToXr keeps it).
++    bool xr_hdr = false;
+     float fade[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+     float grain[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+     float grain_offset[2] = {0.0f, 0.0f};
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..d0aef28 100644
+index 40d339d..59881c6 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -329,6 +329,13 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -294,7 +359,7 @@ index 40d339d..d0aef28 100644
      if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
          std::map<std::string, std::pair<bool, float>> now;
          for (uint32_t i = 0; i < light_count_; ++i) {
-@@ -1232,14 +1253,90 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -1232,14 +1253,99 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
      if (shadow_views_.empty()) {
          return;
      }
@@ -338,14 +403,23 @@ index 40d339d..d0aef28 100644
 +        h = mix(h, &sv.bias_slope, sizeof(sv.bias_slope));
 +        h = mix(h, &sv.cull, sizeof(sv.cull));
 +        bool animated = false;
++        // The casters as a set: the draw list's order changes with the camera (sorting), not
++        // the tile's depths, so each caster's own hash is summed.
++        uint64_t set = 0;
++        uint32_t count = 0;
 +        for (const Draw& d : draws_) {
 +            if (!casts(sv, d)) continue;
 +            if (d.skin_base != gpu::kInvalid || d.sub->skinned) animated = true;
-+            h = mix(h, &d.mesh, sizeof(d.mesh));
-+            h = mix(h, &d.sub, sizeof(d.sub));
-+            h = mix(h, &d.material, sizeof(d.material));
-+            h = mix(h, &d.transform, sizeof(d.transform));
++            uint64_t c = 1469598103934665603ull;
++            c = mix(c, &d.mesh, sizeof(d.mesh));
++            c = mix(c, &d.sub, sizeof(d.sub));
++            c = mix(c, &d.material, sizeof(d.material));
++            c = mix(c, &d.transform, sizeof(d.transform));
++            set += c;
++            ++count;
 +        }
++        h = mix(h, &set, sizeof(set));
++        h = mix(h, &count, sizeof(count));
 +        keys[i].rect = sv.rect;
 +        keys[i].key = h;
 +        bool kept = false;
@@ -391,7 +465,7 @@ index 40d339d..d0aef28 100644
          SetViewport(cmd, sv.rect);
          vkCmdSetDepthBias(cmd, sv.bias_constant, 0.0f, sv.bias_slope);
          const uint8_t casters = sv.casters;
-@@ -1264,8 +1361,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -1264,8 +1370,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
              }
              DrawMesh(cmd, d, sv.view, 0, false, false, nullptr, sv.cull, true);
          }
@@ -401,7 +475,7 @@ index 40d339d..d0aef28 100644
      UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
  }
  
-@@ -1422,6 +1519,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1422,6 +1528,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          }
      };
      if (probes) {
@@ -409,7 +483,7 @@ index 40d339d..d0aef28 100644
          UseTargets(cmd, {{&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
                           {&probe_acc_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
-@@ -1431,7 +1529,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1431,7 +1538,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          draw_probes(shrink ? 1u : 0u);
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&probe_acc_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -419,7 +493,7 @@ index 40d339d..d0aef28 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1447,7 +1547,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1447,7 +1556,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          vkCmdDraw(cmd, 3, 1, 0, 0);
      }
      const bool contact = rt_contact_active_ && view.index == main_view_.index;
@@ -454,7 +528,7 @@ index 40d339d..d0aef28 100644
          if (rt_active_ || contact) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rt_active_ ? light_rt_ : light_contact_);
              const VkDescriptorSet rt_set = rt_->Set(renderer_->FrameIndex());
-@@ -1490,6 +1616,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1490,6 +1625,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
      }
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&diffuse_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&specular_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -462,7 +536,7 @@ index 40d339d..d0aef28 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +1909,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +1918,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -531,7 +605,7 @@ index 40d339d..d0aef28 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +1981,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +1990,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -539,7 +613,7 @@ index 40d339d..d0aef28 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +1992,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +2001,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -579,7 +653,7 @@ index 40d339d..d0aef28 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +2017,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2026,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -587,7 +661,7 @@ index 40d339d..d0aef28 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2273,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2282,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -602,7 +676,7 @@ index 40d339d..d0aef28 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2286,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2295,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -611,7 +685,7 @@ index 40d339d..d0aef28 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2311,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2320,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -628,7 +702,7 @@ index 40d339d..d0aef28 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2328,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2337,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -636,7 +710,7 @@ index 40d339d..d0aef28 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2363,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2372,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -644,7 +718,7 @@ index 40d339d..d0aef28 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2421,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2430,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -657,7 +731,7 @@ index 40d339d..d0aef28 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2438,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2447,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -673,7 +747,7 @@ index 40d339d..d0aef28 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2528,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2537,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -734,7 +808,7 @@ index 40d339d..d0aef28 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2702,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2711,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -759,7 +833,7 @@ index 40d339d..d0aef28 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
-index 19dd1a8..f806dcc 100644
+index 19dd1a8..e8a74e6 100644
 --- a/src/engine/render/scene_post.cpp
 +++ b/src/engine/render/scene_post.cpp
 @@ -88,7 +88,15 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
@@ -879,7 +953,19 @@ index 19dd1a8..f806dcc 100644
      RenderTarget output;
      output.image = renderer_->SceneColor();
      output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-@@ -240,6 +266,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -225,7 +251,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+     push.ids = glm::uvec4(ldr_index(current), 0, 0, post_view_);
+     const bool grain = toggles.film_grain && screen.film_grain && lighting.valid;
+     const bool distortion = toggles.distortion && screen.screen_distortion && lighting.valid;
+-    push.f0 = glm::vec4(distortion ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
++    // Native HDR in the headset's views (SetVrHdrPeak): the scene's light above white, for the
++    // composition. The scene was scaled by this before its clip (tonemap's f0.z).
++    const float hdr_peak = vr_eye_ >= 0 && lighting.valid ? vr_hdr_peak_ : 0.0f;
++    push.f0 = glm::vec4(distortion ? 1.0f : 0.0f, hdr_peak, lighting.valid ? 1.0f : renderer_->exposure, 0.0f);
+     push.f1 = glm::vec4(graphics.clarity, 0.0f, 0.0f, 0.0f);
+     Fullscreen(cmd, screen_fx_, push);
+     renderer_->grain[0] = grain ? 1.0f : 0.0f;
+@@ -240,6 +269,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      }
      vkCmdEndRendering(cmd);
@@ -1084,10 +1170,10 @@ index 1f96981..5d4e4a9 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..bf9b352 100644
+index 6c9b165..2d5aba1 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,28 @@ public:
+@@ -206,6 +206,30 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
@@ -1103,6 +1189,8 @@ index 6c9b165..bf9b352 100644
 +    // Insets (views 2, 3, each drawn right after its eye's wide view 0, 1) take that view's bloom
 +    // and particles; `place` (per eye, null: each view its own): where the inset sits in the wide
 +    // view's image, wide uv = 0.5 + (inset uv - 0.5) * xy + zw.
++    // Native HDR in the headset (above 1: the brightest the scene may go, times SDR white).
++    void SetVrHdrPeak(float peak) { vr_hdr_peak_ = peak; }
 +    void SetVrInsetShare(const glm::vec4* place) {
 +        vr_share_scale_ = place ? 1.0f : 0.0f;
 +        if (place) {
@@ -1116,7 +1204,7 @@ index 6c9b165..bf9b352 100644
  
  private:
      struct FrameSlot {
-@@ -222,7 +244,30 @@ private:
+@@ -222,7 +246,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -1147,7 +1235,7 @@ index 6c9b165..bf9b352 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -342,6 +387,8 @@ private:
+@@ -342,6 +389,8 @@ private:
      void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
      void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
      void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
@@ -1156,7 +1244,7 @@ index 6c9b165..bf9b352 100644
      void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordUpscale(VkCommandBuffer cmd, float dt);
      void ReadUpscaleTimestamps(FrameSlot& slot);
-@@ -377,6 +424,31 @@ private:
+@@ -377,6 +426,32 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
@@ -1164,6 +1252,7 @@ index 6c9b165..bf9b352 100644
 +    // SetVrInsetShare: for each eye, the frame whose wide view left its bloom / particles for the
 +    // inset (frame_counter_ as it stands after view 0; ~0u: none).
 +    float vr_share_scale_ = 0.0f;  // > 0: insets share (SetVrInsetShare)
++    float vr_hdr_peak_ = 0.0f;
 +    glm::vec4 vr_share_place_[2]{};
 +    // The pass constants that read a wide view's image in an inset (zero: its own image).
 +    glm::vec4 SharePlace(bool reuse) const { return reuse ? vr_share_place_[vr_eye_ - 2] : glm::vec4(0.0f); }
@@ -1188,7 +1277,7 @@ index 6c9b165..bf9b352 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -395,6 +467,17 @@ private:
+@@ -395,6 +470,17 @@ private:
      RenderTarget reflect_offset_;
      RenderTarget reflect_history_[2];
      RenderTarget shadow_;
@@ -1206,7 +1295,7 @@ index 6c9b165..bf9b352 100644
      RenderTarget ao_[2];
      RenderTarget refmap_;
      RenderTarget hdr_copy_;
-@@ -441,6 +524,7 @@ private:
+@@ -441,6 +527,7 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -1214,7 +1303,7 @@ index 6c9b165..bf9b352 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -636,6 +720,14 @@ private:
+@@ -636,6 +723,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -1452,7 +1541,7 @@ index 1daa3d8..34f7117 100644
          pitch = target_pitch = ClampPitch(value);
          vr_script_pitch_ = pitch;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..7ebc8d3 100644
+index 42d8b01..b825960 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
 @@ -16,6 +16,56 @@ struct Entry {
@@ -1492,11 +1581,11 @@ index 42d8b01..7ebc8d3 100644
 +    {"pc_vp_center", {"Sharp centre", "", "", "Centro nítido", "", "", ""}},
 +    {"pc_note_vp_center", {"How much of the view the sharp centre covers, with the same pixels: smaller is sharper, larger covers more and hides the edge better. The frame rate does not change.", "", "", "Cuánto de la vista cubre el centro nítido, con los mismos píxeles: más pequeño es más nítido; más grande cubre más y disimula mejor el borde. No cambia los fps.", "", "", ""}},
 +    {"pc_vp_dynres", {"Dynamic resolution", "", "", "Resolución dinámica", "", "", ""}},
-+    {"pc_vp_hdr", {"HDR (bright lights)", "", "", "HDR (realce de luces)", "", "", ""}},
-+    {"pc_vp_hdr_soft", {"Soft", "", "", "Suave", "", "", ""}},
-+    {"pc_vp_hdr_medium", {"Medium", "", "", "Medio", "", "", ""}},
-+    {"pc_vp_hdr_max", {"Maximum", "", "", "Máximo", "", "", ""}},
-+    {"pc_note_vp_hdr", {"The brightest parts of the picture (lamps, light on the walls) shine above white with the headset's HDR; the darks do not change. Costs nothing. Applies right away.", "", "", "Las partes más brillantes de la imagen (lámparas, luz sobre las paredes) brillan por encima del blanco con el HDR del visor; los oscuros no cambian. No cuesta rendimiento. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_hdr", {"HDR (peak brightness)", "", "", "HDR (brillo máximo)", "", "", ""}},
++    {"pc_vp_hdr_soft", {"1.4x", "", "", "1,4x", "", "", ""}},
++    {"pc_vp_hdr_medium", {"1.7x", "", "", "1,7x", "", "", ""}},
++    {"pc_vp_hdr_max", {"2x (the headset's most)", "", "", "2x (máximo del visor)", "", "", ""}},
++    {"pc_note_vp_hdr", {"Native HDR: the scene's real light, which the original clips at white, shines above it with the headset's HDR, up to this many times SDR white. The darks and mid tones do not change. Applies right away.", "", "", "HDR nativo: la luz real de la escena, que el original recorta en el blanco, brilla por encima con el HDR del visor, hasta estas veces el blanco SDR. Oscuros y medios tonos no cambian. Se aplica al momento.", "", "", ""}},
 +    {"pc_note_vp_dynres", {"While the GPU cannot keep the frame rate, the eyes are drawn smaller (down to half across), and larger again when it can. Smoother, less sharp. Applies right away.", "", "", "Mientras la GPU no llega a la frecuencia, los ojos se dibujan más pequeños (hasta la mitad de ancho) y vuelven a crecer cuando llega. Más fluido, menos nítido. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_left_hand", {"Left hand", "", "", "Mano izquierda", "", "", ""}},
 +    {"pc_vp_right_hand", {"Right hand", "", "", "Mano derecha", "", "", ""}},
@@ -2020,7 +2109,7 @@ index d1485b2..4c5bd1e 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..77bc877 100644
+index d629ab3..844b50b 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -2434,7 +2523,7 @@ index d629ab3..77bc877 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4125,21 +4362,56 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4125,21 +4362,64 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  last_scene_time = game.Time();
                  vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
                                    lighting, vfx_pass, blend);
@@ -2453,6 +2542,12 @@ index d629ab3..77bc877 100644
 +                // Each inset takes its eye's wide-view bloom and particles, left in the renderer by the
 +                // view drawn just before it (the order below).
 +                app.scene.SetVrInsetShare(stereo.inset ? stereo.inset_share : nullptr);
++                // Native HDR: the scene's light above white goes to the headset (its EDR).
++                {
++                    const float peak = static_cast<float>(pt::visionos::Headset().hdr) / 100.0f;
++                    app.scene.SetVrHdrPeak(peak > 1.001f ? peak : 0.0f);
++                    app.renderer.xr_hdr = peak > 1.001f;
++                }
 +#endif
 +                // With insets: left wide, left inset, right wide, right inset (views 0, 2, 1, 3).
 +                static constexpr int kInsetOrder[4] = {0, 2, 1, 3};
@@ -2492,11 +2587,13 @@ index d629ab3..77bc877 100644
 +                app.scene.SetVrLowDetail(false);
 +                app.scene.SetVrCullCamera(nullptr);
 +                app.scene.SetVrInsetShare(nullptr);
++                app.scene.SetVrHdrPeak(0.0f);
++                app.renderer.xr_hdr = false;
 +#endif
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4840,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4848,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -2513,7 +2610,7 @@ index d629ab3..77bc877 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4886,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4894,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

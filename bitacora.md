@@ -155,7 +155,20 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   5,5 ms/vista en el pasillo (volúmenes: 2,3) → descartado como defecto. HDR por expansión SDR: el usuario lo rechaza
   (quería «HDR10»; en visionOS no hay señal HDR10, solo EDR en extended linear P3 con margen ×2 → siguiente: HDR nativo
   desde `hdr_` antes del tonemap, cadena de post e imágenes de ojo a 16 bits).
-- **Build 27 (run 31): OK** (sin probar):
+- **Prueba build 27 (run 31):** luces como en 25 (2,2–3,6 ms/vista); 30 ms inicio (32 fps), 36–40 ms después.
+  Sombras 1,2 ms al inicio (antes 1,7) pero solo ~1/3 de teselas reutilizadas: el hash dependía del orden de `draws_`
+  (ordenado por cámara). El usuario quiere «BT.2020 y brillo HDR».
+- **Build 28:**
+  - Caché de sombras: hash de casters como conjunto (suma de hashes por caster + número).
+  - HDR nativo: `tonemap.frag` del juego solo recorta `IMG_HDR` en 1. `screen_fx.frag` (pasada «screen», push
+    `f0.y` = pico de `SetVrHdrPeak`, `f0.z` = factor de exposición del tonemap) escribe alfa = 2 − ganancia (ganancia =
+    luminancia real con caída suave hasta el pico ÷ luminancia recortada, 1..2; alfa 1 = sin ganancia). `composite.frag`
+    modo 0 pasa el alfa (fundido a 1 con `fade`); `xr_copy.frag` lo copia al ojo si `params.z` (`Renderer::xr_hdr`).
+    main.cpp activa ambos en la rama estéreo con `Headset().hdr`. Composición Metal: `SceneLight` = P3 × clamp(2 − a, 1, 2)
+    si `grade.x > 1` (ojo e inset; sin ganancia con MetalFX). Pantalla virtual, HUD y paneles: SDR.
+  - Ajuste HDR = pico nativo (100/140/170/200), por defecto 200; clave Codable nueva `nativeHdr`; textos `pc_vp_hdr*`.
+  - BT.2020: no aplica (drawable extended linear P3; contenido sRGB/709; ya se convierte a P3 desde build 26).
+- **Build 27 (run 31): OK**:
   - `light_all` solo con `PT_LIGHT_ONE_PASS=1`; por defecto, volúmenes (igual que build 25).
   - Caché de teselas de sombra en `RecordShadows`: clave FNV por tesela (VkImage del atlas, rect, campos de su
     `gpu::View`, bias, cull, y por caster mesh/sub/material/transform); igual que la del frame anterior en el mismo rect

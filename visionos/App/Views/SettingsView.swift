@@ -132,11 +132,11 @@ struct SettingsView: View {
                 Text("8x").tag(8)
                 Text("16x").tag(16)
             }
-            Picker(L("HDR (realce de luces)", "HDR (bright lights)"), selection: int(\.hdr)) {
+            Picker(L("HDR (brillo máximo)", "HDR (peak brightness)"), selection: int(\.hdr)) {
                 Text(L("No", "Off")).tag(100)
-                Text(L("Suave", "Soft")).tag(140)
-                Text(L("Medio", "Medium")).tag(170)
-                Text(L("Máximo", "Maximum")).tag(200)
+                Text("1,4×").tag(140)
+                Text("1,7×").tag(170)
+                Text(L("2× (máximo del visor)", "2× (the headset's most)")).tag(200)
             }
         } header: {
             Text(L("Gráficos", "Graphics"))
