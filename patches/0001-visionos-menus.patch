@@ -1,8 +1,20 @@
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..50f221f 100644
+index 40d339d..5bc0b8a 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
-@@ -2333,7 +2333,38 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2249,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+         toggles.film_grain = false;
+         toggles.distortion = false;
+         toggles.full_screen_blur = false;
++#if PT_VISIONOS
++        // Screen-space reflections: each eye finds different things in its own image, so the
++        // two eyes' reflections disagree and wobble; the probes' reflections stay.
++        toggles.local_reflections = false;
++#endif
+     }
+     if (frame_counter_ == 0) {
+         ApplyEnvironmentOverrides();
+@@ -2333,7 +2338,38 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
      Stamp(cmd, 0);
      BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      BeginLabel(cmd, "shadows");
@@ -121,8 +133,25 @@ index b5bf253..4ae49b6 100644
  
      struct Impl;
  
+diff --git a/src/game/player.h b/src/game/player.h
+index 1daa3d8..34f7117 100644
+--- a/src/game/player.h
++++ b/src/game/player.h
+@@ -93,6 +93,12 @@ public:
+     std::string DescribeDrawPose() const;
+     glm::vec2 LightStick() const { return light_stick_; }
+     float TakeVrTurn() { return std::exchange(vr_turn_, 0.0f); }
++    // The view was centred facing `yaw` (the game camera's then): any heading the game gives the
++    // player from there on (the spawn, a scene handing the camera back) turns the view.
++    void SetVrReference(float yaw) {
++        vr_last_yaw_ = yaw;
++        vr_looked_ = true;
++    }
+     void SetScriptPitch(float value) {
+         pitch = target_pitch = ClampPitch(value);
+         vr_script_pitch_ = pitch;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..66d67e8 100644
+index 42d8b01..172ec51 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
 @@ -16,6 +16,43 @@ struct Entry {
@@ -143,18 +172,18 @@ index 42d8b01..66d67e8 100644
 +    {"pc_vp_headset", {"Apple Vision Pro", "", "", "Apple Vision Pro", "", "", ""}},
 +    {"pc_vp_preset", {"Preset", "", "", "Preajuste", "", "", ""}},
 +    {"pc_vp_custom", {"Custom", "", "", "Personalizado", "", "", ""}},
-+    {"pc_note_vp_preset", {"Settings tuned for each headset. Changing one of them makes the preset Custom. The image size and foveation apply at the next start.", "", "", "Ajustes pensados para cada visor. Al cambiar uno, el preajuste pasa a Personalizado. El tamaño de imagen y el foveado se aplican al volver a empezar.", "", "", ""}},
++    {"pc_note_vp_preset", {"Settings tuned for each headset. Changing one of them makes the preset Custom. Foveation applies at the next start.", "", "", "Ajustes pensados para cada visor. Al cambiar uno, el preajuste pasa a Personalizado. El foveado se aplica al volver a empezar.", "", "", ""}},
 +    {"pc_vp_fps", {"Frame rate", "", "", "Imágenes por segundo", "", "", ""}},
 +    {"pc_note_vp_fps", {"90: a new image every refresh. 45: every other refresh; the headset fills in the rest from your head movement.", "", "", "90: una imagen nueva en cada refresco. 45: una de cada dos; el visor rellena el resto con el movimiento de tu cabeza.", "", "", ""}},
 +    {"pc_vp_scale", {"Image size", "", "", "Tamaño de imagen", "", "", ""}},
-+    {"pc_note_vp_restart", {"Each eye's image, relative to what the headset recommends. Applies at the next start.", "", "", "La imagen de cada ojo, respecto a la que recomienda el visor. Se aplica al volver a empezar.", "", "", ""}},
++    {"pc_note_vp_restart", {"Each eye's image, relative to what the headset recommends. Applies right away.", "", "", "La imagen de cada ojo, respecto a la que recomienda el visor. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_foveation", {"Foveated rendering", "", "", "Renderizado foveado", "", "", ""}},
 +    {"pc_note_vp_foveation", {"Sharpest where you look, less detail around it. Applies at the next start.", "", "", "Máxima nitidez donde miras y menos detalle alrededor. Se aplica al volver a empezar.", "", "", ""}},
 +    {"pc_note_vp_vr", {"Flashlight and turning.", "", "", "Linterna y giro.", "", "", ""}},
 +    {"pc_vp_fov", {"Field of view", "", "", "Campo de visión", "", "", ""}},
-+    {"pc_note_vp_fov", {"How much of the headset's view the game draws; less is lighter for the GPU, with a dark border. Applies at the next start.", "", "", "Cuánto de la vista del visor dibuja el juego; menos es más ligero para la GPU, con un borde oscuro. Se aplica al volver a empezar.", "", "", ""}},
++    {"pc_note_vp_fov", {"How much of the headset's view the game draws; less is lighter for the GPU, with a dark border. Applies right away.", "", "", "Cuánto de la vista del visor dibuja el juego; menos es más ligero para la GPU, con un borde oscuro. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_metalfx", {"MetalFX upscaling", "", "", "Escalado MetalFX", "", "", ""}},
-+    {"pc_note_vp_metalfx", {"Each eye is drawn at the image size and MetalFX enlarges it, sharper than plain stretching. Applies at the next start.", "", "", "Cada ojo se dibuja al tamaño de imagen y MetalFX lo amplía, con más nitidez que estirarlo. Se aplica al volver a empezar.", "", "", ""}},
++    {"pc_note_vp_metalfx", {"Each eye is drawn at the image size and MetalFX enlarges it, sharper than plain stretching. Applies right away.", "", "", "Cada ojo se dibuja al tamaño de imagen y MetalFX lo amplía, con más nitidez que estirarlo. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_left_hand", {"Left hand", "", "", "Mano izquierda", "", "", ""}},
 +    {"pc_vp_right_hand", {"Right hand", "", "", "Mano derecha", "", "", ""}},
 +    {"pc_note_vp_flashlight", {"The flashlight follows your head, as in the original, or the controller in one hand (PlayStation VR2 Sense).", "", "", "La linterna sigue a tu cabeza, como en el original, o al mando de una mano (PlayStation VR2 Sense).", "", "", ""}},
@@ -170,7 +199,7 @@ index 42d8b01..66d67e8 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..e480cc5 100644
+index e8e4ae7..1b1a1b9 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -211,7 +240,7 @@ index e8e4ae7..e480cc5 100644
      if (!screen_) {
          screen_placed_ = false;
      }
-@@ -62,11 +78,20 @@ bool VrPlay::ScreenMode(Game& game) {
+@@ -62,11 +78,21 @@ bool VrPlay::ScreenMode(Game& game) {
  }
  
  void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool screen, float dt) {
@@ -227,12 +256,13 @@ index e8e4ae7..e480cc5 100644
 +    }
      if (waited_ && host_.ViewsValid() && !centered_) {
          rig_.Recenter(head.position, head.orientation, game.GetCamera().yaw);
++        game.GetPlayer().SetVrReference(game.GetCamera().yaw);
          centered_ = true;
 +        cutscene_entered_ = false;
          LogInfo("vr: centred on the head at ({:.3f} {:.3f} {:.3f}), world yaw {:.1f}", head.position.x, head.position.y, head.position.z,
                  glm::degrees(rig_.BaseYaw()));
      }
-@@ -83,6 +108,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -83,6 +109,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
              state.left_stick = move;
              state.left_stick_from_pad = true;
          }
@@ -245,7 +275,7 @@ index e8e4ae7..e480cc5 100644
          if (c.interact) raw |= kRawCross;
          if (c.back) raw |= kRawCircle;
          if (c.menu) raw |= kRawStart;
-@@ -106,8 +137,21 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -106,8 +138,21 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          if (raw != 0 || glm::length(c.move) > 0.2f || glm::length(c.turn) > 0.2f) {
              state.from_gamepad = true;
          }
@@ -255,23 +285,38 @@ index e8e4ae7..e480cc5 100644
 +        case 2: state.prompts = PromptStyle{PromptDevice::Nintendo, {'B', 'A', 'Y', 'X'}}; break;
 +        default: state.prompts = PromptStyle{PromptDevice::Xbox, {'A', 'B', 'X', 'Y'}}; break;
 +        }
-+    }
+     }
 +    // A pointer on the panel the UI is on (the HUD, or the virtual screen with the UI on it): in
 +    // the UI's own pixels, which are the HUD's (Renderer::kHudExtent) in both cases.
 +    if (c.pointer_valid) {
 +        state.pointer = c.pointer * glm::vec2(static_cast<float>(Renderer::kHudExtent.width), static_cast<float>(Renderer::kHudExtent.height));
 +        state.pointer_valid = true;
 +        state.click = state.click || c.click;
-     }
++    }
 +    // The pause menu by hand (a long pinch, xr_host_visionos.mm) comes without a controller.
 +    if (!c.active && c.menu) raw |= kRawStart;
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
      state.raw_held |= raw;
-@@ -160,6 +204,60 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -150,8 +195,11 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+         return false;
+     }
+     const glm::vec4 tangents[2] = {host_.Eye(0).tangents, host_.Eye(1).tangents};
+-    if (render_size_.x == 0) {
+-        const VkExtent2D swapchain = host_.EyeExtent();
++    const VkExtent2D swapchain = host_.EyeExtent();
++    // Worked out again when the eye images change size (the image size or field of view changed
++    // in the menu).
++    if (render_size_.x == 0 || render_for_.x != swapchain.width || render_for_.y != swapchain.height) {
++        render_for_ = glm::uvec2(swapchain.width, swapchain.height);
+         render_size_ = xr::StereoRenderSize(tangents, glm::uvec2(swapchain.width, swapchain.height));
+         LogInfo("vr: eyes drawn at {}x{} for {}x{} images (fields L {:.1f} R {:.1f} U {:.1f} D {:.1f} degrees, left eye)", render_size_.x,
+                 render_size_.y, swapchain.width, swapchain.height, glm::degrees(host_.Eye(0).angles.x), glm::degrees(host_.Eye(0).angles.y),
+@@ -160,7 +208,66 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
      for (int i = 0; i < 2; ++i) {
          frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
      }
+-    const Player& player = game.GetPlayer();
 +    if (cutscene_) {
 +        // A cutscene in stereo: the scene's camera is where the head was when it began, pointing
 +        // where the head pointed (so nothing jumps); the head then turns and leans freely
@@ -326,11 +371,17 @@ index e8e4ae7..e480cc5 100644
 +        }
 +        return true;
 +    }
-     const Player& player = game.GetPlayer();
++    Player& player = game.GetPlayer();
++    // A turn the game gave the player this update (a scene handing the camera back) shows in this
++    // frame already, not the next.
++    if (!(player.locks.Mask('B') & 2) && !game.Demos().ControlsPlayer()) {
++        if (const float turn = player.TakeVrTurn(); std::abs(turn) > 1.0e-5f) rig_.Turn(turn, host_.Head().position);
++    }
      const glm::vec3 feet = player.Feet();
      const glm::vec3 eye = player.Eye();
+     const float height = eye.y - feet.y;
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index d1485b2..4ded0f9 100644
+index d1485b2..fcd61d1 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
 @@ -53,6 +53,10 @@ private:
@@ -344,6 +395,14 @@ index d1485b2..4ded0f9 100644
      bool screen_placed_ = false;
      glm::quat screen_orientation_{1.0f, 0.0f, 0.0f, 0.0f};
      glm::vec3 screen_position_{0.0f};
+@@ -64,6 +68,7 @@ private:
+     glm::vec3 last_anchor_{0.0f};
+     glm::vec3 last_correction_{0.0f};
+     glm::uvec2 render_size_{0, 0};
++    glm::uvec2 render_for_{0, 0};  // the eye images' size render_size_ was worked out for
+     xr::EyeFrustum frusta_[2];
+     uint32_t raw_previous_ = 0;
+     bool snap_armed_ = true;
 diff --git a/src/main.cpp b/src/main.cpp
 index d629ab3..f1a32ae 100644
 --- a/src/main.cpp
