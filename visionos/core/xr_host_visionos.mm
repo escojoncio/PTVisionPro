@@ -262,25 +262,20 @@ struct Uniforms {
     float4 p1;       // laser: end (xyz)
     float4 color;    // laser
     uint4 target;    // the view's slice of the drawable's texture (x) and its viewport (y)
-    float4 grade;    // the game's picture: HDR peak (x, 1 = off, up to the headset's 2), knee (y)
+    float4 grade;    // the game's picture: native HDR on (x > 1: its peak, the gain is in the image's alpha)
 };
 // The drawable is extended linear Display P3 (rgba16Float): the game's linear sRGB colours are
 // converted to it, and 1 is SDR white, with headroom above it for highlights (EDR).
 float3 ToDisplayP3(float3 c) {
     return float3(dot(c, float3(0.8225, 0.1774, 0.0000)), dot(c, float3(0.0332, 0.9669, 0.0000)), dot(c, float3(0.0171, 0.0724, 0.9108)));
 }
-// HDR from the game's SDR picture (inverse tone mapping, as consoles do for SDR games): below the
-// knee nothing changes; above it the brightest parts are stretched up to `peak` times SDR white,
-// smoothly (the same slope at the knee), keeping their colour.
-float3 ExpandHighlights(float3 c, float4 grade) {
-    float peak = grade.x;
-    if (peak <= 1.001) return c;
-    float knee = grade.y;
-    float y = dot(c, float3(0.2290, 0.6917, 0.0793));
-    if (y <= knee) return c;
-    float t = saturate((y - knee) / (1.0 - knee));
-    float expanded = knee + (1.0 - knee) * t + (peak - 1.0) * t * t;
-    return c * (expanded / y);
+// Native HDR: the game wrote, in the eye image's alpha, how much brighter than its clipped
+// picture the scene really is there (2 - gain; screen_fx.frag): 1 to 2 times, above SDR white
+// only, into the drawable's headroom (EDR).
+float3 SceneLight(float4 c, float4 grade) {
+    float3 rgb = ToDisplayP3(c.rgb);
+    if (grade.x <= 1.001) return rgb;
+    return rgb * clamp(2.0 - c.a, 1.0, 2.0);
 }
 // Each view draws to its own slice and viewport by index, in one pass over the drawable's
 // texture: the rasterizer then uses that slice's layer of the foveation map.
@@ -318,10 +313,9 @@ fragment float4 composite_fragment(Varyings in [[stage_in]], texture2d<float> te
     // The game's images are premultiplied (the HUD's alpha, as an OpenXR quad layer takes it);
     // the eyes and the virtual screen are opaque.
     float4 c = tex.sample(s, in.uv);
-    // (Premultiplied colours convert the same: the conversion is linear. The virtual screen,
-    // opaque, gets the game picture's HDR too; the HUD and panels stay SDR.)
+    // (Premultiplied colours convert the same: the conversion is linear. The HUD, panels and
+    // virtual screen stay SDR.)
     float3 rgb = ToDisplayP3(c.rgb) * u.alpha;
-    if (u.opaque > 0.5) rgb = ExpandHighlights(rgb, u.grade);
     float a = mix(c.a, 1.0, u.opaque) * u.alpha;
     if (u.cursor.w > 0.0) {
         // The hand's cursor: a ring (filled while pinching), dark edged so it shows on any colour.
@@ -342,7 +336,8 @@ fragment float4 composite_fragment(Varyings in [[stage_in]], texture2d<float> te
 // neighbours added back, kept within their range so no halo appears.
 fragment float4 eye_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float3 c = tex.sample(s, in.uv).rgb;
+    float4 picture = tex.sample(s, in.uv);
+    float3 c = picture.rgb;
     float amount = u.pad.x;
     if (amount > 0.0) {
         float2 px = 1.0 / float2(tex.get_width(), tex.get_height());
@@ -354,13 +349,13 @@ fragment float4 eye_fragment(Varyings in [[stage_in]], texture2d<float> tex [[te
         float3 hi = max(c, max(max(n, so), max(w, e)));
         c = clamp(c + (c * 4.0 - n - so - w - e) * (amount * 0.5), lo, hi);
     }
-    return float4(ExpandHighlights(ToDisplayP3(c), u.grade), 1.0);
+    return float4(SceneLight(float4(c, picture.a), u.grade), 1.0);
 }
 // An eye's sharp centre (the game's foveation) over its wide view: premultiplied, faded out over
 // the last pad.y of each edge so no seam shows.
 fragment float4 inset_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float3 c = ExpandHighlights(ToDisplayP3(tex.sample(s, in.uv).rgb), u.grade);
+    float3 c = SceneLight(tex.sample(s, in.uv), u.grade);
     float2 edge = min(in.uv, 1.0 - in.uv);
     float f = max(u.pad.y, 1.0e-3);
     float a = smoothstep(0.0, f, edge.x) * smoothstep(0.0, f, edge.y);
@@ -401,10 +396,10 @@ struct Uniforms {
     simd_float4 grade;  // HDR peak (1: off), knee
 };
 
-// The game picture's HDR (Headset().hdr, percent of SDR white at the brightest; 100: off).
+// The game picture's native HDR (Headset().hdr, percent of SDR white at the brightest; 100: off).
 simd_float4 GameGrade() {
     const float peak = std::clamp(static_cast<float>(pt::visionos::Headset().hdr) / 100.0f, 1.0f, 2.0f);
-    return simd_make_float4(peak, 0.5f, 0.0f, 0.0f);
+    return simd_make_float4(peak, 0.0f, 0.0f, 0.0f);
 }
 
 PFN_vkExportMetalObjectsEXT ExportMetalObjects(VkDevice device) {
@@ -1733,7 +1728,8 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 u.alpha = 1.0f;
                 u.opaque = 1.0f;
                 u.pad[0] = x.sharpen;
-                u.grade = GameGrade();
+                // (A MetalFX-enlarged eye has no gain in its alpha.)
+                u.grade = use_enlarged ? simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f) : GameGrade();
                 // Where the field of view the eye image covers falls in this view (the headset's
                 // own views: the view's, narrowed by the setting; a recording's: placed by it).
                 const simd_float4x4 proj = cp_drawable_compute_projection(drawable, cp_axis_direction_convention_right_up_back, v);
@@ -1756,6 +1752,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     Uniforms w = u;
                     w.p0 = simd_make_float4(m00 * t.x - m20, m11 * t.w - m21, m00 * t.y - m20, m11 * t.z - m21);
                     w.pad[1] = 0.12f;  // the fade, as a fraction of the inset from each edge
+                    w.grade = u.grade;  // as its wide view (none with MetalFX: no seam)
                     [enc setRenderPipelineState:x.inset_pipeline];
                     [enc setVertexBytes:&w length:sizeof(w) atIndex:0];
                     [enc setFragmentBytes:&w length:sizeof(w) atIndex:0];
@@ -1780,7 +1777,6 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     q.rect = simd_make_float4(0.0f, 0.0f, 1.0f, 1.0f);
                     q.alpha = 1.0f;
                     q.opaque = alpha ? 0.0f : 1.0f;
-                    if (!alpha) q.grade = GameGrade();
                     if (aimed && which == cursor_panel) {
                         q.cursor = simd_make_float4(aimed->uv.x, aimed->uv.y, size.x / std::max(size.y, 1.0e-3f), aimed->pinched ? 2.0f : 1.0f);
                     }
@@ -2159,7 +2155,7 @@ void ApplySettings(AppSettings& s) {
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 45.0f)), 30, 70);
     h.center = std::clamp(static_cast<int>(Number("PT_VP_CENTER", 45.0f)), 30, 80);
-    h.hdr = std::clamp(static_cast<int>(Number("PT_VP_HDR", 100.0f)), 100, 200);
+    h.hdr = std::clamp(static_cast<int>(Number("PT_VP_HDR", 200.0f)), 100, 200);
     h.fov = std::clamp(static_cast<int>(Number("PT_VP_FOV", 100.0f)), 70, 100);
 
     // The game's own graphics preset first (textures, filtering, clarity...); the launcher's
