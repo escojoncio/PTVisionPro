@@ -550,7 +550,10 @@ Preset M5 bloqueado sin M5: hecho (build 21).
 VRR (estudiado tras build 29): MoltenVK (último y `fae55a1`) no soporta `rasterizationRateMap` ni
 VK_EXT_fragment_density_map → habría que parchearlo. En VRR `[[position]]` del fragmento es físico: 37 de 76 shaders usan
 `gl_FragCoord`/`PixelNdc` (SSAO, SSR, blur, bloom, FXAA, partículas, upscalers...) y necesitarían el decodificador del mapa.
-Alternativa barata: máscara del centro en las vistas anchas.
+Máscara del centro en las vistas anchas: DESCARTADA tal cual. La ancha alimenta al centro con datos compartidos que
+necesitan su zona central: bloom (`bloom_[2]`, imagen de 270 líneas del HDR de la ancha), partículas (`particles_kept_`,
+probadas contra la profundidad de la ancha) y exposición (medida solo en la vista 0). Enmascarar obliga a devolver bloom y
+partículas al centro (~1,3 + 1–2 ms por centro) → ganancia neta ≈ 0–1,5 ms con riesgo de cambios de exposición.
 Siguiente (tras build 29): prototipo de foveado en una pasada (VRR, `MTLRasterizationRateMap` en las pasadas de MoltenVK)
 frente a máscara del centro en las vistas anchas; medir con `cull (...)` y `gpu labels` si `lighting/lights` baja al mirar paredes.
 
