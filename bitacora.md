@@ -148,7 +148,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   gbuffer 2,1–2,3, compose+forward 2,9–3,2 ancha / 1,8 centro, post 2,3 ancha (bloom 1,5) / 0,7 centro, shadows 1,4–1,8,
   occlusion 0,8, reflections 0,85 (centros). Anisotrópico 2→16x: gbuffer +~0,1 ms/vista. El usuario exige ≥4–8x:
   cambia el sombreado visible (normal maps a ángulos rasantes).
-- **Build 25:** anisotrópico como ajuste del visor: `Preset.anisotropy` (M2 8, M5 16) en `kPresets`, `MatchesPreset`,
+- **Build 25 (run 29): OK** (sin probar): anisotrópico como ajuste del visor: `Preset.anisotropy` (M2 8, M5 16) en `kPresets`, `MatchesPreset`,
   `ApplyPreset`/`GraphicsChanged` informan `anisotropy`, `AnisotropyStep`, `PT_VP_ANISOTROPY` (por defecto 8) aplicado tras
   `ApplyGraphicsPreset` en `ApplySettings`; main.cpp: `kVpPreset` llama `textures.SetAnisotropy`, `kAnisotropy` dispara
   `GraphicsChanged`. Swift: `PTSettings.anisotropy` (defaults, apply, matches, CodingKeys, env), Picker en
