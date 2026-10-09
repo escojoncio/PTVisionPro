@@ -163,7 +163,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
-- **Build 31 (pendiente de resultado): densidad variable (VRR) de Metal en lugar de insets.**
+- **Build 31 (run 35): OK** → `releases/download/build-35/PTVisionPro-35.ipa` (sin probar). **Densidad variable (VRR) de Metal en lugar de insets.**
   - MoltenVK (`patches/moltenvk/0001-rasterization-rate-map.patch`, lo aplica `tools/build_visionos.sh`; clave de caché
     CI incluye `patches/moltenvk/*.patch`): extensión privada `VkRenderingRasterizationRateMapMVK` (sType 1297501008) en el
     pNext de `VkRenderingInfo` → `MTLRenderPassDescriptor.rasterizationRateMap`, `renderTargetWidth/Height` = tamaño
