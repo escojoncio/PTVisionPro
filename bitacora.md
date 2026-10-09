@@ -407,6 +407,9 @@ más la composición. Clave para que no maree: profundidad real al drawable (rep
 Frecuencias: M2 90/96/100 Hz → modos estables 45/90, 48/96, 50/100 (M2 apunta a 50/100 si la GPU llega); M5 hasta
 120 Hz → 60/120 como PS VR. Pendiente: ajuste de modo de frecuencia en el menú VISION PRO y presets por visor, si
 Compositor Services permite a la app pedir la frecuencia (comprobar API); 60 reales en pantalla de 90 da judder.
+Preset M5 solo en un M5: bloquearlo en el menú del juego (`kVpPreset`, `HeadsetSections`/handler en main.cpp) y en el
+launcher (`PTSettings`/`SettingsView`), usando la detección `hw.machine` (RealityDevice14 → M2) ya existente; si un
+ajuste guardado trae M5 en un M2, pasar a M2.
 
 0. Medir build 18 (log `vr pace` con 4 vistas) y calibrar periphery/center por defecto. Siguiente: resolución
    dinámica por tiempo de GPU, caché de sombras estáticas, profundidad al drawable (reproyección posicional),
