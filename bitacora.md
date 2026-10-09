@@ -165,7 +165,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
 - **Prueba build 31 (log pt (18)):** VRR no se activó: `vrr: the eyes' rate maps differ in size (1788x1473 and 1784x1473)` →
   insets; mismos tiempos que build 30 (31 ms inicio, 37–40 pasillo). Metal redondea las zonas a sus teselas según la posición.
-- **Build 32 (pendiente):** `BuildVrr` acepta tamaños físicos distintos: objetivos/imágenes = máximo de ambos; tablas con el
+- **Build 32 (run 36): OK** → `releases/download/build-36/PTVisionPro-36.ipa` (sin probar): `BuildVrr` acepta tamaños físicos distintos: objetivos/imágenes = máximo de ambos; tablas con el
   tamaño propio de cada mapa (`own_w/own_h`); el mapa dibuja arriba a la izquierda (MoltenVK pone `renderTargetWidth` = el suyo).
 - **Build 31 (run 35): OK** → `releases/download/build-35/PTVisionPro-35.ipa` (sin probar). **Densidad variable (VRR) de Metal en lugar de insets.**
   - MoltenVK (`patches/moltenvk/0001-rasterization-rate-map.patch`, lo aplica `tools/build_visionos.sh`; clave de caché
