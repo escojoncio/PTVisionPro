@@ -331,6 +331,16 @@ fragment float4 eye_fragment(Varyings in [[stage_in]], texture2d<float> tex [[te
     }
     return float4(c, 1.0);
 }
+// An eye's sharp centre (the game's foveation) over its wide view: premultiplied, faded out over
+// the last pad.y of each edge so no seam shows.
+fragment float4 inset_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float3 c = tex.sample(s, in.uv).rgb;
+    float2 edge = min(in.uv, 1.0 - in.uv);
+    float f = max(u.pad.y, 1.0e-3);
+    float a = smoothstep(0.0, f, edge.x) * smoothstep(0.0, f, edge.y);
+    return float4(c * a, a);
+}
 // A laser from the hand: a thin strip from p0 to p1 that faces the eye.
 vertex Varyings laser_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer(0)]]) {
     float3 a = u.p0.xyz;
@@ -417,10 +427,11 @@ struct Host::Impl {
     id<MTLDevice> mtl_device = nil;
     id<MTLCommandQueue> mtl_queue = nil;
     id<MTLRenderPipelineState> eye_pipeline = nil;
+    id<MTLRenderPipelineState> inset_pipeline = nil;
     id<MTLRenderPipelineState> quad_pipeline = nil;
     id<MTLRenderPipelineState> laser_pipeline = nil;
     id<MTLDepthStencilState> depth_write = nil;
-    std::vector<id<MTLTexture>> textures[4];  // per swapchain: eye 0, eye 1, HUD, screen
+    std::vector<id<MTLTexture>> textures[6];  // per swapchain: eye 0, eye 1, HUD, screen, inset 0, inset 1
 
     // The frame in flight: the drawable the headset shows, and while a high-quality video is
     // being recorded (visionOS 26) a second one for the recording.
@@ -443,7 +454,7 @@ struct Host::Impl {
     simd_float4x4 last_origin_from_device = matrix_identity_float4x4;
     ar_device_anchor_t last_anchor = nil;  // the pose of the last picture (swapped with `anchor`)
     ar_device_anchor_t idle_anchor = nil;  // the head now, for black frames before any picture
-    uint32_t last_index[4] = {0, 0, 0, 0};  // its images: eye 0, eye 1, HUD, screen
+    uint32_t last_index[6] = {0, 0, 0, 0, 0, 0};  // its images: eye 0, eye 1, HUD, screen, inset 0, inset 1
 
     // A call of the game's into the host: noted (the keeper stops after the frame it is on),
     // then the host is the game's.
@@ -540,14 +551,20 @@ struct Host::Impl {
     uint32_t drawable_width = 0;
     uint32_t drawable_height = 0;
     bool metalfx_wanted = true;
+    // With the game's foveation the eye images are the wide views, at `eye_factor` of the image
+    // size (the periphery setting); the insets have their own images, at the render size.
+    float eye_factor = 1.0f;
     std::vector<VkDeviceMemory> eye_memory[2];
+    std::vector<VkDeviceMemory> inset_memory[2];
+    VkExtent2D inset_extent{0, 0};
     // A change of those settings waits until it has held still for a moment (dragging the image
     // size slider steps through many values; the images are made once, for the last one).
     float pending_scale = 0.0f;
     float pending_fov = 0.0f;
     bool pending_metalfx = true;
+    float pending_factor = 0.0f;
     std::chrono::steady_clock::time_point pending_since;
-    uint32_t next_image[4] = {0, 0, 0, 0};
+    uint32_t next_image[6] = {0, 0, 0, 0, 0, 0};
 
     bool CreateImages(vk::Context& c, VkFormat format, uint32_t width, uint32_t height, uint32_t count, Swapchain& out,
                       std::vector<id<MTLTexture>>& textures, const char* name, std::vector<VkDeviceMemory>* memories = nullptr) {
@@ -668,13 +685,14 @@ struct Host::Impl {
             return p;
         };
         eye_pipeline = make(@"eye_vertex", false, @"eye_fragment");
+        inset_pipeline = make(@"eye_vertex", true, @"inset_fragment");
         quad_pipeline = make(@"quad_vertex", true);
         laser_pipeline = make(@"laser_vertex", true, @"laser_fragment");
         MTLDepthStencilDescriptor* ds = [MTLDepthStencilDescriptor new];
         ds.depthWriteEnabled = NO;
         ds.depthCompareFunction = MTLCompareFunctionAlways;
         depth_write = [mtl_device newDepthStencilStateWithDescriptor:ds];
-        return eye_pipeline && quad_pipeline && laser_pipeline;
+        return eye_pipeline && inset_pipeline && quad_pipeline && laser_pipeline;
     }
 
     void PublishStats(uint32_t width, uint32_t height, const char* phase) {
@@ -827,7 +845,13 @@ static void KeepPresenting(Host& host, Host::Impl& x) {
 
 // The eyes' images (and MetalFX's) for an image size, a field of view and the MetalFX setting:
 // made at the start, and again between frames when one of them changes in the game's menu.
-static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, bool metalfx) {
+// The eye images' size relative to the image size: the periphery setting with the game's
+// foveation (the eye images are then the wide views), the whole of it without.
+static float EyeFactor(const pt::visionos::HeadsetSettings& h) {
+    return h.game_foveation ? std::clamp(static_cast<float>(h.periphery) / 100.0f, 0.3f, 0.7f) : 1.0f;
+}
+
+static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, bool metalfx, float eye_factor) {
     vk::Context& ctx = *x.ctx;
     if (!x.textures[0].empty()) {
         // Everything that used the old images finished: the game's work, then the composition's
@@ -857,13 +881,15 @@ static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, b
     x.scale = std::clamp(scale, 0.5f, 2.0f);
     x.fov_scale = std::clamp(fov_scale, 0.7f, 1.0f);
     x.metalfx_wanted = metalfx;
+    x.eye_factor = std::clamp(eye_factor, 0.2f, 1.0f);
     // The views' pixels the eyes cover, and the eyes' own size.
     const uint32_t covered_width = std::max(16u, static_cast<uint32_t>(std::lround(x.drawable_width * x.fov_scale)));
     const uint32_t covered_height = std::max(16u, static_cast<uint32_t>(std::lround(x.drawable_height * x.fov_scale)));
-    x.eye_width = std::max(16u, static_cast<uint32_t>(std::lround(covered_width * x.scale)));
-    x.eye_height = std::max(16u, static_cast<uint32_t>(std::lround(covered_height * x.scale)));
-    LogInfo("vr: drawable view {}x{}, field of view {:.0f} %, eyes drawn at {}x{} (scale {:.2f})", x.drawable_width, x.drawable_height,
-            x.fov_scale * 100.0f, x.eye_width, x.eye_height, x.scale);
+    x.eye_width = std::max(16u, static_cast<uint32_t>(std::lround(covered_width * x.scale * x.eye_factor)));
+    x.eye_height = std::max(16u, static_cast<uint32_t>(std::lround(covered_height * x.scale * x.eye_factor)));
+    LogInfo("vr: drawable view {}x{}, field of view {:.0f} %, eyes drawn at {}x{} (scale {:.2f}{})", x.drawable_width, x.drawable_height,
+            x.fov_scale * 100.0f, x.eye_width, x.eye_height, x.scale,
+            x.eye_factor < 1.0f ? std::format(", wide views at {:.0f} % with the game's foveation", x.eye_factor * 100.0f) : std::string());
     constexpr uint32_t kImages = 3;
     const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
     if (!x.CreateImages(ctx, format, x.eye_width, x.eye_height, kImages, host.EyeSwapchain(0), x.textures[0], "left eye", &x.eye_memory[0]) ||
@@ -1026,7 +1052,7 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
     x.drawable_width = width;
     x.drawable_height = height;
     const pt::visionos::HeadsetSettings& headset = pt::visionos::Headset();
-    if (!SetupEyes(*this, x, x.scale, static_cast<float>(headset.fov) / 100.0f, headset.metalfx)) {
+    if (!SetupEyes(*this, x, x.scale, static_cast<float>(headset.fov) / 100.0f, headset.metalfx, EyeFactor(headset))) {
         error_ = "cannot create the eye images";
         return false;
     }
@@ -1079,16 +1105,17 @@ void Host::Shutdown() {
     }
     if (x.ctx && x.ctx->device) {
         vkDeviceWaitIdle(x.ctx->device);
-        Swapchain* chains[4] = {&eye_swapchains_[0], &eye_swapchains_[1], &hud_swapchain_, &screen_swapchain_};
-        for (int i = 0; i < 4; ++i) {
+        Swapchain* chains[6] = {&eye_swapchains_[0], &eye_swapchains_[1], &hud_swapchain_, &screen_swapchain_, &inset_swapchains_[0], &inset_swapchains_[1]};
+        for (int i = 0; i < 6; ++i) {
             for (VkImageView v : chains[i]->views) vkDestroyImageView(x.ctx->device, v, nullptr);
             for (VkImage im : chains[i]->images) vkDestroyImage(x.ctx->device, im, nullptr);
             chains[i]->views.clear();
             chains[i]->images.clear();
             x.textures[i].clear();
-            if (i < 2) {
-                for (VkDeviceMemory m : x.eye_memory[i]) vkFreeMemory(x.ctx->device, m, nullptr);
-                x.eye_memory[i].clear();
+            if (i < 2 || i >= 4) {
+                std::vector<VkDeviceMemory>& memory = i < 2 ? x.eye_memory[i] : x.inset_memory[i - 4];
+                for (VkDeviceMemory m : memory) vkFreeMemory(x.ctx->device, m, nullptr);
+                memory.clear();
             }
         }
         x.ctx = nullptr;
@@ -1159,26 +1186,39 @@ void Host::PollEvents() {
         pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
         const float fov = std::clamp(static_cast<float>(h.fov) / 100.0f, 0.7f, 1.0f);
         const float scale = std::clamp(h.resolution_scale, 0.5f, 2.0f);
+        const float factor = EyeFactor(h);
         const auto now = std::chrono::steady_clock::now();
-        if (std::fabs(scale - x.scale) > 0.01f || std::fabs(fov - x.fov_scale) > 0.005f || h.metalfx != x.metalfx_wanted) {
-            if (std::fabs(scale - x.pending_scale) > 0.001f || std::fabs(fov - x.pending_fov) > 0.001f || h.metalfx != x.pending_metalfx) {
+        if (std::fabs(scale - x.scale) > 0.01f || std::fabs(fov - x.fov_scale) > 0.005f || h.metalfx != x.metalfx_wanted ||
+            std::fabs(factor - x.eye_factor) > 0.005f) {
+            if (std::fabs(scale - x.pending_scale) > 0.001f || std::fabs(fov - x.pending_fov) > 0.001f || h.metalfx != x.pending_metalfx ||
+                std::fabs(factor - x.pending_factor) > 0.001f) {
                 x.pending_scale = scale;
                 x.pending_fov = fov;
                 x.pending_metalfx = h.metalfx;
+                x.pending_factor = factor;
                 x.pending_since = now;
             } else if (now - x.pending_since >= std::chrono::milliseconds(400)) {
                 x.pending_scale = -1.0f;
                 const float old_scale = x.scale;
                 const float old_fov = x.fov_scale;
                 const bool old_metalfx = x.metalfx_wanted;
-                if (!SetupEyes(*this, x, scale, fov, h.metalfx)) {
+                const float old_factor = x.eye_factor;
+                if (!SetupEyes(*this, x, scale, fov, h.metalfx, factor)) {
                     // Back to what worked, and the menu with it.
                     LogError("vr: the eye images could not be made at the new size; back to the previous one");
                     h.resolution_scale = old_scale;
                     h.fov = static_cast<int>(std::lround(old_fov * 100.0f));
                     h.metalfx = old_metalfx;
                     pt::visionos::SettingChanged("resolution_scale", std::format("{:.2f}", old_scale));
-                    if (!SetupEyes(*this, x, old_scale, old_fov, old_metalfx)) {
+                    if (old_factor >= 0.999f) {
+                        h.game_foveation = false;
+                        pt::visionos::SettingChanged("game_foveation", "0");
+                    } else {
+                        h.game_foveation = true;
+                        h.periphery = static_cast<int>(std::lround(old_factor * 100.0f));
+                        pt::visionos::SettingChanged("periphery", std::to_string(h.periphery));
+                    }
+                    if (!SetupEyes(*this, x, old_scale, old_fov, old_metalfx, old_factor)) {
                         LogError("vr: the eye images could not be made again; ending");
                         x.exit_requested = true;
                         x.running = false;
@@ -1512,7 +1552,12 @@ bool Host::Acquire(Swapchain& swapchain) {
     if (swapchain.images.empty()) return false;
     Impl& x = *impl_;
     auto guard = x.GameCall();
-    int which = &swapchain == &eye_swapchains_[0] ? 0 : &swapchain == &eye_swapchains_[1] ? 1 : &swapchain == &hud_swapchain_ ? 2 : 3;
+    int which = &swapchain == &eye_swapchains_[0]     ? 0
+                : &swapchain == &eye_swapchains_[1]   ? 1
+                : &swapchain == &hud_swapchain_       ? 2
+                : &swapchain == &screen_swapchain_    ? 3
+                : &swapchain == &inset_swapchains_[0] ? 4
+                                                      : 5;
     const uint32_t count = static_cast<uint32_t>(swapchain.images.size());
     // Never the image of the picture the keeper would show again (it keeps the last one, which
     // frames the keeper took over did not replace).
@@ -1533,7 +1578,10 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
     // The image of each swapchain to show: this frame's, or given (a picture shown again).
     const auto image = [&](int which) -> uint32_t {
         if (indices) return indices[which];
-        return which < 2 ? host.EyeSwapchain(which).index : which == 2 ? host.HudSwapchain().index : host.ScreenSwapchain().index;
+        return which < 2    ? host.EyeSwapchain(which).index
+               : which == 2 ? host.HudSwapchain().index
+               : which == 3 ? host.ScreenSwapchain().index
+                            : host.InsetSwapchain(which - 4).index;
     };
     // MetalFX first: the eye images enlarged (a recording's drawable reuses the enlarged images).
     const bool use_enlarged = x.metalfx && layers.projection;
@@ -1629,6 +1677,19 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
                 [enc setFragmentTexture:use_enlarged ? x.enlarged[v] : x.textures[v][image(static_cast<int>(v))] atIndex:0];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                // The game's foveation: the eye's sharp centre over its wide view, faded in at the
+                // edge. Symmetric around the eye's forward axis (tangents left, right, up, down).
+                if (layers.inset && v < 2 && x.inset_pipeline && !x.textures[4 + v].empty()) {
+                    const glm::vec4& t = layers.inset_tangents;
+                    Uniforms w = u;
+                    w.p0 = simd_make_float4(m00 * t.x - m20, m11 * t.w - m21, m00 * t.y - m20, m11 * t.z - m21);
+                    w.pad[1] = 0.12f;  // the fade, as a fraction of the inset from each edge
+                    [enc setRenderPipelineState:x.inset_pipeline];
+                    [enc setVertexBytes:&w length:sizeof(w) atIndex:0];
+                    [enc setFragmentBytes:&w length:sizeof(w) atIndex:0];
+                    [enc setFragmentTexture:x.textures[4 + v][image(4 + static_cast<int>(v))] atIndex:0];
+                    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                }
             }
             if (layers.screen || layers.hud) {
                 const simd_float4x4 projection = cp_drawable_compute_projection(drawable, cp_axis_direction_convention_right_up_back, v);
@@ -1781,6 +1842,8 @@ void Host::EndFrame(const FrameLayers& layers) {
             x.last_index[1] = eye_swapchains_[1].index;
             x.last_index[2] = hud_swapchain_.index;
             x.last_index[3] = screen_swapchain_.index;
+            x.last_index[4] = inset_swapchains_[0].index;
+            x.last_index[5] = inset_swapchains_[1].index;
             x.have_last = true;
         }
     }
@@ -1791,6 +1854,55 @@ void Host::EndFrame(const FrameLayers& layers) {
 }
 
 void Host::SetPointerWanted(bool wanted) { impl_->pointer_wanted = wanted; }
+
+bool Host::InsetWanted(float& center) const {
+    const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
+    center = std::clamp(static_cast<float>(h.center) / 100.0f, 0.3f, 0.6f);
+    // What the eye images are now (the setting takes effect with them, after its short wait).
+    return impl_->running && impl_->eye_factor < 0.999f;
+}
+
+bool Host::EnsureInsetImages(VkExtent2D extent) {
+    Impl& x = *impl_;
+    auto guard = x.GameCall();
+    if (!x.ctx || !x.running || extent.width < 16 || extent.height < 16) return false;
+    if (!x.textures[4].empty() && x.inset_extent.width == extent.width && x.inset_extent.height == extent.height) return true;
+    vk::Context& ctx = *x.ctx;
+    if (!x.textures[4].empty()) {
+        // Nothing may still use the old ones: the game's work, then the composition's.
+        vkDeviceWaitIdle(ctx.device);
+        id<MTLCommandBuffer> fence = [x.mtl_queue commandBuffer];
+        [fence commit];
+        [fence waitUntilCompleted];
+        for (int i = 0; i < 2; ++i) {
+            Swapchain& sc = inset_swapchains_[i];
+            for (VkImageView v : sc.views) vkDestroyImageView(ctx.device, v, nullptr);
+            for (VkImage im : sc.images) vkDestroyImage(ctx.device, im, nullptr);
+            for (VkDeviceMemory m : x.inset_memory[i]) vkFreeMemory(ctx.device, m, nullptr);
+            sc.views.clear();
+            sc.images.clear();
+            sc.index = 0;
+            sc.acquired = false;
+            x.inset_memory[i].clear();
+            x.textures[4 + i].clear();
+            x.next_image[4 + i] = 0;
+        }
+        x.have_last = false;  // a held picture could use them
+    }
+    x.inset_extent = {0, 0};
+    constexpr uint32_t kImages = 3;
+    if (!x.CreateImages(ctx, VK_FORMAT_R8G8B8A8_SRGB, extent.width, extent.height, kImages, inset_swapchains_[0], x.textures[4], "left inset",
+                        &x.inset_memory[0]) ||
+        !x.CreateImages(ctx, VK_FORMAT_R8G8B8A8_SRGB, extent.width, extent.height, kImages, inset_swapchains_[1], x.textures[5], "right inset",
+                        &x.inset_memory[1])) {
+        LogError("vr: the inset images could not be made; drawing without the game's foveation");
+        pt::visionos::Headset().game_foveation = false;
+        pt::visionos::SettingChanged("game_foveation", "0");
+        return false;
+    }
+    x.inset_extent = extent;
+    return true;
+}
 
 bool Host::TakeRecenter() {
     Impl& x = *impl_;
@@ -1849,7 +1961,7 @@ struct Preset {
     bool metalfx;
 };
 constexpr Preset kPresets[2] = {
-    {0.60f, 1, false, true, false, true},   // Vision Pro M2
+    {0.60f, 1, true, true, true, false},    // Vision Pro M2
     {0.85f, 2, true, true, true, false},    // Vision Pro M5
 };
 
@@ -1938,7 +2050,10 @@ void ApplySettings(AppSettings& s) {
     h.resolution_scale = std::clamp(Number("PT_VP_RESOLUTION_SCALE", 0.6f), 0.5f, 2.0f);
     h.target_fps = static_cast<int>(Number("PT_VP_TARGET_FPS", 90.0f)) == 45 ? 45 : 90;
     h.foveation = Flag("PT_VP_FOVEATION", true);
-    h.metalfx = Flag("PT_VP_METALFX", true);
+    h.metalfx = Flag("PT_VP_METALFX", false);
+    h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
+    h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 45.0f)), 30, 70);
+    h.center = std::clamp(static_cast<int>(Number("PT_VP_CENTER", 45.0f)), 30, 60);
     h.fov = std::clamp(static_cast<int>(Number("PT_VP_FOV", 100.0f)), 70, 100);
 
     // The game's own graphics preset first (textures, filtering, clarity...); the launcher's
@@ -1991,19 +2106,22 @@ void ApplySettings(AppSettings& s) {
 namespace {
 struct EyeTimes {
     std::mutex mutex;
-    float gpu[2] = {};
-    float pass[2][6] = {};
-    float cpu[2] = {};
+    // Per view of a frame: the eyes (0, 1), and with the game's foveation their insets (2, 3).
+    float gpu[4] = {};
+    float pass[4][6] = {};
+    float cpu[4] = {};
     double sum_gpu = 0.0;
-    double sum_pass[2][6] = {};
+    double sum_pass[4][6] = {};
     double sum_cpu = 0.0;
     uint64_t samples = 0;
+    int views = 2;
     std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
 };
 EyeTimes& Times() {
     static EyeTimes* const t = new EyeTimes;
     return *t;
 }
+
 }  // namespace
 
 void RequestRecenter() {
@@ -2011,24 +2129,38 @@ void RequestRecenter() {
     LogInfo("vr: recentre asked for in the menu");
 }
 
-void ReportEye(int eye, float gpu_ms, const float pass_ms[6], float cpu_ms) {
-    if (eye < 0 || eye > 1) return;
+void ReportEye(int view, int views, float gpu_ms, const float pass_ms[6], float cpu_ms) {
+    views = std::clamp(views, 1, 4);
+    if (view < 0 || view >= views) return;
     EyeTimes& t = Times();
     std::lock_guard<std::mutex> lock(t.mutex);
-    t.gpu[eye] = gpu_ms;
-    t.cpu[eye] = cpu_ms;
-    for (int i = 0; i < 6; ++i) t.pass[eye][i] = pass_ms[i];
-    if (eye != 1) return;
-    const float both = t.gpu[0] + t.gpu[1];
+    if (views != t.views) {
+        // Another way of drawing (the inset on or off): the averages start again.
+        t.views = views;
+        t.sum_gpu = t.sum_cpu = 0.0;
+        for (auto& e : t.sum_pass) for (double& v : e) v = 0.0;
+        t.samples = 0;
+        t.since = std::chrono::steady_clock::now();
+    }
+    t.gpu[view] = gpu_ms;
+    t.cpu[view] = cpu_ms;
+    for (int i = 0; i < 6; ++i) t.pass[view][i] = pass_ms[i];
+    if (view != views - 1) return;
+    float all = 0.0f;
+    float cpu = 0.0f;
+    for (int v = 0; v < views; ++v) {
+        all += t.gpu[v];
+        cpu += t.cpu[v];
+    }
     {
         pt::xr::Bridge& b = pt::xr::bridge();
         std::lock_guard<std::mutex> bl(b.mutex);
-        b.stats.gpu_ms = both;
+        b.stats.gpu_ms = all;
     }
-    t.sum_gpu += both;
-    t.sum_cpu += t.cpu[0] + t.cpu[1];
-    for (int e = 0; e < 2; ++e) {
-        for (int i = 0; i < 6; ++i) t.sum_pass[e][i] += t.pass[e][i];
+    t.sum_gpu += all;
+    t.sum_cpu += cpu;
+    for (int v = 0; v < views; ++v) {
+        for (int i = 0; i < 6; ++i) t.sum_pass[v][i] += t.pass[v][i];
     }
     ++t.samples;
     const auto now = std::chrono::steady_clock::now();
@@ -2047,9 +2179,10 @@ void ReportEye(int eye, float gpu_ms, const float pass_ms[6], float cpu_ms) {
         return std::format("shadows {:.2f}, mirror {:.2f}, gbuffer {:.2f}, lighting {:.2f}, compose {:.2f}, post {:.2f}", t.sum_pass[e][0] / n,
                            t.sum_pass[e][1] / n, t.sum_pass[e][2] / n, t.sum_pass[e][3] / n, t.sum_pass[e][4] / n, t.sum_pass[e][5] / n);
     };
-    LogInfo("vr pace: {:.1f} frames shown/s, GPU both eyes {:.2f} ms (left: {}; right: {}), CPU recording {:.2f} ms, eyes {}x{}, "
-            "MetalFX {}, thermal {}",
-            fps, t.sum_gpu / n, passes(0), passes(1), t.sum_cpu / n, width, height, Headset().metalfx ? "on" : "off", pt_apple_thermal_state());
+    std::string detail = std::format("left: {}; right: {}", passes(0), passes(1));
+    if (views == 4) detail += std::format("; left inset: {}; right inset: {}", passes(2), passes(3));
+    LogInfo("vr pace: {:.1f} frames shown/s, GPU {} views {:.2f} ms ({}), CPU recording {:.2f} ms, eyes {}x{}, MetalFX {}, thermal {}", fps, views,
+            t.sum_gpu / n, detail, t.sum_cpu / n, width, height, Headset().metalfx ? "on" : "off", pt_apple_thermal_state());
     t.sum_gpu = t.sum_cpu = 0.0;
     for (auto& e : t.sum_pass) for (double& v : e) v = 0.0;
     t.samples = 0;

@@ -45,7 +45,13 @@ struct PTSettings: Codable, Equatable {
     /// own; 0.5 to 1 asks for that much (1: the sharpest, largest drawables the system offers).
     var compositorQuality: Float = 0
     /// MetalFX upscaling of the game's picture to the drawable.
-    var metalFX = true
+    var metalFX = false
+    /// The game's own foveation: a wide low-density view of each eye and its centre on top.
+    var gameFoveation = true
+    /// Density of the wide view, percent of the image size (30 to 70).
+    var periphery = 45
+    /// Size of the sharp centre, percent of the eye's field of view across (30 to 60).
+    var center = 45
     /// Sharpening of the picture on its way to the headset, 0 to 1.
     var sharpen: Double = 0.3
 
@@ -87,12 +93,12 @@ struct PTSettings: Codable, Equatable {
             settings.fov = 100
             settings.graphicsPreset = "medium"
             settings.shadows = "low"
-            settings.ssao = false
+            settings.ssao = true
             settings.bloom = true
-            settings.reflections = false
+            settings.reflections = true
             settings.foveation = true
             settings.compositorQuality = 0
-            settings.metalFX = true
+            settings.metalFX = false
         case .m5:
             settings.preset = .m5
             settings.resolutionScale = 0.85
@@ -193,7 +199,11 @@ struct PTSettings: Codable, Equatable {
     /// The saved settings, or the detected headset's preset the first time.
     static func load() -> PTSettings {
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
-           let saved = try? JSONDecoder().decode(PTSettings.self, from: data) {
+           var saved = try? JSONDecoder().decode(PTSettings.self, from: data) {
+            // A headset preset keeps following its values when a new version changes them.
+            if saved.preset != .custom {
+                saved.apply(preset: saved.preset)
+            }
             return saved
         }
         return defaults(for: detectedPreset())
@@ -208,7 +218,7 @@ struct PTSettings: Codable, Equatable {
     // Every key is optional when decoding, so that settings saved by an older version still load.
     enum CodingKeys: String, CodingKey {
         case preset, resolutionScale, dynamicResolution, targetFPS, fov, graphicsPreset, shadows
-        case ssao, bloom, reflections, foveation, compositorQuality, metalFX, sharpen
+        case ssao, bloom, reflections, foveation, compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -231,6 +241,9 @@ struct PTSettings: Codable, Equatable {
         foveation = (try? c.decodeIfPresent(Bool.self, forKey: .foveation)) ?? base.foveation
         compositorQuality = (try? c.decodeIfPresent(Float.self, forKey: .compositorQuality)) ?? base.compositorQuality
         metalFX = (try? c.decodeIfPresent(Bool.self, forKey: .metalFX)) ?? base.metalFX
+        gameFoveation = (try? c.decodeIfPresent(Bool.self, forKey: .gameFoveation)) ?? base.gameFoveation
+        periphery = (try? c.decodeIfPresent(Int.self, forKey: .periphery)) ?? base.periphery
+        center = (try? c.decodeIfPresent(Int.self, forKey: .center)) ?? base.center
         sharpen = (try? c.decodeIfPresent(Double.self, forKey: .sharpen)) ?? base.sharpen
         turnMode = (try? c.decodeIfPresent(Int.self, forKey: .turnMode)) ?? base.turnMode
         snapDegrees = (try? c.decodeIfPresent(Int.self, forKey: .snapDegrees)) ?? base.snapDegrees
@@ -274,6 +287,9 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_FOVEATION=\(flag(foveation))",
             "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
             "PT_VP_METALFX=\(flag(metalFX))",
+            "PT_VP_GAME_FOVEATION=\(flag(gameFoveation))",
+            "PT_VP_PERIPHERY=\(periphery)",
+            "PT_VP_CENTER=\(center)",
             "PT_VP_SHARPEN=\(String(format: "%.1f", sharpen))",
             "PT_VP_TURN=\(turnMode)",
             "PT_VP_SNAP_DEGREES=\(snapDegrees)",

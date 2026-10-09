@@ -17,8 +17,14 @@ struct HeadsetSettings {
     float resolution_scale = 0.6f;
     int target_fps = 90;
     bool foveation = true;
-    bool metalfx = true;  // the eyes drawn at the image size and enlarged by MetalFX
+    bool metalfx = false;  // the eyes drawn at the image size and enlarged by MetalFX
     int fov = 100;        // percent of the views' field of view the game draws (70 to 100)
+    // The game's own foveation: each eye drawn wide at a lower density (`periphery`, percent of
+    // the image size) and its centre again (`center`, percent of the eye's field of view across)
+    // at the same pixel size; the composition lays the centre over the wide view.
+    bool game_foveation = true;
+    int periphery = 45;  // 30 to 70
+    int center = 45;     // 30 to 60
 };
 
 // The launcher's settings into the game's, after pt.ini was read.
@@ -39,9 +45,10 @@ void ApplyPreset(int preset, AppSettings& settings);
 // The menu's "recentre": the game centres on the head again at the next frame.
 void RequestRecenter();
 
-// After each eye is drawn: the GPU time of the eye's last measured frame (and of its passes:
-// shadows, mirror, gbuffer, lighting, compose, post) and the CPU time it took to record it, for
-// the launcher's performance panel and a summary in the log every ten seconds.
-void ReportEye(int eye, float gpu_ms, const float pass_ms[6], float cpu_ms);
+// After each view is drawn (`view` of `views`: the eyes, then their insets with the game's
+// foveation): the GPU time of its last measured frame (and of its passes: shadows, mirror,
+// gbuffer, lighting, compose, post) and the CPU time it took to record it, for the launcher's
+// performance panel and a summary in the log every ten seconds.
+void ReportEye(int view, int views, float gpu_ms, const float pass_ms[6], float cpu_ms);
 
 }  // namespace pt::visionos
