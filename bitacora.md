@@ -158,7 +158,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 27 (run 31):** luces como en 25 (2,2–3,6 ms/vista); 30 ms inicio (32 fps), 36–40 ms después.
   Sombras 1,2 ms al inicio (antes 1,7) pero solo ~1/3 de teselas reutilizadas: el hash dependía del orden de `draws_`
   (ordenado por cámara). El usuario quiere «BT.2020 y brillo HDR».
-- **Build 28:**
+- **Build 28 (run 32): OK** (sin probar):
   - Caché de sombras: hash de casters como conjunto (suma de hashes por caster + número).
   - HDR nativo: `tonemap.frag` del juego solo recorta `IMG_HDR` en 1. `screen_fx.frag` (pasada «screen», push
     `f0.y` = pico de `SetVrHdrPeak`, `f0.z` = factor de exposición del tonemap) escribe alfa = 2 − ganancia (ganancia =
