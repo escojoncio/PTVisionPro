@@ -1,3 +1,18 @@
+diff --git a/shaders/tonemap.frag b/shaders/tonemap.frag
+index d39d6a6..f86f228 100644
+--- a/shaders/tonemap.frag
++++ b/shaders/tonemap.frag
+@@ -29,7 +29,9 @@ void main() {
+     } else {
+         vec3 hdr = ImgFetch(IMG_HDR, pixel).rgb * pass.f0.z;
+         vec3 x = min(SrgbEncode(clamp(hdr, 0.0, 1.0)) + max(ImgFetch(IMG_FLARE, pixel).rgb, vec3(0.0)), vec3(1.0));
+-        vec2 bloom_uv = in_uv + 0.5 / ImgSize(IMG_BLOOM_SUM);
++        // f2.x > 0: the bloom is a wider view's (a stereo inset's eye), this view the middle f2.x of it.
++        vec2 view_uv = pass.f2.x > 0.0 ? 0.5 + (in_uv - 0.5) * pass.f2.x : in_uv;
++        vec2 bloom_uv = view_uv + 0.5 / ImgSize(IMG_BLOOM_SUM);
+         vec3 b = pass.f0.x > 0.0 ? min(vec3(0.5), Img(IMG_BLOOM_SUM, SMP_LINEAR_CLAMP, bloom_uv).rgb) : vec3(0.0);
+         vec3 x2 = x * x;
+         vec3 r = clamp(x2 + b - x2 * b, 0.0, 1.0);
 diff --git a/src/engine/render/render_util.cpp b/src/engine/render/render_util.cpp
 index c327bd9..1a26215 100644
 --- a/src/engine/render/render_util.cpp
@@ -38,7 +53,7 @@ index 7486360..0bc0581 100644
  void EndLabel(VkCommandBuffer cmd);
  
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..aba3281 100644
+index 40d339d..550528b 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -610,6 +610,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -126,7 +141,64 @@ index 40d339d..aba3281 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -2099,9 +2117,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -1782,6 +1800,7 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+ 
+ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
+     vkCmdEndRendering(cmd);
++    BeginLabel(cmd, "particles");
+     UseTargets(cmd, {{&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
+     BeginPass(cmd, extent_, {{&particles_, true, {{0.0f, 0.0f, 0.0f, 1.0f}}}}, &depth_, true, false);
+     uint32_t recorded = 0;
+@@ -1796,6 +1815,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+             }
+             copied = true;
+             vkCmdEndRendering(cmd);
++            BeginLabel(cmd, "scene copy");
+             UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+             VkImageCopy copy{};
+             copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+@@ -1806,13 +1826,16 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+             UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                              {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+                              {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
++            EndLabel(cmd);
+             BeginPass(cmd, extent_, {{&particles_, false, {}}}, &depth_, true, false);
+         };
+     }
+     vfx_forward(context);
+     BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+     vkCmdEndRendering(cmd);
++    EndLabel(cmd);
+     if (recorded > 0) {
++        BeginLabel(cmd, "particles composite");
+         UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+         VkImageCopy copy{};
+         copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+@@ -1827,6 +1850,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+         gpu::PassPush push;
+         Fullscreen(cmd, vfx_composite_, push);
+         vkCmdEndRendering(cmd);
++        EndLabel(cmd);
+     }
+     UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
+     BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
+@@ -1834,6 +1858,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+ 
+ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+     vkCmdEndRendering(cmd);
++    BeginLabel(cmd, "scene copy");
+     UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+     VkImageCopy copy{};
+     copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+@@ -1844,6 +1869,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+     UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+                      {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
++    EndLabel(cmd);
+     BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
+ }
+ 
+@@ -2099,9 +2125,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -141,7 +213,7 @@ index 40d339d..aba3281 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2130,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2138,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -150,7 +222,7 @@ index 40d339d..aba3281 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2155,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2163,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -167,7 +239,7 @@ index 40d339d..aba3281 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2172,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2180,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -175,7 +247,7 @@ index 40d339d..aba3281 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2207,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2215,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -183,7 +255,17 @@ index 40d339d..aba3281 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2249,6 +2276,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2273,9 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+ 
+ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
+     const auto cpu_start = std::chrono::steady_clock::now();
++    // A new stereo frame: no eye's bloom is this frame's yet (a view 0 that never gets to its post
++    // must not leave the last frame's to the insets).
++    if (vr_eye_ <= 0) bloom_eye_frame_[0] = bloom_eye_frame_[1] = ~0u;
+     struct ToggleGuard {
+         RenderToggles& toggles;
+         RenderToggles saved;
+@@ -2249,6 +2287,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -199,7 +281,7 @@ index 40d339d..aba3281 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2366,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2377,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -260,7 +342,7 @@ index 40d339d..aba3281 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2540,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2551,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -285,21 +367,50 @@ index 40d339d..aba3281 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
-index 19dd1a8..5bb0b27 100644
+index 19dd1a8..b376ed3 100644
 --- a/src/engine/render/scene_post.cpp
 +++ b/src/engine/render/scene_post.cpp
-@@ -89,6 +89,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -88,7 +88,31 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+     }
  
      const bool bloom = toggles.bloom && lighting.valid && std::abs(exposure.bloom_size) >= 1.0e-5f;
-     if (bloom) {
+-    if (bloom) {
++    // Stereo with the game's foveation: an inset (views 2, 3) takes the bloom its eye's wide view
++    // (0, 1) worked out this frame instead of working it out again. The bloom is a wide blur of a
++    // 270-line image, the same scene seen from the same eye: the inset samples the part of it
++    // under its field (`vr_bloom_scale_` of the wide one across), which also makes its glow
++    // spread as wide as the view around it.
++    const uint32_t frame_stamp = frame_counter_ + (vr_eye_ <= 0 ? 1u : 0u);  // view 0 advances it after its post
++    const bool bloom_shared = vr_bloom_scale_ > 0.0f && vr_eye_ >= 0 && vr_eye_ <= 3;
++    const int shared_eye = bloom_shared && vr_eye_ >= 2 ? vr_eye_ - 2 : -1;
++    const bool reuse = bloom && shared_eye >= 0 && bloom_eye_[shared_eye].Valid() && bloom_eye_frame_[shared_eye] == frame_stamp;
++    auto copy_bloom = [&](RenderTarget& from, RenderTarget& to) {
++        UseTargets(cmd, {{&from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&to, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
++        VkImageCopy copy{};
++        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++        copy.dstSubresource = copy.srcSubresource;
++        copy.extent = {from.Extent().width, from.Extent().height, 1};
++        vkCmdCopyImage(cmd, from.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, to.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
++        UseTargets(cmd, {{&from, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&to, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    };
++    if (reuse) {
++        BeginLabel(cmd, "bloom shared");
++        copy_bloom(bloom_eye_[shared_eye], bloom_[2]);
++        EndLabel(cmd);
++    }
++    if (bloom && !reuse) {
 +        BeginLabel(cmd, "bloom");
          UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[0], false, {}}});
          push.f0 = BloomPolynomial(exposure.bloom_extraction);
-@@ -134,19 +135,29 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -134,19 +158,33 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
              push.f1 = saved_f1;
          }
          UseTargets(cmd, {{&bloom_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++        if (bloom_shared && vr_eye_ <= 1 && bloom_eye_[vr_eye_].Valid()) {
++            copy_bloom(bloom_[2], bloom_eye_[vr_eye_]);
++            bloom_eye_frame_[vr_eye_] = frame_stamp;
++        }
 +        EndLabel(cmd);
      }
      Stamp(cmd, 11);
@@ -332,10 +443,16 @@ index 19dd1a8..5bb0b27 100644
      UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&ldr_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
      BeginPass(cmd, output_extent_, {{&ldr_[0], false, {}}});
      push.ids.x = 0;
-@@ -161,9 +172,11 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -158,12 +196,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+         push.f0.y = 0.0f;
+         push.f0.w = 0.0f;
+     }
++    // The shared bloom read under the inset's field (0: the view's own, all of it).
++    push.f2 = glm::vec4(reuse ? vr_bloom_scale_ : 0.0f, 0.0f, 0.0f, 0.0f);
      Fullscreen(cmd, tonemap_, push);
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&ldr_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    push.f2 = glm::vec4(0.0f);
 +    EndLabel(cmd);
  
      auto ldr_index = [](int i) { return i == 0 ? gpu::kImgLdrA : gpu::kImgLdrB; };
@@ -345,7 +462,7 @@ index 19dd1a8..5bb0b27 100644
          RenderTarget& dst = ldr_[1 - current];
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, output_extent_, {{&dst, false, {}}});
-@@ -171,11 +184,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -171,11 +214,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
          current = 1 - current;
@@ -359,7 +476,7 @@ index 19dd1a8..5bb0b27 100644
      }
      if (toggles.depth_of_field && screen.depth_of_field && lighting.valid) {
          RecordDepthOfField(cmd, screen, current);
-@@ -187,7 +201,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -187,7 +231,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          gpu::PassPush lut;
          lut.ids = glm::uvec4(ldr_index(current), 1, 0, post_view_);
          lut.f0 = glm::vec4(0.0f, lut_blend, 1.0f, 1.0f);
@@ -368,7 +485,7 @@ index 19dd1a8..5bb0b27 100644
      }
  
      const bool blur = toggles.full_screen_blur && screen.full_screen_blur && lighting.valid;
-@@ -203,7 +217,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -203,7 +247,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          const float share = std::clamp(dt * 30.0f, 0.05f, 2.0f);
          const float rate = std::pow(std::clamp(screen.blur_blend_rate, 0.0f, 0.999f), share);
          push.f0 = glm::vec4(screen.blur_fetch_band * std::sqrt(share), rate, 0.0f, 0.0f);
@@ -377,7 +494,7 @@ index 19dd1a8..5bb0b27 100644
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
          CopyToHistory(cmd, ldr_[current]);
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
-@@ -214,9 +228,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -214,9 +258,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      if (screen.colour_banding_canceller && lighting.valid) {
          UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
          push.ids = glm::uvec4(ldr_index(current), 0, 0, main_view_.index);
@@ -389,7 +506,7 @@ index 19dd1a8..5bb0b27 100644
      RenderTarget output;
      output.image = renderer_->SceneColor();
      output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-@@ -240,6 +255,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -240,6 +285,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      }
      vkCmdEndRendering(cmd);
@@ -398,7 +515,7 @@ index 19dd1a8..5bb0b27 100644
  }
  
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..7033352 100644
+index 1f96981..ccd9586 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
 @@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
@@ -418,15 +535,46 @@ index 1f96981..7033352 100644
      }
      vkDestroyPipelineLayout(device_, layout_, nullptr);
      vkDestroyDescriptorPool(device_, pool_, nullptr);
-@@ -612,6 +615,7 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -576,7 +579,7 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
+ void SceneRenderer::DestroyTargets() {
+     vk::Context& ctx = renderer_->Context();
+     RenderTarget* targets[] = {&albedo_, &normal_, &material_, &depth_, &diffuse_, &specular_, &probe_acc_, &hdr_, &bloom_[0], &bloom_[1], &bloom_[2],
+-                               &flare_, &ldr_[0], &ldr_[1], &history_, &mirror_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
++                               &bloom_eye_[0], &bloom_eye_[1], &flare_, &ldr_[0], &ldr_[1], &history_, &mirror_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
+                                &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_,
+                                &mb_tile_[0], &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_,
+                                &mb_blur_[0], &mb_blur_[1], &mirror_history_, &mirror_temporal_, &reflect_layer_, &reflect_offset_,
+@@ -612,6 +615,8 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
      vkDeviceWaitIdle(device_);
      DestroyTargets();
      mirror_stale_.valid = false;
 +    flare_clean_ = false;
++    bloom_eye_frame_[0] = bloom_eye_frame_[1] = ~0u;
      const VkImageUsageFlags color = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
      const VkImageUsageFlags dumped = color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      const uint32_t bloom_width = std::max(1u, static_cast<uint32_t>(std::lround(270.0 * output.width / std::max(output.height, 1u))));
-@@ -1174,10 +1178,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+@@ -630,7 +635,10 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+               CreateTarget(refmap_, kRefMapFormat, extent, color, c) &&
+               CreateTarget(mirror_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
+               CreateTarget(bloom_[0], kBloomFormat, quarter, color, c) && CreateTarget(bloom_[1], kBloomFormat, quarter, color, c) &&
+-              CreateTarget(bloom_[2], kBloomFormat, quarter, color, c) && CreateTarget(flare_, kPostFormat, output, color, c) &&
++              CreateTarget(bloom_[2], kBloomFormat, quarter, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
++              CreateTarget(bloom_eye_[0], kBloomFormat, quarter, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
++              CreateTarget(bloom_eye_[1], kBloomFormat, quarter, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
++              CreateTarget(flare_, kPostFormat, output, color, c) &&
+               CreateTarget(ldr_[0], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
+               CreateTarget(ldr_[1], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
+               CreateTarget(history_, kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
+@@ -664,7 +672,7 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+     }
+     renderer_->Context().Submit([&](VkCommandBuffer cmd) {
+         RenderTarget* colors[] = {&albedo_, &normal_, &material_, &diffuse_, &specular_, &probe_acc_, &hdr_, &mirror_, &bloom_[0], &bloom_[1], &bloom_[2],
+-                                  &flare_, &ldr_[0], &ldr_[1], &history_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
++                                  &bloom_eye_[0], &bloom_eye_[1], &flare_, &ldr_[0], &ldr_[1], &history_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
+                                   &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_, &mb_tile_[0],
+                                   &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_, &mb_blur_[0],
+                                   &mb_blur_[1]};
+@@ -1174,10 +1182,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
      stats_.gpu_ms = span(0, 6);
  }
  
@@ -512,7 +660,7 @@ index 1f96981..7033352 100644
      if (slot.reflection_sampled) {
          vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
          const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
-@@ -1189,7 +1268,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -1189,7 +1272,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -524,10 +672,10 @@ index 1f96981..7033352 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..1582f03 100644
+index 6c9b165..863ba0e 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,15 @@ public:
+@@ -206,6 +206,18 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
@@ -540,10 +688,13 @@ index 6c9b165..1582f03 100644
 +        vr_cull_valid_ = camera != nullptr;
 +        if (camera) vr_cull_camera_ = *camera;
 +    }
++    // Insets (views 2, 3) take their eye's wide-view bloom; `scale`: the inset's field across as a
++    // fraction of the wide view's (0: each view its own bloom).
++    void SetVrBloomShare(float scale) { vr_bloom_scale_ = scale; }
  
  private:
      struct FrameSlot {
-@@ -222,7 +231,30 @@ private:
+@@ -222,7 +234,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -574,15 +725,18 @@ index 6c9b165..1582f03 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -377,6 +409,7 @@ private:
+@@ -377,6 +412,10 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
++    RenderTarget bloom_eye_[2];  // each eye's wide-view bloom, for its inset (SetVrBloomShare)
++    uint32_t bloom_eye_frame_[2] = {~0u, ~0u};
++    float vr_bloom_scale_ = 0.0f;
 +    bool flare_clean_ = false;  // flare_ holds the clear and nothing since (skips clearing it again)
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -636,6 +669,14 @@ private:
+@@ -636,6 +675,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -598,13 +752,15 @@ index 6c9b165..1582f03 100644
  
  }
 diff --git a/src/engine/xr/xr_host.cpp b/src/engine/xr/xr_host.cpp
-index 5e7cee1..fee13d0 100644
+index 5e7cee1..6610b7f 100644
 --- a/src/engine/xr/xr_host.cpp
 +++ b/src/engine/xr/xr_host.cpp
-@@ -53,6 +53,12 @@ void Host::LocateViews() {}
+@@ -52,7 +52,13 @@ bool Host::BeginFrame() { return false; }
+ void Host::LocateViews() {}
  void Host::SyncActions() {}
  void Host::EndFrame(const FrameLayers&) {}
- void Host::Haptic(int, float, float) {}
+-void Host::Haptic(int, float, float) {}
++int Host::Haptic(int, float, float) { return 0; }
 +void Host::SetFrameDivisor(int) {}
 +float Host::GpuBudgetMs() const { return 0.0f; }
 +void Host::SetPointerWanted(bool) {}
@@ -614,8 +770,24 @@ index 5e7cee1..fee13d0 100644
  bool Host::Acquire(Swapchain&) { return false; }
  void Host::Release(Swapchain&) {}
  
-@@ -864,6 +870,13 @@ void Host::Haptic(int hand, float amplitude, float seconds) {
+@@ -849,10 +855,10 @@ void Host::EndFrame(const FrameLayers& layers) {
+     frame_open_ = false;
+ }
+ 
+-void Host::Haptic(int hand, float amplitude, float seconds) {
++int Host::Haptic(int hand, float amplitude, float seconds) {
+     Impl& x = *impl_;
+     if (!x.running || x.state != XR_SESSION_STATE_FOCUSED || hand < 0 || hand > 1) {
+-        return;
++        return 0;
+     }
+     XrHapticVibration vibration{XR_TYPE_HAPTIC_VIBRATION};
+     vibration.amplitude = std::clamp(amplitude, 0.0f, 1.0f);
+@@ -862,8 +868,16 @@ void Host::Haptic(int hand, float amplitude, float seconds) {
+     info.action = x.haptic;
+     info.subactionPath = x.hands[hand];
      x.xrApplyHapticFeedback(x.session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
++    return 1;
  }
  
 +void Host::SetFrameDivisor(int) {}
@@ -629,7 +801,7 @@ index 5e7cee1..fee13d0 100644
  
  }
 diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
-index b5bf253..e508d2a 100644
+index b5bf253..984ae53 100644
 --- a/src/engine/xr/xr_host.h
 +++ b/src/engine/xr/xr_host.h
 @@ -37,6 +37,18 @@ struct ControllerState {
@@ -662,7 +834,14 @@ index b5bf253..e508d2a 100644
  };
  
  class Host final : public vk::ContextCreator {
-@@ -105,11 +121,28 @@ public:
+@@ -100,16 +116,34 @@ public:
+     const ViewPose& Head() const { return head_; }
+     bool ViewsValid() const { return views_valid_; }
+     const ControllerState& Controllers() const { return controllers_; }
+-    void Haptic(int hand, float amplitude, float seconds);
++    // A pulse on a hand's controller: how many motors it reached (0: none to play it on).
++    int Haptic(int hand, float amplitude, float seconds);
+ 
      Swapchain& EyeSwapchain(int i) { return eye_swapchains_[i]; }
      Swapchain& HudSwapchain() { return hud_swapchain_; }
      Swapchain& ScreenSwapchain() { return screen_swapchain_; }
@@ -691,7 +870,7 @@ index b5bf253..e508d2a 100644
  
      struct Impl;
  
-@@ -124,6 +157,7 @@ private:
+@@ -124,6 +158,7 @@ private:
      Swapchain eye_swapchains_[2];
      Swapchain hud_swapchain_;
      Swapchain screen_swapchain_;
@@ -773,7 +952,7 @@ index 42d8b01..4de03f2 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..e029ce4 100644
+index e8e4ae7..3f03fc9 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -973,7 +1152,7 @@ index e8e4ae7..e029ce4 100644
      auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
          if (!host_.Acquire(sc)) return false;
          t.image = sc.images[sc.index];
-@@ -207,19 +320,119 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -207,19 +320,120 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
          return false;
      }
@@ -991,6 +1170,7 @@ index e8e4ae7..e029ce4 100644
 +    const float aspect = static_cast<float>(out.render.width) / static_cast<float>(std::max(out.render.height, 1u));
 +    const float tan_y = std::clamp(center, 0.2f, 0.8f) * frusta_[0].tan_y;
 +    const float tan_x = tan_y * aspect;
++    out.inset_scale = std::clamp(center, 0.2f, 0.8f);
 +    out.inset_tangents = glm::vec4(-tan_x, tan_x, tan_y, -tan_y);
 +    for (int i = 0; i < 2; ++i) {
 +        out.insets[i] = out.eyes[i];
@@ -1094,8 +1274,38 @@ index e8e4ae7..e029ce4 100644
      layers.hud_position = hud_position_;
      layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
      host_.EndFrame(layers);
-@@ -277,7 +490,20 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
-     host_.Haptic(1, amplitude, 0.05f);
+@@ -268,16 +482,48 @@ void VrPlay::EndEmpty() {
+ }
+ 
+ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
++    const auto now = std::chrono::steady_clock::now();
++    // What the game asked for, in the log every ten seconds while it asks (and its first pulse at
++    // once): whether the game rumbles at all, and whether it reaches a controller.
++    if (rumble_pulses_ > 0 && now - rumble_since_ >= std::chrono::seconds(10)) {
++        LogInfo("vr: rumble from the game: {} pulses in the last {:.0f} s, strongest {:.0f} %, {} of them reached a controller's motors", rumble_pulses_,
++                std::chrono::duration<double>(now - rumble_since_).count(), rumble_peak_ * 100.0f, rumble_reached_);
++        rumble_pulses_ = 0;
++        rumble_reached_ = 0;
++        rumble_peak_ = 0.0f;
++    }
+     const uint8_t strongest = std::max(large_motor, small_motor);
+     if (strongest == 0) {
+         return;
+     }
+     const float amplitude = static_cast<float>(strongest) / 255.0f;
+-    host_.Haptic(0, amplitude, 0.05f);
+-    host_.Haptic(1, amplitude, 0.05f);
++    // A little longer than a game loop at low frame rates, so that a steady rumble stays steady.
++    const int motors = host_.Haptic(0, amplitude, 0.08f) + host_.Haptic(1, amplitude, 0.08f);
++    if (rumble_pulses_ == 0) rumble_since_ = now;
++    ++rumble_pulses_;
++    rumble_reached_ += motors > 0 ? 1u : 0u;
++    rumble_peak_ = std::max(rumble_peak_, amplitude);
++    if (!rumble_seen_) {
++        rumble_seen_ = true;
++        LogInfo("vr: first rumble from the game ({:.0f} %, large {} small {}): {}", amplitude * 100.0f, large_motor, small_motor,
++                motors > 0 ? "played on the controller" : "no controller motor to play it on");
++    }
  }
  
 -void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_open, float dt) {
@@ -1116,7 +1326,7 @@ index e8e4ae7..e029ce4 100644
      if (!hud_placed_ || (menu_open && !menu_was_open_)) {
          hud_yaw_ = head_yaw_local;
          hud_placed_ = true;
-@@ -289,7 +515,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
+@@ -289,7 +535,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
          }
      }
      menu_was_open_ = menu_open;
@@ -1127,7 +1337,7 @@ index e8e4ae7..e029ce4 100644
  
  }
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index d1485b2..a158537 100644
+index d1485b2..7099c8e 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
 @@ -1,5 +1,7 @@
@@ -1138,7 +1348,7 @@ index d1485b2..a158537 100644
  #include <glm/glm.hpp>
  #include <glm/gtc/quaternion.hpp>
  
-@@ -34,6 +36,12 @@ public:
+@@ -34,6 +36,13 @@ public:
          XrTarget hud;
          VkExtent2D render{};
          xr::ViewPose poses[2];
@@ -1148,10 +1358,11 @@ index d1485b2..a158537 100644
 +        Camera insets[2];
 +        XrTarget inset_targets[2];
 +        glm::vec4 inset_tangents{0.0f};
++        float inset_scale = 0.0f;  // the inset's field across, as a fraction of its eye's wide view
      };
      bool PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_open, Stereo& out);
      void FinishStereo(const Stereo& stereo);
-@@ -43,9 +51,17 @@ public:
+@@ -43,9 +52,17 @@ public:
  
      void Rumble(uint8_t large_motor, uint8_t small_motor);
      VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
@@ -1170,7 +1381,7 @@ index d1485b2..a158537 100644
  
      xr::Host& host_;
      const AppSettings::Vr& settings_;
-@@ -53,17 +69,30 @@ private:
+@@ -53,17 +70,36 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -1198,11 +1409,17 @@ index d1485b2..a158537 100644
 +    std::chrono::steady_clock::time_point dyn_since_{};    // the measurement window began
 +    std::chrono::steady_clock::time_point dyn_last_{};     // the last sample
 +    std::chrono::steady_clock::time_point dyn_changed_{};  // the last change
++    // The game's rumble (from its sound's motion channel, as on the PS4), counted for the log.
++    uint32_t rumble_pulses_ = 0;
++    uint32_t rumble_reached_ = 0;  // pulses that reached a controller's motor
++    float rumble_peak_ = 0.0f;
++    bool rumble_seen_ = false;
++    std::chrono::steady_clock::time_point rumble_since_{};
      xr::EyeFrustum frusta_[2];
      uint32_t raw_previous_ = 0;
      bool snap_armed_ = true;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..23870f2 100644
+index d629ab3..e5c7087 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -1607,7 +1824,7 @@ index d629ab3..23870f2 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4125,21 +4353,48 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4125,21 +4353,51 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  last_scene_time = game.Time();
                  vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
                                    lighting, vfx_pass, blend);
@@ -1622,6 +1839,8 @@ index d629ab3..23870f2 100644
 +                pt::Camera cull_camera = stereo.head;
 +                cull_camera.position -= cull_camera.Forward() * 0.1f;
 +                app.scene.SetVrCullCamera(&cull_camera);
++                // The insets take their eye's wide-view bloom (views 0, 1 are drawn before 2, 3).
++                app.scene.SetVrBloomShare(stereo.inset ? stereo.inset_scale : 0.0f);
 +#endif
 +                float frame_gpu_ms = 0.0f;
 +                for (int eye = 0; eye < views; ++eye) {
@@ -1656,11 +1875,12 @@ index d629ab3..23870f2 100644
 +#if PT_VISIONOS
 +                app.scene.SetVrLowDetail(false);
 +                app.scene.SetVrCullCamera(nullptr);
++                app.scene.SetVrBloomShare(0.0f);
 +#endif
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4823,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4826,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -1677,7 +1897,7 @@ index d629ab3..23870f2 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4869,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4872,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

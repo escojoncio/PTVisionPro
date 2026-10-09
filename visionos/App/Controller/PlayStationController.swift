@@ -362,8 +362,9 @@ final class PlayStationController: @unchecked Sendable {
 
     // MARK: - Haptics
 
-    /// A pulse of the game's: hand 0 left, 1 right, -1 both.
-    func playHaptic(hand: Int, amplitude: Float, seconds: Float) {
+    /// A pulse of the game's: hand 0 left, 1 right, -1 both. Returns how many motors it went to.
+    @discardableResult
+    func playHaptic(hand: Int, amplitude: Float, seconds: Float) -> Int {
         lock.lock()
         var targets: [HapticPulser] = []
         let hands = hand < 0 ? [0, 1] : [min(max(hand, 0), 1)]
@@ -385,6 +386,7 @@ final class PlayStationController: @unchecked Sendable {
         for pulser in targets {
             pulser.pulse(amplitude: amplitude, seconds: seconds)
         }
+        return targets.count
     }
 }
 

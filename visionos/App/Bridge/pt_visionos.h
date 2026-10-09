@@ -86,8 +86,8 @@ int pt_vp_attach_layer(void* layer_renderer);
 void pt_vp_set_controller(const pt_vp_controller* state);
 
 /// The game's haptics: hand 0 left, 1 right, -1 both; amplitude 0..1; seconds of the pulse.
-/// Called from the game thread.
-void pt_vp_haptics_callback(void (*cb)(int hand, float amplitude, float seconds));
+/// Called from the game thread; returns how many motors played it (0: no controller with them).
+void pt_vp_haptics_callback(int (*cb)(int hand, float amplitude, float seconds));
 
 /// The newest statistics (copied into *out).
 void pt_vp_stats_get(pt_vp_stats* out);
