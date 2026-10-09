@@ -125,7 +125,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (~17–20 fps), térmico serious. Por vista ~10–13 ms (gbuffer 1–2, lighting 3–4, compose 3–4,7, post 2,3 ancha /
   3,4 centro). Ajuste lineal frente a build 17: ~5 ms/MP + ~2,4 ms fijos por vista (sobre todo post). Los centros
   regrababan el atlas de sombras (2,5–3,5 ms más) porque la selección de luces/sombras depende del frustum.
-- **Build 19 (lanzada):**
+- **Build 19 (run_number 23): OK** → `releases/download/build-23/PTVisionPro-23.ipa` (sin probar):
   - `SceneRenderer::SetVrCullCamera(const Camera*)`: en `PrepareFrame`, culling de luces (planos, oclusores,
     `main_cull_view_projection_`, `LightLodScales`) y `BuildShadowViews` usan la cámara de culling;
     `main_view_.planes` y `main_view_.eye` se sustituyen y se restauran tras `BuildShadowViews` (los draws siguen
