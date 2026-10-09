@@ -163,7 +163,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
-- **Build 30: (pendiente de CI; sin probar)**:
+- **Build 30 (run 34): OK** → `releases/download/build-34/PTVisionPro-34.ipa` (sin probar):
   - Atlas de sombras estable (`BuildShadowViews`, scene_frame.cpp): `first` = primer hueco en orden de puntuación con la
     misma regla de presupuesto de vistas (decide QUÉ luces tienen sombra, igual que antes); luego esas mismas luces se
     colocan donde estaban el frame anterior (`shadow_slots_`, clave hash nombre + posición, copias de espejo con
