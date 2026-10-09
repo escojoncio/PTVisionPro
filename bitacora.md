@@ -115,6 +115,31 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 16:** estéreo y escenas inmersivas OK. Problemas: tras la escena inicial el jugador mira al
   revés; reflejos "bamboleantes"; el tamaño de imagen del menú no cambiaba nada (ojos 2696x2162 y render
   3419x2353 fijos desde el inicio). GPU 97–114 ms ambos ojos (~9 fps).
+- **Prueba build 17** (imagen 50 %, FOV 85 %, MetalFX off): ojos 1910x1532, render 2422x1667 (4 MP/ojo), GPU 46–56 ms
+  ambos ojos (~18–22 fps), térmico serious a los 80 s. Por ojo: lighting(+SSAO) 7–11, compose+forward+efectos 6–10,
+  gbuffer 2,4–5, post(+SSR) 3,3; sombras 1,5–3 (compartidas). MetalFX resta 3–4 fps. El usuario quiere los
+  reflejos (SSR) aunque bailen entre ojos. Culling existente: frustum por vista para draws (`Visible`, esferas
+  vs planos) y luces (frustum + volúmenes oclusores de autor, `light_cull`); sin occlusion culling de geometría
+  (el gbuffer es ~10 % del coste; el coste es por píxel).
+- **Build 18 (lanzada): foveado del juego (*quad views*)**:
+  - Por fotograma 4 renders al mismo tamaño R: vistas 0/1 = ojos (frustum unión de siempre) con imágenes de ojo a
+    `periphery`% del tamaño de imagen (`SetupEyes(..., eye_factor)`, `EyeFactor(h)`); vistas 2/3 = centros:
+    frustum simétrico `tan_y = center * frusta_[0].tan_y`, `tan_x = tan_y * aspect(R)`, cámara del ojo con otro
+    `fov_y` (`VrPlay::PrepareInsets`, `Stereo.insets/inset_targets/inset_tangents`), copiados enteros a
+    `Host::InsetSwapchain(i)` (`EnsureInsetImages(R)`, 3 imágenes por ojo, `inset_memory`). Densidad del centro =
+    `periphery/center` × tamaño de imagen; píxeles ≈ 4·periphery²·S (45/45: ~2,5× menos que antes).
+  - Compositor: tras el ojo, `inset_pipeline` (`eye_vertex` + `inset_fragment`, premultiplicado, fundido 12 % en
+    cada borde) sobre el rectángulo de tangentes del centro. `FrameLayers.inset/inset_tangents` (L,R,U,D);
+    `textures/next_image/last_index[6]` (4,5 = centros); keeper los reutiliza.
+  - Motor: `SceneRenderer::SetVrLowDetail` en vistas anchas (sin SSR ni SSS; SSAO se queda); SSR vuelve en el
+    resto. Sombras: la vista 0 graba el atlas, las demás lo reutilizan si las vistas de sombra coinciden.
+    Exposición medida solo en la vista 0 (`RecordLuminance` y `ReadMeasurements` saltan con `vr_eye_ > 0`).
+    Con 4 vistas los frame slots (2) se alternan: `ReportEye(view, views, ...)` etiqueta `(eye+2)%4`.
+  - Ajustes: `HeadsetSettings.game_foveation/periphery(30–70)/center(30–60)`, `PT_VP_GAME_FOVEATION/PERIPHERY/
+    CENTER`, menú VISION PRO (`kVpGameFoveation/kVpPeriphery/kVpCenter`, textos en `pc_settings.cpp`), launcher
+    (`PTSettings`, `SettingsView`, `GameRunner.settingFromGame`). `InsetWanted` sigue al `eye_factor` aplicado.
+    Presets: MetalFX off en ambos; M2 con SSAO y reflejos. Los presets se reaplican al cargar (`PTSettings.load`).
+  - `pt::visionos::RequestRecenter` restaurada (se había perdido en la edición).
 - **Build 17 (run_number 21): OK** → `releases/download/build-21/PTVisionPro-21.ipa` (la recomendada; sin probar en el visor):
   - Mirar al revés: el centrado (base del rig = yaw de la cámara, 0) ocurre antes del spawn (yaw 180) y el primer
     look de la cabeza ignoraba el rumbo del juego. `Player::SetVrReference(yaw)` (player.h, nuevo) llamado al
@@ -363,11 +388,10 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 
 ## Pendiente (siguiente sesión, en orden)
 
-0. Rendimiento (~9 fps, limitado por píxeles): *quad views* (por ojo: campo completo a baja resolución + centro
-   ~45° a la resolución actual, mismo tamaño de render para no recrear objetivos; el compositor Metal funde con
-   borde suave; vistas simétricas, sin tocar la proyección del motor), caché de sombras estáticas (11–13 ms),
-   profundidad al drawable para reproyección posicional a 45 fps. Comodidad: fundido/viñeta en cortes de cámara
-   de las escenas.
+0. Medir build 18 (log `vr pace` con 4 vistas) y calibrar periphery/center por defecto. Siguiente: resolución
+   dinámica por tiempo de GPU, caché de sombras estáticas, profundidad al drawable (reproyección posicional),
+   inset por ojo (hoy simétrico sobre la tangente unión: el lado nasal se dibuja de más), anillo en el borde del
+   centro (SSR solo dentro). Comodidad: fundido en cortes de cámara de escenas.
 1. Primera prueba en el visor (build 8): ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
    -Z adelante, igual que OpenXR; si la imagen sale girada revisar `QuatOf`/tangentes) y la
    altura (ARKit origen en el suelo; `VrPlay` recentra en la cabeza).
