@@ -125,6 +125,13 @@ struct SettingsView: View {
             Toggle(L("Oclusión ambiental (SSAO)", "Ambient occlusion (SSAO)"), isOn: bool(\.ssao))
             Toggle(L("Bloom", "Bloom"), isOn: bool(\.bloom))
             Toggle(L("Reflejos", "Reflections"), isOn: bool(\.reflections))
+            Picker(L("Filtrado anisotrópico", "Anisotropic filtering"), selection: int(\.anisotropy)) {
+                Text(L("No (trilineal)", "Off (trilinear)")).tag(0)
+                Text("2x").tag(2)
+                Text("4x").tag(4)
+                Text("8x").tag(8)
+                Text("16x").tag(16)
+            }
         } header: {
             Text(L("Gráficos", "Graphics"))
         }

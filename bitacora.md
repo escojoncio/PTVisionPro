@@ -143,6 +143,16 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   Periferia 30 / centro 60: GPU 27 ms (34 fps). Ajuste: ≈6 ms/MP + ≈10 ms fijos por frame. Centro nítido no cambia fps
   (mismos píxeles); al usuario el 60 le da más calidad (más área nítida). Resolución dinámica: bajó a 50 % (770×530)
   para 45 fps → borrón inaceptable; queda apagada y descartada como solución. Sombras 2,3–2,9 ms/frame.
+- **Prueba build 24 (run 28):** encuadre propio OK, sin artefactos reportados. 1214×974 por vista. GPU 30 ms al inicio
+  (31–37 fps), 36–44 ms después (21–26 fps); térmico serious a ~2 min. Por vista: lighting 3,1–3,3 (lights 2,3–2,6),
+  gbuffer 2,1–2,3, compose+forward 2,9–3,2 ancha / 1,8 centro, post 2,3 ancha (bloom 1,5) / 0,7 centro, shadows 1,4–1,8,
+  occlusion 0,8, reflections 0,85 (centros). Anisotrópico 2→16x: gbuffer +~0,1 ms/vista. El usuario exige ≥4–8x:
+  cambia el sombreado visible (normal maps a ángulos rasantes).
+- **Build 25:** anisotrópico como ajuste del visor: `Preset.anisotropy` (M2 8, M5 16) en `kPresets`, `MatchesPreset`,
+  `ApplyPreset`/`GraphicsChanged` informan `anisotropy`, `AnisotropyStep`, `PT_VP_ANISOTROPY` (por defecto 8) aplicado tras
+  `ApplyGraphicsPreset` en `ApplySettings`; main.cpp: `kVpPreset` llama `textures.SetAnisotropy`, `kAnisotropy` dispara
+  `GraphicsChanged`. Swift: `PTSettings.anisotropy` (defaults, apply, matches, CodingKeys, env), Picker en
+  `SettingsView` (Gráficos), `GameRunner` clave `anisotropy`.
 - **Build 24 (run 28): OK** → `releases/download/build-28/PTVisionPro-28.ipa` (sin probar):
   - Encuadre propio por ojo (asimétrico) en visionOS: `xr::OwnRenderSize`/`xr::OwnFrustumFor` (xr_view.h);
     `Camera::offset` (camera.h, mismo convenio que el jitter: `p[2][0] = -offset.x`, `p[2][1] = -offset.y`);
