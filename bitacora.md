@@ -168,7 +168,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   1,4–2,7 (ahora todo el ojo), occlusion 1,3, gbuffer 1,1–2,3, probes 0,25–1,3 (arreglado). Conclusión medida: coste ≈ 7 ms
   por MP y frame, casi sin coste fijo por vista; con los mismos píxeles el foveado no gana. Usuario: cuadrados negros al girar
   la cabeza (centro o lados) y un hueco abajo del campo; ve más resolución pero no más fps. Sin diagnosticar.
-- **Build 34 (pendiente):** VRR apagado por defecto (`VrrWanted`: solo con `PT_VP_VRR=1`); vuelven las 4 vistas. Código VRR
+- **Build 34 (run 38): OK** → `releases/download/build-38/PTVisionPro-38.ipa` (sin probar): VRR apagado por defecto (`VrrWanted`: solo con `PT_VP_VRR=1`); vuelven las 4 vistas. Código VRR
   y parche de MoltenVK se quedan. Siguiente: presupuesto de píxeles (≈2,8 MP/frame para 20 ms a coste actual): periferia de
   las anchas más baja (ajuste ya existente 30–70 %) y/o píxeles más baratos (partículas, SSR solo centro).
 - **Prueba build 32 (log pt (19)):** VRR activo (`GPU 2 views`). 2022x1622 lógico en 1788x1473 físico (2,63 MP/ojo frente a 2,36:
