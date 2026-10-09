@@ -121,6 +121,19 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   reflejos (SSR) aunque bailen entre ojos. Culling existente: frustum por vista para draws (`Visible`, esferas
   vs planos) y luces (frustum + volúmenes oclusores de autor, `light_cull`); sin occlusion culling de geometría
   (el gbuffer es ~10 % del coste; el coste es por píxel).
+- **Prueba build 18** (M2: imagen 60 %, periferia/centro 45 %, sombras altas): R 1539x1059, 4 vistas 45–56 ms
+  (~17–20 fps), térmico serious. Por vista ~10–13 ms (gbuffer 1–2, lighting 3–4, compose 3–4,7, post 2,3 ancha /
+  3,4 centro). Ajuste lineal frente a build 17: ~5 ms/MP + ~2,4 ms fijos por vista (sobre todo post). Los centros
+  regrababan el atlas de sombras (2,5–3,5 ms más) porque la selección de luces/sombras depende del frustum.
+- **Build 19 (lanzada):**
+  - `SceneRenderer::SetVrCullCamera(const Camera*)`: en `PrepareFrame`, culling de luces (planos, oclusores,
+    `main_cull_view_projection_`, `LightLodScales`) y `BuildShadowViews` usan la cámara de culling;
+    `main_view_.planes` y `main_view_.eye` se sustituyen y se restauran tras `BuildShadowViews` (los draws siguen
+    culleados por vista). main.cpp la pone para las 4 vistas: `stereo.head` retrasada 0,1 m (su frustum contiene
+    los de los dos ojos). Pendiente: con espejo activo `same()` sigue fallando (índice `sv.view`, candidatos del
+    espejo por vista); oclusión de luces calculada desde la cabeza (riesgo de pop en marcos de puerta).
+  - Log `vr pace` añade `composition X ms` (GPU de nuestra pasada Metal, `g_composite_ms` por completion handler).
+  - Presets M2 y M5: sombras altas (`kPresets`, `PTSettings.defaults`).
 - **Build 18 (run_number 22): OK** → `releases/download/build-22/PTVisionPro-22.ipa` (sin probar). **Foveado del juego (*quad views*)**:
   - Por fotograma 4 renders al mismo tamaño R: vistas 0/1 = ojos (frustum unión de siempre) con imágenes de ojo a
     `periphery`% del tamaño de imagen (`SetupEyes(..., eye_factor)`, `EyeFactor(h)`); vistas 2/3 = centros:

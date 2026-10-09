@@ -65,6 +65,9 @@
 namespace pt::visionos {
 std::atomic<int64_t> g_loop_ns{0};
 std::atomic<unsigned> g_game_thread{0};
+// The GPU time of the last composition (our Metal pass onto the headset's drawable, MetalFX
+// included), for the log: it is GPU work besides the game's views.
+std::atomic<float> g_composite_ms{0.0f};
 inline void LoopTick() {
     g_loop_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
                     std::memory_order_relaxed);
@@ -1804,6 +1807,10 @@ void Host::EndFrame(const FrameLayers& layers) {
     }
     id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
     cb.label = @"P.T. composite";
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+        const double ms = (done.GPUEndTime - done.GPUStartTime) * 1000.0;
+        if (ms > 0.0 && ms < 1000.0) pt::visionos::g_composite_ms.store(static_cast<float>(ms), std::memory_order_relaxed);
+    }];
     ComposeFrame(*this, x, x.drawable, layers, x.origin_from_device, should_render_, cb);
     cp_drawable_encode_present(x.drawable, cb);
     [cb commit];
@@ -1961,8 +1968,8 @@ struct Preset {
     bool metalfx;
 };
 constexpr Preset kPresets[2] = {
-    {0.60f, 1, true, true, true, false},    // Vision Pro M2
-    {0.85f, 2, true, true, true, false},    // Vision Pro M5
+    {0.60f, 3, true, true, true, false},    // Vision Pro M2 (shadows as on PS4)
+    {0.85f, 3, true, true, true, false},    // Vision Pro M5
 };
 
 const char* ShadowName(int quality) {
@@ -2113,6 +2120,7 @@ struct EyeTimes {
     double sum_gpu = 0.0;
     double sum_pass[4][6] = {};
     double sum_cpu = 0.0;
+    double sum_composite = 0.0;
     uint64_t samples = 0;
     int views = 2;
     std::chrono::steady_clock::time_point since = std::chrono::steady_clock::now();
@@ -2137,7 +2145,7 @@ void ReportEye(int view, int views, float gpu_ms, const float pass_ms[6], float 
     if (views != t.views) {
         // Another way of drawing (the inset on or off): the averages start again.
         t.views = views;
-        t.sum_gpu = t.sum_cpu = 0.0;
+        t.sum_gpu = t.sum_cpu = t.sum_composite = 0.0;
         for (auto& e : t.sum_pass) for (double& v : e) v = 0.0;
         t.samples = 0;
         t.since = std::chrono::steady_clock::now();
@@ -2159,6 +2167,7 @@ void ReportEye(int view, int views, float gpu_ms, const float pass_ms[6], float 
     }
     t.sum_gpu += all;
     t.sum_cpu += cpu;
+    t.sum_composite += g_composite_ms.load(std::memory_order_relaxed);
     for (int v = 0; v < views; ++v) {
         for (int i = 0; i < 6; ++i) t.sum_pass[v][i] += t.pass[v][i];
     }
@@ -2181,9 +2190,11 @@ void ReportEye(int view, int views, float gpu_ms, const float pass_ms[6], float 
     };
     std::string detail = std::format("left: {}; right: {}", passes(0), passes(1));
     if (views == 4) detail += std::format("; left inset: {}; right inset: {}", passes(2), passes(3));
-    LogInfo("vr pace: {:.1f} frames shown/s, GPU {} views {:.2f} ms ({}), CPU recording {:.2f} ms, eyes {}x{}, MetalFX {}, thermal {}", fps, views,
-            t.sum_gpu / n, detail, t.sum_cpu / n, width, height, Headset().metalfx ? "on" : "off", pt_apple_thermal_state());
-    t.sum_gpu = t.sum_cpu = 0.0;
+    LogInfo("vr pace: {:.1f} frames shown/s, GPU {} views {:.2f} ms + composition {:.2f} ms ({}), CPU recording {:.2f} ms, eyes {}x{}, MetalFX {}, "
+            "thermal {}",
+            fps, views, t.sum_gpu / n, t.sum_composite / n, detail, t.sum_cpu / n, width, height, Headset().metalfx ? "on" : "off",
+            pt_apple_thermal_state());
+    t.sum_gpu = t.sum_cpu = t.sum_composite = 0.0;
     for (auto& e : t.sum_pass) for (double& v : e) v = 0.0;
     t.samples = 0;
     t.since = now;
