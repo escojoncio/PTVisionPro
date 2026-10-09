@@ -588,6 +588,23 @@ partículas al centro (~1,3 + 1–2 ms por centro) → ganancia neta ≈ 0–1,5
 Siguiente (tras build 29): prototipo de foveado en una pasada (VRR, `MTLRasterizationRateMap` en las pasadas de MoltenVK)
 frente a máscara del centro en las vistas anchas; medir con `cull (...)` y `gpu labels` si `lighting/lights` baja al mirar paredes.
 
+Tras build 30 (log pt (17)), decisión: el usuario rechaza ritmo fijo/reproyección como sustituto ("rendimiento real, no
+fingido"). Objetivo = GPU ≤ 20 ms reales (100 Hz) con la calidad actual. Desglose medio del pasillo (ms por vista):
+ancha 10,5 (lights 2,4, probes 0,5, gbuffer 1,7, compose 2,6 [particles 0,9], post 2,1 [bloom 1,3], SSAO 0,6, sombras 0,9);
+centro 8,5 (lights 2,3, gbuffer 1,7, compose 1,6, reflejos 0,8, post 0,7). Recortes reales estimados:
+- Bloom: 20 rondas Kawase + suma = 41 pasadas a 337×270 (coste casi todo fijo por pasada). Sustituir por suma de pocas
+  gaussianas separables ajustadas al mismo núcleo (a menor resolución): −1,0 ms por ancha (−2 a −2,5 ms/frame).
+- Centro dibujado dos veces: la ancha sombrea ~36 % de su área bajo el centro (máscara/estencil en gbuffer, luces, SSAO;
+  rellenar ese hueco con el centro reducido antes de bloom/partículas): ≈ −5 ms/frame.
+- Luces por teselas (lista por tesela 16×16, gbuffer leído una vez): ≈ −3 a −5 ms/frame (incierto).
+- MetalFX temporal en la composición (ojo a 67 %, profundidad + vectores de movimiento exportados, jitter del motor,
+  previos por vista): único recorte que reduce a la mitad el sombreado; sustituye al FXAA (menos dientes de sierra).
+  Requiere matrices previas por vista (hoy el "previo" es la vista anterior = el otro ojo). Pendiente de visto bueno del
+  usuario (calidad de imagen).
+Sin MetalFX temporal el techo estimado es ~27 ms (≈35–37 fps reales); con él, ~20 ms.
+Descartado por ahora (cambio revertido sin publicar): ritmo adaptativo (`Pace`, `g_pace_*`, `Impl::cadence`) y profundidad al
+drawable por copia `D32` → imagen exportada → `[[depth(any)]]` en `eye_fragment` (diseño válido para cuando haya rendimiento).
+
 Anterior (tras el log de build 24): coste fijo por frame (~10 ms): sombras 2,3–2,9 ms (caché de sombras estáticas),
 post/bloom de las anchas, iluminación; formatos de luz más ligeros (R11G11B10F) si no cambian la imagen; máscara del
 centro en las vistas anchas (no dibujar bajo el inset). Fusionar pasadas para la GPU de tiles.
