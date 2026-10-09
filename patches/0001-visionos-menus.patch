@@ -310,7 +310,7 @@ index 9bb3b5d..c4444bd 100644
      float grain[4] = {0.0f, 0.0f, 0.0f, 0.0f};
      float grain_offset[2] = {0.0f, 0.0f};
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..ec1c0bf 100644
+index 40d339d..c59b97c 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -329,6 +329,13 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -395,7 +395,120 @@ index 40d339d..ec1c0bf 100644
      if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
          std::map<std::string, std::pair<bool, float>> now;
          for (uint32_t i = 0; i < light_count_; ++i) {
-@@ -1232,14 +1253,99 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -984,18 +1005,108 @@ void SceneRenderer::BuildShadowViews(const SceneLighting& lighting, const glm::v
+         }
+         return false;
+     };
+-    for (const Candidate& c : candidates) {
++    // Where each light's shadow goes in the atlas. Which lights get one is the game's choice: first
++    // fit in score order, as before (`first`). The scores follow the camera, so that order, and
++    // with it every light's tile, changed as the player moved, and the tile cache (RecordShadows)
++    // found nothing to keep. So the same lights are then placed where they were the frame before
++    // when that place is free, the others first fit; if that cannot place them all, the first fit
++    // stands. Same lights, same shadows, same picture; only the tiles' places differ.
++    // PT_SHADOW_STICKY=0 turns it off.
++    struct Place {
++        bool placed = false;
++        uint32_t tx = 0;
++        uint32_t ty = 0;
++    };
++    std::vector<Place> first(candidates.size());
++    {
++        uint32_t views = view_count_;
++        for (size_t i = 0; i < candidates.size(); ++i) {
++            if (views + 2 > gpu::kMaxViews) {
++                break;
++            }
++            const bool spot = frame_->lights[candidates[i].light].position.w > 0.5f;
++            first[i].placed = allocate(spot ? 1u : 2u, 1u, first[i].tx, first[i].ty);
++            views += first[i].placed ? (spot ? 1u : 2u) : 0u;
++        }
++    }
++    auto slot_key = [&](uint32_t light) {
++        const SceneLight* l = light_sources_[light];
++        uint64_t h = std::hash<std::string>{}(l->name);
++        uint32_t bits[3];
++        std::memcpy(bits, &l->position, sizeof(bits));
++        for (uint32_t b : bits) {
++            h = (h ^ b) * 1099511628211ull;
++        }
++        // A mirror's copy of a light (pushed after the frame's lights) keeps its own place.
++        if (light >= light_count_) {
++            h ^= 0x9e3779b97f4a7c15ull;
++        }
++        return h;
++    };
++    std::vector<Place> place = first;
++    static const bool sticky_off = [] {
++        const char* v = std::getenv("PT_SHADOW_STICKY");
++        return v && std::string_view(v) == "0";
++    }();
++    if (!sticky_off) {
++        std::memset(used, 0, sizeof(used));
++        std::vector<Place> sticky(candidates.size());
++        bool all = true;
++        for (int round = 0; round < 2 && all; ++round) {
++            for (size_t i = 0; i < candidates.size(); ++i) {
++                if (!first[i].placed || sticky[i].placed) {
++                    continue;
++                }
++                const bool spot = frame_->lights[candidates[i].light].position.w > 0.5f;
++                const uint32_t width = spot ? 1u : 2u;
++                if (round == 0) {
++                    const auto it = shadow_slots_.find(slot_key(candidates[i].light));
++                    if (it == shadow_slots_.end() || it->second.width != width) {
++                        continue;
++                    }
++                    const uint32_t x = it->second.tx;
++                    const uint32_t y = it->second.ty;
++                    bool free = x + width <= kShadowTiles && y < kShadowTiles;
++                    for (uint32_t k = 0; free && k < width; ++k) {
++                        free = !used[y][x + k];
++                    }
++                    if (!free) {
++                        continue;
++                    }
++                    for (uint32_t k = 0; k < width; ++k) {
++                        used[y][x + k] = true;
++                    }
++                    sticky[i] = Place{true, x, y};
++                } else {
++                    sticky[i].placed = allocate(width, 1u, sticky[i].tx, sticky[i].ty);
++                    all = all && sticky[i].placed;
++                }
++            }
++        }
++        if (all) {
++            place = std::move(sticky);
++        }
++    }
++    shadow_slots_.clear();
++    for (size_t i = 0; i < candidates.size(); ++i) {
++        if (place[i].placed) {
++            const bool spot = frame_->lights[candidates[i].light].position.w > 0.5f;
++            shadow_slots_[slot_key(candidates[i].light)] = ShadowSlot{place[i].tx, place[i].ty, spot ? 1u : 2u};
++        }
++    }
++    for (size_t ci = 0; ci < candidates.size(); ++ci) {
++        const Candidate& c = candidates[ci];
+         if (view_count_ + 2 > gpu::kMaxViews) {
+             break;
+         }
+         gpu::Light& g = frame_->lights[c.light];
+         const SceneLight* src = light_sources_[c.light];
+         const bool spot = g.position.w > 0.5f;
+-        uint32_t tx = 0;
+-        uint32_t ty = 0;
+-        if (!allocate(spot ? 1u : 2u, 1u, tx, ty)) {
++        if (!place[ci].placed) {
+             continue;
+         }
++        const uint32_t tx = place[ci].tx;
++        const uint32_t ty = place[ci].ty;
+         const float tile_uv = static_cast<float>(shadow_tile) / static_cast<float>(shadow_size);
+         const glm::vec3 pos = glm::vec3(g.position);
+         if (spot) {
+@@ -1232,14 +1343,99 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
      if (shadow_views_.empty()) {
          return;
      }
@@ -501,7 +614,7 @@ index 40d339d..ec1c0bf 100644
          SetViewport(cmd, sv.rect);
          vkCmdSetDepthBias(cmd, sv.bias_constant, 0.0f, sv.bias_slope);
          const uint8_t casters = sv.casters;
-@@ -1264,8 +1370,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -1264,8 +1460,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
              }
              DrawMesh(cmd, d, sv.view, 0, false, false, nullptr, sv.cull, true);
          }
@@ -511,7 +624,7 @@ index 40d339d..ec1c0bf 100644
      UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
  }
  
-@@ -1282,6 +1388,7 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1282,6 +1478,7 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
          debug_flags = 3;
      }
      const glm::vec4 aux[2] = {glm::vec4(0.0f), glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(reflection_cube_))};
@@ -519,7 +632,7 @@ index 40d339d..ec1c0bf 100644
      for (int pass = 0; pass < 2; ++pass) {
          vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 0 ? gbuffer_ : decal_);
          if (pass == 1) {
-@@ -1293,9 +1400,13 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1293,9 +1490,13 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
                  continue;
              }
              DrawMesh(cmd, d, view.index, debug_flags, view.mirrored, false, aux);
@@ -533,7 +646,7 @@ index 40d339d..ec1c0bf 100644
  }
  
  void SceneRenderer::RecordOcclusion(VkCommandBuffer cmd, const ViewSetup& view) {
-@@ -1422,6 +1533,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1422,6 +1623,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          }
      };
      if (probes) {
@@ -541,7 +654,7 @@ index 40d339d..ec1c0bf 100644
          UseTargets(cmd, {{&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
                           {&probe_acc_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
-@@ -1431,7 +1543,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1431,7 +1633,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          draw_probes(shrink ? 1u : 0u);
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&probe_acc_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -551,7 +664,7 @@ index 40d339d..ec1c0bf 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1447,7 +1561,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1447,7 +1651,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          vkCmdDraw(cmd, 3, 1, 0, 0);
      }
      const bool contact = rt_contact_active_ && view.index == main_view_.index;
@@ -586,7 +699,7 @@ index 40d339d..ec1c0bf 100644
          if (rt_active_ || contact) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rt_active_ ? light_rt_ : light_contact_);
              const VkDescriptorSet rt_set = rt_->Set(renderer_->FrameIndex());
-@@ -1455,8 +1595,61 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1455,8 +1685,61 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          } else {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, light_);
          }
@@ -649,7 +762,7 @@ index 40d339d..ec1c0bf 100644
              const SceneLight& l = *light_sources_[i];
              if (const char* only = std::getenv("PT_LIGHT_DRAW_ONLY"); only && l.name.find(only) == std::string::npos) {
                  continue;
-@@ -1464,15 +1657,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1464,15 +1747,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              if ((l.hidden_views & view.view_bit) != 0) {
                  continue;
              }
@@ -681,7 +794,7 @@ index 40d339d..ec1c0bf 100644
              gpu::PassPush push;
              const uint32_t mirror_light = mirror_shadow_lights_[i];
              const bool has_shadow = view.view_bit == 2 ? mirror_light != gpu::kInvalid : (light_shadow_views_[i] & view.view_bit) != 0;
-@@ -1486,10 +1688,48 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1486,10 +1778,48 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              push.m = volume;
              PushConstants(cmd, &push, sizeof(push));
              vkCmdDraw(cmd, 36, 1, 0, 0);
@@ -730,7 +843,7 @@ index 40d339d..ec1c0bf 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +2022,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +2112,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -799,7 +912,7 @@ index 40d339d..ec1c0bf 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +2094,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +2184,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -807,7 +920,7 @@ index 40d339d..ec1c0bf 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +2105,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +2195,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -847,7 +960,7 @@ index 40d339d..ec1c0bf 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +2130,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2220,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -855,7 +968,7 @@ index 40d339d..ec1c0bf 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2386,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2476,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -870,7 +983,7 @@ index 40d339d..ec1c0bf 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2399,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2489,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -879,7 +992,7 @@ index 40d339d..ec1c0bf 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2424,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2514,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -896,7 +1009,7 @@ index 40d339d..ec1c0bf 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2441,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2531,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -904,7 +1017,7 @@ index 40d339d..ec1c0bf 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2476,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2566,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -912,7 +1025,7 @@ index 40d339d..ec1c0bf 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2534,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2624,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -925,7 +1038,7 @@ index 40d339d..ec1c0bf 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2551,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2641,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -941,7 +1054,7 @@ index 40d339d..ec1c0bf 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2641,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2731,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -1002,7 +1115,7 @@ index 40d339d..ec1c0bf 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2815,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2905,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -1027,10 +1140,18 @@ index 40d339d..ec1c0bf 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
-index 19dd1a8..e8a74e6 100644
+index 19dd1a8..f100147 100644
 --- a/src/engine/render/scene_post.cpp
 +++ b/src/engine/render/scene_post.cpp
-@@ -88,7 +88,15 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -5,6 +5,7 @@
+ #include <cstdlib>
+ #include <string>
+ 
++#include "engine/core/log.h"
+ #include "engine/render/scene_renderer.h"
+ 
+ namespace pt {
+@@ -88,7 +89,15 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      }
  
      const bool bloom = toggles.bloom && lighting.valid && std::abs(exposure.bloom_size) >= 1.0e-5f;
@@ -1047,7 +1168,19 @@ index 19dd1a8..e8a74e6 100644
          UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[0], false, {}}});
          push.f0 = BloomPolynomial(exposure.bloom_extraction);
-@@ -134,19 +142,30 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -111,6 +120,11 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+             blur(1, 2, gaussian_, glm::vec4(0.0f, 1.0f, 0.0f, 0.0f), false);
+         } else {
+             const int passes = std::clamp(static_cast<int>(std::floor(size * 10.0f)), 1, 64);
++            if (static int logged_passes = -1; logged_passes != passes) {
++                logged_passes = passes;
++                LogInfo("bloom: size {:.3f} weight {:.3f}: {} blur rounds (2 passes each) at {}x{}", size, weight, passes,
++                        bloom_[0].Extent().width, bloom_[0].Extent().height);
++            }
+             static const bool separate_add = std::getenv("PT_BLOOM_SEPARATE_ADD") != nullptr;
+             const glm::vec4 saved_f1 = push.f1;
+             for (int i = 0; i < passes; ++i) {
+@@ -134,19 +148,30 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
              push.f1 = saved_f1;
          }
          UseTargets(cmd, {{&bloom_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -1084,7 +1217,7 @@ index 19dd1a8..e8a74e6 100644
      UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&ldr_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
      BeginPass(cmd, output_extent_, {{&ldr_[0], false, {}}});
      push.ids.x = 0;
-@@ -158,12 +177,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -158,12 +183,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          push.f0.y = 0.0f;
          push.f0.w = 0.0f;
      }
@@ -1103,7 +1236,7 @@ index 19dd1a8..e8a74e6 100644
          RenderTarget& dst = ldr_[1 - current];
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, output_extent_, {{&dst, false, {}}});
-@@ -171,11 +195,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -171,11 +201,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
          current = 1 - current;
@@ -1117,7 +1250,7 @@ index 19dd1a8..e8a74e6 100644
      }
      if (toggles.depth_of_field && screen.depth_of_field && lighting.valid) {
          RecordDepthOfField(cmd, screen, current);
-@@ -187,7 +212,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -187,7 +218,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          gpu::PassPush lut;
          lut.ids = glm::uvec4(ldr_index(current), 1, 0, post_view_);
          lut.f0 = glm::vec4(0.0f, lut_blend, 1.0f, 1.0f);
@@ -1126,7 +1259,7 @@ index 19dd1a8..e8a74e6 100644
      }
  
      const bool blur = toggles.full_screen_blur && screen.full_screen_blur && lighting.valid;
-@@ -203,7 +228,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -203,7 +234,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          const float share = std::clamp(dt * 30.0f, 0.05f, 2.0f);
          const float rate = std::pow(std::clamp(screen.blur_blend_rate, 0.0f, 0.999f), share);
          push.f0 = glm::vec4(screen.blur_fetch_band * std::sqrt(share), rate, 0.0f, 0.0f);
@@ -1135,7 +1268,7 @@ index 19dd1a8..e8a74e6 100644
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
          CopyToHistory(cmd, ldr_[current]);
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
-@@ -214,9 +239,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -214,9 +245,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      if (screen.colour_banding_canceller && lighting.valid) {
          UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
          push.ids = glm::uvec4(ldr_index(current), 0, 0, main_view_.index);
@@ -1147,7 +1280,7 @@ index 19dd1a8..e8a74e6 100644
      RenderTarget output;
      output.image = renderer_->SceneColor();
      output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-@@ -225,7 +251,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -225,7 +257,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      push.ids = glm::uvec4(ldr_index(current), 0, 0, post_view_);
      const bool grain = toggles.film_grain && screen.film_grain && lighting.valid;
      const bool distortion = toggles.distortion && screen.screen_distortion && lighting.valid;
@@ -1159,7 +1292,7 @@ index 19dd1a8..e8a74e6 100644
      push.f1 = glm::vec4(graphics.clarity, 0.0f, 0.0f, 0.0f);
      Fullscreen(cmd, screen_fx_, push);
      renderer_->grain[0] = grain ? 1.0f : 0.0f;
-@@ -240,6 +269,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -240,6 +275,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      }
      vkCmdEndRendering(cmd);
@@ -1368,7 +1501,7 @@ index 1f96981..edde8a6 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..a1cdf94 100644
+index 6c9b165..f0dae50 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
 @@ -206,6 +206,30 @@ public:
@@ -1483,7 +1616,7 @@ index 6c9b165..a1cdf94 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -395,6 +471,17 @@ private:
+@@ -395,6 +471,24 @@ private:
      RenderTarget reflect_offset_;
      RenderTarget reflect_history_[2];
      RenderTarget shadow_;
@@ -1495,13 +1628,20 @@ index 6c9b165..a1cdf94 100644
 +        uint64_t key = 0;
 +    };
 +    std::vector<ShadowTileKey> shadow_tiles_;
++    // Each shadowed light's place in the atlas last frame (BuildShadowViews keeps it there).
++    struct ShadowSlot {
++        uint32_t tx = 0;
++        uint32_t ty = 0;
++        uint32_t width = 0;
++    };
++    std::unordered_map<uint64_t, ShadowSlot> shadow_slots_;
 +    uint32_t shadow_tiles_kept_ = 0;
 +    uint32_t shadow_tiles_drawn_ = 0;
 +    std::chrono::steady_clock::time_point shadow_tiles_logged_{};
      RenderTarget ao_[2];
      RenderTarget refmap_;
      RenderTarget hdr_copy_;
-@@ -441,6 +528,8 @@ private:
+@@ -441,6 +535,8 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -1510,7 +1650,7 @@ index 6c9b165..a1cdf94 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -636,6 +725,26 @@ private:
+@@ -636,6 +732,26 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
