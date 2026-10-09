@@ -2015,10 +2015,11 @@ struct Preset {
     bool reflections;
     bool metalfx;
     int fps;  // 45: a picture every other refresh (half the display's rate)
+    int anisotropy;  // the textures' anisotropic filtering (0 off, 2, 4, 8, 16)
 };
 constexpr Preset kPresets[2] = {
-    {0.60f, 3, true, true, true, false, 45},    // Vision Pro M2 (shadows as on PS4)
-    {0.85f, 3, true, true, true, false, 90},    // Vision Pro M5
+    {0.60f, 3, true, true, true, false, 45, 8},     // Vision Pro M2 (shadows as on PS4)
+    {0.85f, 3, true, true, true, false, 90, 16},    // Vision Pro M5
 };
 
 const char* ShadowName(int quality) {
@@ -2036,7 +2037,12 @@ bool MatchesPreset(int preset, const AppSettings& s, const HeadsetSettings& h) {
     return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == p.fps && h.foveation && h.metalfx == p.metalfx && h.fov == 100 &&
            !h.dynamic_resolution &&
            s.graphics.shadow_quality == p.shadow_quality && s.graphics.ambient_occlusion == p.ssao && s.graphics.bloom == p.bloom &&
-           s.graphics.reflections == p.reflections;
+           s.graphics.reflections == p.reflections && s.graphics.anisotropy == p.anisotropy;
+}
+
+// The filtering steps the game knows (its menu's values).
+int AnisotropyStep(int value) {
+    return value >= 16 ? 16 : value >= 8 ? 8 : value >= 4 ? 4 : value >= 2 ? 2 : 0;
 }
 }  // namespace
 
@@ -2061,6 +2067,7 @@ void GraphicsChanged(const AppSettings& s) {
     SettingChanged("ssao", s.graphics.ambient_occlusion ? "1" : "0");
     SettingChanged("bloom", s.graphics.bloom ? "1" : "0");
     SettingChanged("reflections", s.graphics.reflections ? "1" : "0");
+    SettingChanged("anisotropy", std::to_string(s.graphics.anisotropy));
     HeadsetSettings& h = Headset();
     if (h.preset != 2 && !MatchesPreset(h.preset, s, h)) {
         h.preset = 2;
@@ -2089,6 +2096,7 @@ void ApplyPreset(int preset, AppSettings& s) {
     s.graphics.ambient_occlusion = p.ssao;
     s.graphics.bloom = p.bloom;
     s.graphics.reflections = p.reflections;
+    s.graphics.anisotropy = p.anisotropy;
     SettingChanged("preset", h.preset == 0 ? "m2" : "m5");
     SettingChanged("resolution_scale", std::format("{:.2f}", p.resolution_scale));
     SettingChanged("target_fps", std::to_string(p.fps));
@@ -2100,6 +2108,7 @@ void ApplyPreset(int preset, AppSettings& s) {
     SettingChanged("ssao", p.ssao ? "1" : "0");
     SettingChanged("bloom", p.bloom ? "1" : "0");
     SettingChanged("reflections", p.reflections ? "1" : "0");
+    SettingChanged("anisotropy", std::to_string(p.anisotropy));
 }
 
 void ApplySettings(AppSettings& s) {
@@ -2152,6 +2161,9 @@ void ApplySettings(AppSettings& s) {
     s.graphics.ambient_occlusion = Flag("PT_VP_SSAO", false);
     s.graphics.bloom = Flag("PT_VP_BLOOM", true);
     s.graphics.reflections = Flag("PT_VP_REFLECTIONS", false);
+    // Anisotropic filtering: in the headset the floor and walls are seen at steep angles, where
+    // trilinear filtering blurs their detail away (and with it the shading their normal maps give).
+    s.graphics.anisotropy = AnisotropyStep(static_cast<int>(Number("PT_VP_ANISOTROPY", 8.0f)));
     // Never in the eyes (docs/vr.md); off for the virtual screen as well.
     s.graphics.motion_blur = false;
     s.graphics.depth_of_field = false;
@@ -2163,10 +2175,10 @@ void ApplySettings(AppSettings& s) {
     s.camera.third_person = false;
     s.extras.livesplit = false;
     LogInfo("visionos: {} headset, preset {}, image {:.0f} %, {} frames a second, dynamic resolution {}, foveation {}, MetalFX {}, shadows {}, SSAO {}, bloom {}, "
-            "reflections {}",
+            "reflections {}, anisotropic filtering {}x",
             h.device_m5 ? "M5" : "M2", h.preset == 0 ? "M2" : h.preset == 1 ? "M5" : "custom", h.resolution_scale * 100.0f, h.target_fps,
             h.dynamic_resolution ? "on" : "off", h.foveation ? "on" : "off", h.metalfx ? "on" : "off",
-            ShadowName(s.graphics.shadow_quality), s.graphics.ambient_occlusion, s.graphics.bloom, s.graphics.reflections);
+            ShadowName(s.graphics.shadow_quality), s.graphics.ambient_occlusion, s.graphics.bloom, s.graphics.reflections, s.graphics.anisotropy);
 }
 
 namespace {

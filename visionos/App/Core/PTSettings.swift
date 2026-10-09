@@ -40,6 +40,8 @@ struct PTSettings: Codable, Equatable {
     var ssao = false
     var bloom = true
     var reflections = false
+    /// The textures' anisotropic filtering: 0 (off, trilinear), 2, 4, 8 or 16.
+    var anisotropy = 8
     /// Foveated rendering (where the eyes look is drawn at the drawable's full resolution).
     var foveation = true
     /// Compositor Services' render quality with foveation (visionOS 26): 0 leaves the system's
@@ -98,6 +100,7 @@ struct PTSettings: Codable, Equatable {
             settings.ssao = true
             settings.bloom = true
             settings.reflections = true
+            settings.anisotropy = 8
             settings.foveation = true
             settings.compositorQuality = 0
             settings.metalFX = false
@@ -112,6 +115,7 @@ struct PTSettings: Codable, Equatable {
             settings.ssao = true
             settings.bloom = true
             settings.reflections = true
+            settings.anisotropy = 16
             settings.foveation = true
             settings.compositorQuality = 0
             settings.metalFX = false
@@ -163,6 +167,7 @@ struct PTSettings: Codable, Equatable {
         ssao = base.ssao
         bloom = base.bloom
         reflections = base.reflections
+        anisotropy = base.anisotropy
         foveation = base.foveation
         compositorQuality = base.compositorQuality
         metalFX = base.metalFX
@@ -176,7 +181,7 @@ struct PTSettings: Codable, Equatable {
         return resolutionScale == base.resolutionScale && dynamicResolution == base.dynamicResolution
             && targetFPS == base.targetFPS && fov == base.fov && graphicsPreset == base.graphicsPreset
             && shadows == base.shadows && ssao == base.ssao && bloom == base.bloom
-            && reflections == base.reflections && foveation == base.foveation
+            && reflections == base.reflections && anisotropy == base.anisotropy && foveation == base.foveation
             && compositorQuality == base.compositorQuality && metalFX == base.metalFX && sharpen == base.sharpen
     }
 
@@ -226,7 +231,7 @@ struct PTSettings: Codable, Equatable {
         case preset, resolutionScale, targetFPS, fov, graphicsPreset, shadows
         // A new key: the old one was saved as on by versions in which it did nothing.
         case dynamicResolution = "dynamicResolutionChosen"
-        case ssao, bloom, reflections, foveation, compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
+        case ssao, bloom, reflections, anisotropy, foveation, compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -246,6 +251,7 @@ struct PTSettings: Codable, Equatable {
         ssao = (try? c.decodeIfPresent(Bool.self, forKey: .ssao)) ?? base.ssao
         bloom = (try? c.decodeIfPresent(Bool.self, forKey: .bloom)) ?? base.bloom
         reflections = (try? c.decodeIfPresent(Bool.self, forKey: .reflections)) ?? base.reflections
+        anisotropy = (try? c.decodeIfPresent(Int.self, forKey: .anisotropy)) ?? base.anisotropy
         foveation = (try? c.decodeIfPresent(Bool.self, forKey: .foveation)) ?? base.foveation
         compositorQuality = (try? c.decodeIfPresent(Float.self, forKey: .compositorQuality)) ?? base.compositorQuality
         metalFX = (try? c.decodeIfPresent(Bool.self, forKey: .metalFX)) ?? base.metalFX
@@ -293,6 +299,7 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_SSAO=\(flag(ssao))",
             "PT_VP_BLOOM=\(flag(bloom))",
             "PT_VP_REFLECTIONS=\(flag(reflections))",
+            "PT_VP_ANISOTROPY=\(anisotropy)",
             "PT_VP_FOVEATION=\(flag(foveation))",
             "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
             "PT_VP_METALFX=\(flag(metalFX))",
