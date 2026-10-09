@@ -163,6 +163,15 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
+- **Build 30: (pendiente de CI; sin probar)**:
+  - Atlas de sombras estable (`BuildShadowViews`, scene_frame.cpp): `first` = primer hueco en orden de puntuación con la
+    misma regla de presupuesto de vistas (decide QUÉ luces tienen sombra, igual que antes); luego esas mismas luces se
+    colocan donde estaban el frame anterior (`shadow_slots_`, clave hash nombre + posición, copias de espejo con
+    índice ≥ `light_count_` marcadas aparte), las demás primer hueco; si no caben todas, se usa `first`.
+    `PT_SHADOW_STICKY=0` lo apaga. Motivo: la puntuación sigue a la cámara → los huecos cambiaban → caché de teselas fallaba.
+  - Log único `bloom: size S weight W: N blur rounds (2 passes each) at WxH` (scene_post.cpp, incluye `engine/core/log.h`).
+  - Descartado: partículas a media resolución en las anchas (el centro reutiliza las de la ancha → empeoraría el centro;
+    el usuario no acepta perder fidelidad).
 - **Prueba build 29 (run 33, log pt (16)):** sin cambio apreciable (usuario: pared = 31 fps). `cull`: ~20 luces por vista en
   el pasillo (no 212), 55–70 % por delante; sala inicial 7 luces, todas por detrás (cámara dentro). `lighting/lights` 1,3–2,0
   ms/vista (antes 1,5–2,3): −0,3 ms/vista. Mirando una pared (t≈61: 27 draws) GPU sigue en 34 ms → el coste es por píxel fijo.
