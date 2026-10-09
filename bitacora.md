@@ -151,7 +151,19 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 25 (run 29):** igual que 24 (30 ms inicio, 36–42 ms después). Anisotrópico 8x OK. Luces ~3 ms/vista,
   sombras hasta 3,5 ms/frame. Partida con brillo 4 (`kBrightness[4]` = 0,76 → oscurece; 7 = neutro). El patrón de
   calibración (UI) no cambiaba: el HUD no recibía el brillo.
-- **Build 26 (run 30): OK** (sin probar):
+- **Prueba build 26 (run 30):** sin fuga (footprint 2,5 GB estable). Luces en una pasada: 2,1 ms/vista al inicio pero
+  5,5 ms/vista en el pasillo (volúmenes: 2,3) → descartado como defecto. HDR por expansión SDR: el usuario lo rechaza
+  (quería «HDR10»; en visionOS no hay señal HDR10, solo EDR en extended linear P3 con margen ×2 → siguiente: HDR nativo
+  desde `hdr_` antes del tonemap, cadena de post e imágenes de ojo a 16 bits).
+- **Build 27:**
+  - `light_all` solo con `PT_LIGHT_ONE_PASS=1`; por defecto, volúmenes (igual que build 25).
+  - Caché de teselas de sombra en `RecordShadows`: clave FNV por tesela (VkImage del atlas, rect, campos de su
+    `gpu::View`, bias, cull, y por caster mesh/sub/material/transform); igual que la del frame anterior en el mismo rect
+    → no se redibuja; casters con skin → siempre. Cada tesela redibujada en su propia pasada con área = rect y CLEAR
+    (no carga el resto del atlas). Sin teselas que redibujar: solo transición a solo lectura. `PT_SHADOW_CACHE=0` la
+    desactiva. Log `shadows: N tiles kept, M drawn in the last 10 s`.
+  - HDR por expansión: por defecto 100 (apagado) en `pt_visionos_settings.h`, `ApplySettings`, `PTSettings`.
+- **Build 26 (run 30): OK**:
   - Luces en una pasada: `shaders/light_all.frag` (hasta 32 luces, máscaras `ids.z` dibujadas / `ids.w` con sombra, mismo
     `EvaluateLight`), pipeline `light_all_` (Additive, 2 colores, profundidad solo lectura), en `RecordLighting` para
     `view_bit == 1` sin RT/contacto ni `PT_LIGHT_DRAW_ONLY/NO_SHADOW/PT_LIGHT_VOLUMES`; si no, volúmenes como antes.

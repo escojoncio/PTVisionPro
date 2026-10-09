@@ -27,7 +27,7 @@ struct HeadsetSettings {
     int center = 45;     // 30 to 80
     // HDR from the game's picture: its brightest parts up to this percent of SDR white (100: off,
     // up to the headset's 200). Not part of a preset: it costs nothing.
-    int hdr = 170;
+    int hdr = 100;
     // Dynamic resolution: the eyes drawn smaller while the GPU cannot keep the frame rate.
     bool dynamic_resolution = false;
     // The headset is an M5 (its preset is offered only then).

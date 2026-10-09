@@ -44,7 +44,7 @@ struct PTSettings: Codable, Equatable {
     var anisotropy = 8
     /// HDR from the game's picture: its brightest parts up to this percent of SDR white (100: off;
     /// 140, 170, 200). Not part of a preset.
-    var hdr = 170
+    var hdr = 100
     /// Foveated rendering (where the eyes look is drawn at the drawable's full resolution).
     var foveation = true
     /// Compositor Services' render quality with foveation (visionOS 26): 0 leaves the system's
