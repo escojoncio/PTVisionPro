@@ -404,6 +404,9 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 Objetivo de rendimiento: **45 fps reales estables** (modo 45 FPS, `SetFrameDivisor(2)`, el compositor reproyecta a 90),
 con sombras altas, SSAO, bloom y reflejos (estándar mínimo M2); presupuesto GPU ≈ 22 ms por fotograma para las 4 vistas
 más la composición. Clave para que no maree: profundidad real al drawable (reproyección posicional).
+Frecuencias: M2 90/96/100 Hz → modos estables 45/90, 48/96, 50/100 (M2 apunta a 50/100 si la GPU llega); M5 hasta
+120 Hz → 60/120 como PS VR. Pendiente: ajuste de modo de frecuencia en el menú VISION PRO y presets por visor, si
+Compositor Services permite a la app pedir la frecuencia (comprobar API); 60 reales en pantalla de 90 da judder.
 
 0. Medir build 18 (log `vr pace` con 4 vistas) y calibrar periphery/center por defecto. Siguiente: resolución
    dinámica por tiempo de GPU, caché de sombras estáticas, profundidad al drawable (reproyección posicional),
