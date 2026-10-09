@@ -155,7 +155,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   5,5 ms/vista en el pasillo (volúmenes: 2,3) → descartado como defecto. HDR por expansión SDR: el usuario lo rechaza
   (quería «HDR10»; en visionOS no hay señal HDR10, solo EDR en extended linear P3 con margen ×2 → siguiente: HDR nativo
   desde `hdr_` antes del tonemap, cadena de post e imágenes de ojo a 16 bits).
-- **Build 27:**
+- **Build 27 (run 31): OK** (sin probar):
   - `light_all` solo con `PT_LIGHT_ONE_PASS=1`; por defecto, volúmenes (igual que build 25).
   - Caché de teselas de sombra en `RecordShadows`: clave FNV por tesela (VkImage del atlas, rect, campos de su
     `gpu::View`, bias, cull, y por caster mesh/sub/material/transform); igual que la del frame anterior en el mismo rect
