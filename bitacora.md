@@ -163,6 +163,13 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
+- **Prueba build 29 (run 33, log pt (16)):** sin cambio apreciable (usuario: pared = 31 fps). `cull`: ~20 luces por vista en
+  el pasillo (no 212), 55–70 % por delante; sala inicial 7 luces, todas por detrás (cámara dentro). `lighting/lights` 1,3–2,0
+  ms/vista (antes 1,5–2,3): −0,3 ms/vista. Mirando una pared (t≈61: 27 draws) GPU sigue en 34 ms → el coste es por píxel fijo.
+  Por frame (4 vistas): compose+forward ~8,5 ms, lighting ~9, post ~5,5, gbuffer ~5, SSAO ~2,4, reflejos ~1,6, sombras 1,3.
+  Más caro y atacable: `wide/effects/particles` 0,7–2,1 ms (sala inicial con ~240 partículas: humo/polvo a pantalla completa,
+  límite de relleno), `particles composite` ~0,4 × 4 vistas + copias, `wide/post/bloom` 1,3 × 2 (bloom de 270 líneas).
+  Térmico nominal/fair en 95 s. Fin por el botón «Cerrar la app» (exit normal).
 - **Build 29 (run 33): OK** → `releases/download/build-33/PTVisionPro-33.ipa` (sin probar):
   - `light_front_` (scene_renderer.cpp, mismo `PipelineDesc` que `light_` con `GREATER_OR_EQUAL`): en `RecordLighting`, si el
     ojo de la vista está fuera del volumen por `near·4 + 0,05 m` (local por eje, filas de la inversa; determinante > 0), caras
