@@ -13,6 +13,20 @@ index d39d6a6..f86f228 100644
          vec3 b = pass.f0.x > 0.0 ? min(vec3(0.5), Img(IMG_BLOOM_SUM, SMP_LINEAR_CLAMP, bloom_uv).rgb) : vec3(0.0);
          vec3 x2 = x * x;
          vec3 r = clamp(x2 + b - x2 * b, 0.0, 1.0);
+diff --git a/shaders/vfx_composite.frag b/shaders/vfx_composite.frag
+index 1be202c..2ce4fe1 100644
+--- a/shaders/vfx_composite.frag
++++ b/shaders/vfx_composite.frag
+@@ -15,7 +15,8 @@ layout(location = 0) out vec4 out_color;
+ void main() {
+     ivec2 pixel = ivec2(gl_FragCoord.xy);
+     vec4 scene = ImgFetch(IMG_HDR_COPY, pixel);
+-    vec4 particles = ImgFetch(IMG_PARTICLES, pixel);
++    // f2.x > 0: the particles are a wider view's (a stereo inset's eye), this view the middle f2.x of it.
++    vec4 particles = pass.f2.x > 0.0 ? Img(IMG_PARTICLES, SMP_LINEAR_CLAMP, 0.5 + (in_uv - 0.5) * pass.f2.x) : ImgFetch(IMG_PARTICLES, pixel);
+     if (particles.a >= 1.0 && all(equal(particles.rgb, vec3(0.0)))) {
+         out_color = scene;
+         return;
 diff --git a/src/engine/render/render_util.cpp b/src/engine/render/render_util.cpp
 index c327bd9..1a26215 100644
 --- a/src/engine/render/render_util.cpp
@@ -53,7 +67,7 @@ index 7486360..0bc0581 100644
  void EndLabel(VkCommandBuffer cmd);
  
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..550528b 100644
+index 40d339d..631b695 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -610,6 +610,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -141,15 +155,76 @@ index 40d339d..550528b 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,6 +1800,7 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +1800,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
++    // Stereo with the game's foveation: an inset (views 2, 3) lays over its scene the particles its
++    // eye's wide view (0, 1) drew just before it, read under the inset's field, instead of drawing
++    // them again: smoke, dust and mist at the wide view's density, which is what drawing them at
++    // half resolution (the usual way) would give. They are kept in particles_kept_ in between
++    // (the inset's forward pass draws its transparent surfaces into particles_).
++    const bool reuse = InsetShares(shared_particles_frame_) && particles_kept_.Valid();
++    uint32_t recorded = 0;
++    VkImageCopy copy{};
++    copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    copy.dstSubresource = copy.srcSubresource;
++    copy.extent = {extent_.width, extent_.height, 1};
++    if (reuse) {
++        recorded = shared_particles_drawn_[vr_eye_ - 2] ? 1u : 0u;
++        if (recorded > 0) {
++            BeginLabel(cmd, "particles shared");
++            UseTargets(cmd, {{&particles_kept_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&particles_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
++            vkCmdCopyImage(cmd, particles_kept_.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, particles_.image.image,
++                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
++            UseTargets(cmd, {{&particles_kept_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&particles_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++            EndLabel(cmd);
++        }
++    } else {
++        RecordParticles(cmd, output, context, recorded);
++        if ((vr_eye_ == 0 || vr_eye_ == 1) && vr_share_scale_ > 0.0f && particles_kept_.Valid()) {
++            shared_particles_drawn_[vr_eye_] = recorded > 0;
++            if (recorded > 0) {
++                BeginLabel(cmd, "particles kept");
++                UseTargets(cmd, {{&particles_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&particles_kept_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
++                vkCmdCopyImage(cmd, particles_.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, particles_kept_.image.image,
++                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
++                UseTargets(cmd, {{&particles_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&particles_kept_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++                EndLabel(cmd);
++            }
++            SharedByInset(shared_particles_frame_);
++        }
++    }
++    if (recorded > 0) {
++        BeginLabel(cmd, "particles composite");
++        UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
++        vkCmdCopyImage(cmd, output.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, hdr_copy_.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++                       1, &copy);
++        UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
++                         {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                         {&particles_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++        BeginPass(cmd, extent_, {{&output, false, {}}});
++        gpu::PassPush push;
++        // The wide view's particles under the inset's field (0: this view's own, pixel for pixel).
++        push.f2 = glm::vec4(reuse ? vr_share_scale_ : 0.0f, 0.0f, 0.0f, 0.0f);
++        Fullscreen(cmd, vfx_composite_, push);
++        vkCmdEndRendering(cmd);
++        EndLabel(cmd);
++    }
++    UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
++    BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
++}
++
++void SceneRenderer::RecordParticles(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext& context, uint32_t& recorded) {
 +    BeginLabel(cmd, "particles");
      UseTargets(cmd, {{&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
      BeginPass(cmd, extent_, {{&particles_, true, {{0.0f, 0.0f, 0.0f, 1.0f}}}}, &depth_, true, false);
-     uint32_t recorded = 0;
-@@ -1796,6 +1815,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+-    uint32_t recorded = 0;
++    recorded = 0;
+     context.subset = kVfxOffscreen;
+     context.recorded = &recorded;
+     bool copied = false;
+@@ -1796,6 +1872,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -157,7 +232,7 @@ index 40d339d..550528b 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,13 +1826,16 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +1883,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -168,21 +243,28 @@ index 40d339d..550528b 100644
      vfx_forward(context);
      BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      vkCmdEndRendering(cmd);
+-    if (recorded > 0) {
+-        UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+-        VkImageCopy copy{};
+-        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+-        copy.dstSubresource = copy.srcSubresource;
+-        copy.extent = {extent_.width, extent_.height, 1};
+-        vkCmdCopyImage(cmd, output.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, hdr_copy_.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+-                       1, &copy);
+-        UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+-                         {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+-                         {&particles_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
+-        BeginPass(cmd, extent_, {{&output, false, {}}});
+-        gpu::PassPush push;
+-        Fullscreen(cmd, vfx_composite_, push);
+-        vkCmdEndRendering(cmd);
+-    }
+-    UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
+-    BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
 +    EndLabel(cmd);
-     if (recorded > 0) {
-+        BeginLabel(cmd, "particles composite");
-         UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
-         VkImageCopy copy{};
-         copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1827,6 +1850,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
-         gpu::PassPush push;
-         Fullscreen(cmd, vfx_composite_, push);
-         vkCmdEndRendering(cmd);
-+        EndLabel(cmd);
-     }
-     UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
-     BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
-@@ -1834,6 +1858,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
++    context.copy_scene = nullptr;  // (it refers to this function's locals)
++    context.recorded = nullptr;
+ }
  
  void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      vkCmdEndRendering(cmd);
@@ -190,7 +272,7 @@ index 40d339d..550528b 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +1869,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +1908,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -198,7 +280,7 @@ index 40d339d..550528b 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2125,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2164,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -213,7 +295,7 @@ index 40d339d..550528b 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2138,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2177,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -222,7 +304,7 @@ index 40d339d..550528b 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2163,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2202,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -239,7 +321,7 @@ index 40d339d..550528b 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2180,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2219,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -247,7 +329,7 @@ index 40d339d..550528b 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2215,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2254,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -255,17 +337,20 @@ index 40d339d..550528b 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2273,9 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2312,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
 +    // A new stereo frame: no eye's bloom is this frame's yet (a view 0 that never gets to its post
 +    // must not leave the last frame's to the insets).
-+    if (vr_eye_ <= 0) bloom_eye_frame_[0] = bloom_eye_frame_[1] = ~0u;
++    if (vr_eye_ <= 0) {
++        shared_bloom_frame_[0] = shared_bloom_frame_[1] = ~0u;
++        shared_particles_frame_[0] = shared_particles_frame_[1] = ~0u;
++    }
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2287,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2329,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -281,7 +366,7 @@ index 40d339d..550528b 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2377,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2419,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -342,7 +427,7 @@ index 40d339d..550528b 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2551,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2593,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -367,50 +452,31 @@ index 40d339d..550528b 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
-index 19dd1a8..b376ed3 100644
+index 19dd1a8..5cd6cb6 100644
 --- a/src/engine/render/scene_post.cpp
 +++ b/src/engine/render/scene_post.cpp
-@@ -88,7 +88,31 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -88,7 +88,15 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      }
  
      const bool bloom = toggles.bloom && lighting.valid && std::abs(exposure.bloom_size) >= 1.0e-5f;
 -    if (bloom) {
 +    // Stereo with the game's foveation: an inset (views 2, 3) takes the bloom its eye's wide view
-+    // (0, 1) worked out this frame instead of working it out again. The bloom is a wide blur of a
-+    // 270-line image, the same scene seen from the same eye: the inset samples the part of it
-+    // under its field (`vr_bloom_scale_` of the wide one across), which also makes its glow
-+    // spread as wide as the view around it.
-+    const uint32_t frame_stamp = frame_counter_ + (vr_eye_ <= 0 ? 1u : 0u);  // view 0 advances it after its post
-+    const bool bloom_shared = vr_bloom_scale_ > 0.0f && vr_eye_ >= 0 && vr_eye_ <= 3;
-+    const int shared_eye = bloom_shared && vr_eye_ >= 2 ? vr_eye_ - 2 : -1;
-+    const bool reuse = bloom && shared_eye >= 0 && bloom_eye_[shared_eye].Valid() && bloom_eye_frame_[shared_eye] == frame_stamp;
-+    auto copy_bloom = [&](RenderTarget& from, RenderTarget& to) {
-+        UseTargets(cmd, {{&from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&to, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
-+        VkImageCopy copy{};
-+        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-+        copy.dstSubresource = copy.srcSubresource;
-+        copy.extent = {from.Extent().width, from.Extent().height, 1};
-+        vkCmdCopyImage(cmd, from.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, to.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-+        UseTargets(cmd, {{&from, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&to, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
-+    };
-+    if (reuse) {
-+        BeginLabel(cmd, "bloom shared");
-+        copy_bloom(bloom_eye_[shared_eye], bloom_[2]);
-+        EndLabel(cmd);
-+    }
++    // (0, 1) worked out just before it (main.cpp draws them in that order), still in bloom_[2],
++    // instead of working it out again. The bloom is a wide blur of a 270-line image, the same
++    // scene seen from the same eye: the inset samples the part of it under its field
++    // (`vr_share_scale_` of the wide one across), which also makes its glow spread as wide as the
++    // view around it.
++    const bool reuse = bloom && InsetShares(shared_bloom_frame_);
 +    if (bloom && !reuse) {
 +        BeginLabel(cmd, "bloom");
          UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[0], false, {}}});
          push.f0 = BloomPolynomial(exposure.bloom_extraction);
-@@ -134,19 +158,33 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -134,19 +142,30 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
              push.f1 = saved_f1;
          }
          UseTargets(cmd, {{&bloom_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
-+        if (bloom_shared && vr_eye_ <= 1 && bloom_eye_[vr_eye_].Valid()) {
-+            copy_bloom(bloom_[2], bloom_eye_[vr_eye_]);
-+            bloom_eye_frame_[vr_eye_] = frame_stamp;
-+        }
++        SharedByInset(shared_bloom_frame_);
 +        EndLabel(cmd);
      }
      Stamp(cmd, 11);
@@ -443,12 +509,12 @@ index 19dd1a8..b376ed3 100644
      UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&ldr_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
      BeginPass(cmd, output_extent_, {{&ldr_[0], false, {}}});
      push.ids.x = 0;
-@@ -158,12 +196,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -158,12 +177,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          push.f0.y = 0.0f;
          push.f0.w = 0.0f;
      }
 +    // The shared bloom read under the inset's field (0: the view's own, all of it).
-+    push.f2 = glm::vec4(reuse ? vr_bloom_scale_ : 0.0f, 0.0f, 0.0f, 0.0f);
++    push.f2 = glm::vec4(reuse ? vr_share_scale_ : 0.0f, 0.0f, 0.0f, 0.0f);
      Fullscreen(cmd, tonemap_, push);
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&ldr_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -462,7 +528,7 @@ index 19dd1a8..b376ed3 100644
          RenderTarget& dst = ldr_[1 - current];
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, output_extent_, {{&dst, false, {}}});
-@@ -171,11 +214,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -171,11 +195,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
          current = 1 - current;
@@ -476,7 +542,7 @@ index 19dd1a8..b376ed3 100644
      }
      if (toggles.depth_of_field && screen.depth_of_field && lighting.valid) {
          RecordDepthOfField(cmd, screen, current);
-@@ -187,7 +231,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -187,7 +212,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          gpu::PassPush lut;
          lut.ids = glm::uvec4(ldr_index(current), 1, 0, post_view_);
          lut.f0 = glm::vec4(0.0f, lut_blend, 1.0f, 1.0f);
@@ -485,7 +551,7 @@ index 19dd1a8..b376ed3 100644
      }
  
      const bool blur = toggles.full_screen_blur && screen.full_screen_blur && lighting.valid;
-@@ -203,7 +247,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -203,7 +228,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          const float share = std::clamp(dt * 30.0f, 0.05f, 2.0f);
          const float rate = std::pow(std::clamp(screen.blur_blend_rate, 0.0f, 0.999f), share);
          push.f0 = glm::vec4(screen.blur_fetch_band * std::sqrt(share), rate, 0.0f, 0.0f);
@@ -494,7 +560,7 @@ index 19dd1a8..b376ed3 100644
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
          CopyToHistory(cmd, ldr_[current]);
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
-@@ -214,9 +258,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -214,9 +239,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      if (screen.colour_banding_canceller && lighting.valid) {
          UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
          push.ids = glm::uvec4(ldr_index(current), 0, 0, main_view_.index);
@@ -506,7 +572,7 @@ index 19dd1a8..b376ed3 100644
      RenderTarget output;
      output.image = renderer_->SceneColor();
      output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-@@ -240,6 +285,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -240,6 +266,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      }
      vkCmdEndRendering(cmd);
@@ -515,7 +581,7 @@ index 19dd1a8..b376ed3 100644
  }
  
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..ccd9586 100644
+index 1f96981..7fd56b9 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
 @@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
@@ -540,27 +606,32 @@ index 1f96981..ccd9586 100644
      vk::Context& ctx = renderer_->Context();
      RenderTarget* targets[] = {&albedo_, &normal_, &material_, &depth_, &diffuse_, &specular_, &probe_acc_, &hdr_, &bloom_[0], &bloom_[1], &bloom_[2],
 -                               &flare_, &ldr_[0], &ldr_[1], &history_, &mirror_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
-+                               &bloom_eye_[0], &bloom_eye_[1], &flare_, &ldr_[0], &ldr_[1], &history_, &mirror_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
++                               &flare_, &particles_kept_, &ldr_[0], &ldr_[1], &history_, &mirror_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
                                 &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_,
                                 &mb_tile_[0], &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_,
                                 &mb_blur_[0], &mb_blur_[1], &mirror_history_, &mirror_temporal_, &reflect_layer_, &reflect_offset_,
-@@ -612,6 +615,8 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -612,6 +615,9 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
      vkDeviceWaitIdle(device_);
      DestroyTargets();
      mirror_stale_.valid = false;
 +    flare_clean_ = false;
-+    bloom_eye_frame_[0] = bloom_eye_frame_[1] = ~0u;
++    shared_bloom_frame_[0] = shared_bloom_frame_[1] = ~0u;
++    shared_particles_frame_[0] = shared_particles_frame_[1] = ~0u;
      const VkImageUsageFlags color = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
      const VkImageUsageFlags dumped = color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      const uint32_t bloom_width = std::max(1u, static_cast<uint32_t>(std::lround(270.0 * output.width / std::max(output.height, 1u))));
-@@ -630,7 +635,10 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -626,11 +632,13 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+               CreateTarget(probe_acc_, kLightFormat, extent, dumped, c) &&
+               CreateTarget(hdr_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
+               CreateTarget(hdr_copy_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
+-              CreateTarget(particles_, kHdrFormat, extent, color, c) &&
++              CreateTarget(particles_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
++              CreateTarget(particles_kept_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
                CreateTarget(refmap_, kRefMapFormat, extent, color, c) &&
                CreateTarget(mirror_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(bloom_[0], kBloomFormat, quarter, color, c) && CreateTarget(bloom_[1], kBloomFormat, quarter, color, c) &&
 -              CreateTarget(bloom_[2], kBloomFormat, quarter, color, c) && CreateTarget(flare_, kPostFormat, output, color, c) &&
-+              CreateTarget(bloom_[2], kBloomFormat, quarter, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
-+              CreateTarget(bloom_eye_[0], kBloomFormat, quarter, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
-+              CreateTarget(bloom_eye_[1], kBloomFormat, quarter, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
++              CreateTarget(bloom_[2], kBloomFormat, quarter, color, c) &&
 +              CreateTarget(flare_, kPostFormat, output, color, c) &&
                CreateTarget(ldr_[0], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(ldr_[1], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
@@ -570,7 +641,7 @@ index 1f96981..ccd9586 100644
      renderer_->Context().Submit([&](VkCommandBuffer cmd) {
          RenderTarget* colors[] = {&albedo_, &normal_, &material_, &diffuse_, &specular_, &probe_acc_, &hdr_, &mirror_, &bloom_[0], &bloom_[1], &bloom_[2],
 -                                  &flare_, &ldr_[0], &ldr_[1], &history_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
-+                                  &bloom_eye_[0], &bloom_eye_[1], &flare_, &ldr_[0], &ldr_[1], &history_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
++                                  &flare_, &particles_kept_, &ldr_[0], &ldr_[1], &history_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
                                    &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_, &mb_tile_[0],
                                    &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_, &mb_blur_[0],
                                    &mb_blur_[1]};
@@ -672,10 +743,10 @@ index 1f96981..ccd9586 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..863ba0e 100644
+index 6c9b165..ec4148b 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,18 @@ public:
+@@ -206,6 +206,24 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
@@ -688,13 +759,19 @@ index 6c9b165..863ba0e 100644
 +        vr_cull_valid_ = camera != nullptr;
 +        if (camera) vr_cull_camera_ = *camera;
 +    }
-+    // Insets (views 2, 3) take their eye's wide-view bloom; `scale`: the inset's field across as a
-+    // fraction of the wide view's (0: each view its own bloom).
-+    void SetVrBloomShare(float scale) { vr_bloom_scale_ = scale; }
++    // Insets (views 2, 3, each drawn right after its eye's wide view 0, 1) take that view's bloom
++    // and particles; `scale`: the inset's field across as a fraction of the wide view's (0: each
++    // view its own).
++    void SetVrInsetShare(float scale) {
++        vr_share_scale_ = scale;
++        // A new stereo frame (or its end): nothing is shared yet.
++        shared_bloom_frame_[0] = shared_bloom_frame_[1] = ~0u;
++        shared_particles_frame_[0] = shared_particles_frame_[1] = ~0u;
++    }
  
  private:
      struct FrameSlot {
-@@ -222,7 +234,30 @@ private:
+@@ -222,7 +240,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -725,18 +802,45 @@ index 6c9b165..863ba0e 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -377,6 +412,10 @@ private:
+@@ -342,6 +383,8 @@ private:
+     void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
+     void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
+     void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
++    // The particles drawn into particles_ (the offscreen VFX), the render pass ended; `recorded`: how many.
++    void RecordParticles(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext& context, uint32_t& recorded);
+     void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
+     void RecordUpscale(VkCommandBuffer cmd, float dt);
+     void ReadUpscaleTimestamps(FrameSlot& slot);
+@@ -377,6 +420,28 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
-+    RenderTarget bloom_eye_[2];  // each eye's wide-view bloom, for its inset (SetVrBloomShare)
-+    uint32_t bloom_eye_frame_[2] = {~0u, ~0u};
-+    float vr_bloom_scale_ = 0.0f;
++    RenderTarget particles_kept_;  // a wide view's particles for its inset (SetVrInsetShare)
++    // SetVrInsetShare: for each eye, the frame whose wide view left its bloom / particles for the
++    // inset (frame_counter_ as it stands after view 0; ~0u: none).
++    float vr_share_scale_ = 0.0f;
++    uint32_t shared_bloom_frame_[2] = {~0u, ~0u};
++    uint32_t shared_particles_frame_[2] = {~0u, ~0u};
++    bool shared_particles_drawn_[2] = {false, false};  // the wide view drew any (its composite ran)
++    // This frame's number as the views after view 0 see it (view 0 advances frame_counter_ at its end).
++    uint32_t ShareStamp() const { return frame_counter_ + (vr_eye_ <= 0 ? 1u : 0u); }
++    // An inset whose eye's wide view left `frames` this frame.
++    bool InsetShares(const uint32_t frames[2]) const {
++        return vr_share_scale_ > 0.0f && (vr_eye_ == 2 || vr_eye_ == 3) && frames[vr_eye_ - 2] == ShareStamp();
++    }
++    // A wide view (0, 1) leaving `frames` for its inset (and overwriting what the other eye's
++    // wide view left: its inset was drawn before this view).
++    void SharedByInset(uint32_t frames[2]) const {
++        if (vr_share_scale_ > 0.0f && (vr_eye_ == 0 || vr_eye_ == 1)) {
++            frames[vr_eye_] = ShareStamp();
++            frames[1 - vr_eye_] = ~0u;
++        }
++    }
 +    bool flare_clean_ = false;  // flare_ holds the clear and nothing since (skips clearing it again)
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -636,6 +675,14 @@ private:
+@@ -636,6 +701,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -1419,7 +1523,7 @@ index d1485b2..7099c8e 100644
      uint32_t raw_previous_ = 0;
      bool snap_armed_ = true;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..e5c7087 100644
+index d629ab3..55eec99 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -1824,11 +1928,12 @@ index d629ab3..e5c7087 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4125,21 +4353,51 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4125,21 +4353,56 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  last_scene_time = game.Time();
                  vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
                                    lighting, vfx_pass, blend);
 -                for (int eye = 0; eye < 2; ++eye) {
+-                    if (!begin(eye == 0)) {
 +                // Views 0 and 1: the eyes; with the game's foveation they are the wide, low-density
 +                // views (no screen-space AO or reflections) and 2 and 3 their sharp centres.
 +                const int views = stereo.inset ? 4 : 2;
@@ -1839,12 +1944,16 @@ index d629ab3..e5c7087 100644
 +                pt::Camera cull_camera = stereo.head;
 +                cull_camera.position -= cull_camera.Forward() * 0.1f;
 +                app.scene.SetVrCullCamera(&cull_camera);
-+                // The insets take their eye's wide-view bloom (views 0, 1 are drawn before 2, 3).
-+                app.scene.SetVrBloomShare(stereo.inset ? stereo.inset_scale : 0.0f);
++                // Each inset takes its eye's wide-view bloom and particles, left in the renderer by the
++                // view drawn just before it (the order below).
++                app.scene.SetVrInsetShare(stereo.inset ? stereo.inset_scale : 0.0f);
 +#endif
++                // With insets: left wide, left inset, right wide, right inset (views 0, 2, 1, 3).
++                static constexpr int kInsetOrder[4] = {0, 2, 1, 3};
 +                float frame_gpu_ms = 0.0f;
-+                for (int eye = 0; eye < views; ++eye) {
-                     if (!begin(eye == 0)) {
++                for (int k = 0; k < views; ++k) {
++                    const int eye = views == 4 ? kInsetOrder[k] : k;
++                    if (!begin(k == 0)) {
                          continue;
                      }
 +                    const bool inset = eye >= 2;
@@ -1855,9 +1964,10 @@ index d629ab3..e5c7087 100644
 +#endif
 +                    app.scene.Render(inset ? stereo.insets[eye - 2] : stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
-+                    // With insets the frame slots alternate over four views: the times read now are those of
-+                    // the view drawn two renders ago (the inset for an eye, the eye for an inset).
-+                    pt::visionos::ReportEye(views == 4 ? (eye + 2) % 4 : eye, views, app.scene.Stats().gpu_ms, app.scene.Stats().pass_ms, app.scene.Stats().cpu_ms);
++                    // The frame slots alternate over the views: the times read now are those of the view
++                    // drawn two renders ago (with insets, the other eye's view of the same kind).
++                    pt::visionos::ReportEye(views == 4 ? kInsetOrder[(k + 2) % 4] : eye, views, app.scene.Stats().gpu_ms, app.scene.Stats().pass_ms,
++                                            app.scene.Stats().cpu_ms);
 +#endif
 +                    frame_gpu_ms += app.scene.Stats().gpu_ms;
                      ui.SetVrHud(true);
@@ -1875,12 +1985,12 @@ index d629ab3..e5c7087 100644
 +#if PT_VISIONOS
 +                app.scene.SetVrLowDetail(false);
 +                app.scene.SetVrCullCamera(nullptr);
-+                app.scene.SetVrBloomShare(0.0f);
++                app.scene.SetVrInsetShare(0.0f);
 +#endif
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4826,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4831,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -1897,7 +2007,7 @@ index d629ab3..e5c7087 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4872,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4877,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

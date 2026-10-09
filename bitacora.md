@@ -135,6 +135,20 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 21 (run 25):** pantalla 90 Hz (medida), 18–20 fps, GPU 47–55 ms/frame, térmico fair. El preset M2 iba a
   90 fps (preset con 90). Por vista: effects 2,3–3,0 (la más cara), lights 1,9–2,4, post 2,2 (bloom 1,4), gbuffer 1,8,
   occlusion 0,85, forward 0,7, compose 0,27, reflections 1,0 (centros), probes 0,7, shadows 1,2–1,7/frame.
+- **Prueba build 22 (run 26):** bloom compartido OK (post del centro 2,2 → 0,8 ms). 23–24 fps al inicio (GPU 40–44 ms), luego
+  18–19 (48–54 ms: más geometría/luces/sombras). Vibración OK (el juego la pide en sucesos y con el reloj; llega al mando).
+  Pantalla 100 Hz unos segundos y luego 90. Por vista: particles 1,2–2,0 (ancha) / 1,7–2,9 (centro), lights 1,8–2,5,
+  gbuffer 1,1–2,2, effects ≈ particles + composite 0,5 + copias 0,15–0,2.
+- **Build 23:**
+  - Orden estéreo con insets: izquierda ancha, izquierda centro, derecha ancha, derecha centro (`kInsetOrder` en main.cpp;
+    `ReportEye` con `kInsetOrder[(k+2)%4]`). El centro usa lo que acaba de dejar su vista ancha.
+  - Bloom compartido sin copias: el centro usa `bloom_[2]` tal cual (`InsetShares`/`SharedByInset`/`ShareStamp` en
+    scene_renderer.h; sellos `shared_bloom_frame_`, reiniciados en `SetVrInsetShare` y al empezar la vista 0;
+    `SharedByInset` invalida el otro ojo). Quitado `bloom_eye_`.
+  - Partículas compartidas: la ancha copia `particles_` → `particles_kept_` tras dibujar sus VFX offscreen
+    (`RecordParticles`); el centro no las dibuja, copia `particles_kept_` → `particles_` (su `RecordForward` usa
+    `particles_` para transparencias) y `vfx_composite.frag` las muestrea en `0.5+(uv-0.5)·f2.x` (lineal). Equivale a
+    partículas a media resolución en el centro; posibles halos en bordes de objetos cercanos.
 - **Build 22:**
   - Bloom compartido: los centros (vistas 2, 3) copian el bloom de la vista ancha de su ojo (`bloom_eye_[2]`, sello
     `bloom_eye_frame_` = `frame_counter_ + (vr_eye_<=0)`, se invalida al empezar la vista 0) y el tonemap lo muestrea en
