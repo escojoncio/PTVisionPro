@@ -1,3 +1,70 @@
+diff --git a/shaders/light_all.frag b/shaders/light_all.frag
+new file mode 100644
+index 0000000..b23d12b
+--- /dev/null
++++ b/shaders/light_all.frag
+@@ -0,0 +1,61 @@
++#version 460
++// All of a view's lights in one full-screen pass (the deferred lights without their volumes):
++// the G-buffer is read once per pixel instead of once per light, and the light targets are
++// written once. Each light is the same EvaluateLight as light.frag's; a light whose volume would
++// not have covered the pixel gives nothing there (out of range, outside its area box), so the sum
++// is the one the volumes add up.
++#include "common.glsl"
++#include "lighting.glsl"
++
++layout(push_constant) uniform PassPush {
++    uvec4 ids;  // view, light count (up to 32), lights drawn in this view (bit per light), shadowed ones
++    vec4 f0;
++    vec4 f1;
++    vec4 f2;
++    mat4 m;
++} pass;
++
++layout(location = 0) out vec4 out_diffuse;
++layout(location = 1) out vec4 out_specular;
++
++void main() {
++    View v = frame.views[pass.ids.x];
++    ivec2 pixel = ivec2(gl_FragCoord.xy);
++    float depth = ImgFetch(IMG_DEPTH, pixel).x;
++    if (depth <= 0.0) {
++        discard;
++    }
++    Surface s;
++    s.P = ViewPosition(v, PixelNdc(v, gl_FragCoord.xy), depth);
++    s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
++    vec4 g_normal = ImgFetch(IMG_NORMAL, pixel);
++    vec4 g_material = ImgFetch(IMG_MATERIAL, pixel);
++    s.N = DecodeNormal(g_normal.xyz);
++    s.roughness = g_material.x;
++    s.specular = g_material.y;
++    s.material_u = g_material.z;
++    s.translucency = g_material.w;
++    vec3 diffuse_sum = vec3(0.0);
++    vec3 specular_sum = vec3(0.0);
++    float lit = 0.0;
++    uint count = min(pass.ids.y, 32u);
++    for (uint i = 0u; i < count; ++i) {
++        uint bit = 1u << i;
++        if ((pass.ids.z & bit) == 0u) {
++            continue;
++        }
++        vec3 diffuse;
++        vec3 specular;
++        if (EvaluateLight(frame.lights[i], v, s, (pass.ids.w & bit) != 0u, gl_FragCoord.xy, diffuse, specular)) {
++            diffuse_sum += diffuse;
++            specular_sum += specular;
++            lit += 1.0;
++        }
++    }
++    if (lit == 0.0) {
++        discard;
++    }
++    // (The additive blend leaves the targets' alpha as it was.)
++    out_diffuse = vec4(diffuse_sum, 1.0);
++    out_specular = vec4(specular_sum, 1.0);
++}
 diff --git a/shaders/reflection_depth.glsl b/shaders/reflection_depth.glsl
 index fc1c963..b0eb8e4 100644
 --- a/shaders/reflection_depth.glsl
@@ -51,6 +118,18 @@ index 1be202c..25df602 100644
      if (particles.a >= 1.0 && all(equal(particles.rgb, vec3(0.0)))) {
          out_color = scene;
          return;
+diff --git a/shaders/xr_copy.frag b/shaders/xr_copy.frag
+index 8ed00c4..4cc66be 100644
+--- a/shaders/xr_copy.frag
++++ b/shaders/xr_copy.frag
+@@ -24,6 +24,7 @@ void main() {
+     if (p.params.x > 0.5) {
+         float a = clamp(c.a, 0.0, 1.0);
+         vec3 straight = a > 1.0e-4 ? c.rgb / a : vec3(0.0);
++        straight = pow(clamp(straight, 0.0, 1.0), vec3(1.0 / max(p.params.y, 0.1)));
+         out_color = vec4(Decode(straight) * a, a);
+         return;
+     }
 diff --git a/src/engine/render/camera.h b/src/engine/render/camera.h
 index ffee464..5d15d12 100644
 --- a/src/engine/render/camera.h
@@ -114,8 +193,23 @@ index 7486360..0bc0581 100644
  extern bool g_checkpoints;
  void EndLabel(VkCommandBuffer cmd);
  
+diff --git a/src/engine/render/renderer.cpp b/src/engine/render/renderer.cpp
+index 01f4500..631918f 100644
+--- a/src/engine/render/renderer.cpp
++++ b/src/engine/render/renderer.cpp
+@@ -752,7 +752,9 @@ void Renderer::CopyToXr(VkCommandBuffer cmd, VkDescriptorSet set, const XrTarget
+                              ? (static_cast<float>(target.extent.width) / static_cast<float>(target.extent.height)) / (16.0f / 9.0f)
+                              : 1.0f;
+     const float push[16] = {target.rect.x, target.rect.y, target.rect.z, target.rect.w,
+-                            premultiplied ? 1.0f : 0.0f, premultiplied ? 1.0f : brightness, 0.0f, 0.0f,
++                            // The brightness goes on the HUD too, as on a screen, where it is applied to the whole
++                            // picture with its UI: the brightness screen's test pattern is UI.
++                            premultiplied ? 1.0f : 0.0f, brightness, 0.0f, 0.0f,
+                             premultiplied ? 0.0f : grain[0], grain[1], grain[2], grain[3],
+                             grain_offset[0], grain_offset[1], across, 0.0f};
+     vkCmdPushConstants(cmd, xr_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..645e972 100644
+index 40d339d..8147f89 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -329,6 +329,13 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -218,7 +312,39 @@ index 40d339d..645e972 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1490,6 +1514,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1447,7 +1471,30 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+         vkCmdDraw(cmd, 3, 1, 0, 0);
+     }
+     const bool contact = rt_contact_active_ && view.index == main_view_.index;
+-    if (lights && light_count_ > 0) {
++    // The camera's own views with up to 32 lights: all of them in one full-screen pass
++    // (light_all.frag) instead of a volume each. Every light then reads the G-buffer from the
++    // pass's single read instead of again for each light, which is what the lights cost on a
++    // tile GPU. The volumes stay for the mirror, ray tracing and the light debugging switches.
++    static const bool light_debug = std::getenv("PT_LIGHT_DRAW_ONLY") || std::getenv("PT_LIGHT_DRAW_NO_SHADOW") || std::getenv("PT_LIGHT_VOLUMES");
++    const bool one_pass = lights && light_count_ > 0 && light_count_ <= 32 && light_all_ && !rt_active_ && !contact && view.view_bit == 1 &&
++                          !light_debug;
++    if (one_pass) {
++        uint32_t drawn = 0;
++        uint32_t shadowed = 0;
++        for (uint32_t i = 0; i < light_count_; ++i) {
++            if ((light_sources_[i]->hidden_views & view.view_bit) != 0) continue;
++            drawn |= 1u << i;
++            if (toggles.shadows && (light_shadow_views_[i] & view.view_bit) != 0) shadowed |= 1u << i;
++        }
++        if (drawn != 0) {
++            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, light_all_);
++            vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
++            gpu::PassPush push;
++            push.ids = glm::uvec4(view.index, light_count_, drawn, shadowed);
++            PushConstants(cmd, &push, sizeof(push));
++            vkCmdDraw(cmd, 3, 1, 0, 0);
++        }
++    } else if (lights && light_count_ > 0) {
+         if (rt_active_ || contact) {
+             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rt_active_ ? light_rt_ : light_contact_);
+             const VkDescriptorSet rt_set = rt_->Set(renderer_->FrameIndex());
+@@ -1490,6 +1537,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
      }
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&diffuse_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&specular_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -226,7 +352,7 @@ index 40d339d..645e972 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +1807,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +1830,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -295,7 +421,7 @@ index 40d339d..645e972 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +1879,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +1902,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -303,7 +429,7 @@ index 40d339d..645e972 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +1890,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +1913,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -343,7 +469,7 @@ index 40d339d..645e972 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +1915,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +1938,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -351,7 +477,7 @@ index 40d339d..645e972 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2171,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2194,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -366,7 +492,7 @@ index 40d339d..645e972 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2184,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2207,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -375,7 +501,7 @@ index 40d339d..645e972 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2209,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2232,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -392,7 +518,7 @@ index 40d339d..645e972 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2226,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2249,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -400,7 +526,7 @@ index 40d339d..645e972 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2261,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2284,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -408,7 +534,7 @@ index 40d339d..645e972 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2319,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2342,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -421,7 +547,7 @@ index 40d339d..645e972 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2336,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2359,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -437,7 +563,7 @@ index 40d339d..645e972 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2426,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2449,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -498,7 +624,7 @@ index 40d339d..645e972 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2600,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2623,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -652,7 +778,7 @@ index 19dd1a8..f806dcc 100644
  }
  
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..7fd56b9 100644
+index 1f96981..5d4e4a9 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
 @@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
@@ -664,7 +790,41 @@ index 1f96981..7fd56b9 100644
      }
      frame_ = new gpu::FrameData();
      CreateBuiltinResources();
-@@ -555,6 +557,7 @@ void SceneRenderer::Shutdown() {
+@@ -314,6 +316,15 @@ bool SceneRenderer::CreatePipelines() {
+     volume.blend = BlendMode::Additive;
+     volume.write_masks.clear();
+     light_ = CreateGraphicsPipeline(device_, volume);
++    {
++        PipelineDesc all_lights;
++        all_lights.layout = layout_;
++        all_lights.fragment = "light_all.frag";
++        all_lights.colors = {kLightFormat, kLightFormat};
++        all_lights.depth = kDepthFormat;
++        all_lights.blend = BlendMode::Additive;
++        light_all_ = CreateGraphicsPipeline(device_, all_lights);
++    }
+ 
+     PipelineDesc full;
+     full.layout = layout_;
+@@ -428,7 +439,7 @@ bool SceneRenderer::CreatePipelines() {
+     post.fragment = "vfx_composite.frag";
+     vfx_composite_ = CreateGraphicsPipeline(device_, post);
+ 
+-    const VkPipeline all[] = {gbuffer_, decal_, shadow_pipeline_, probe_, probe_resolve_, light_, compose_, forward_, forward_emissive_, luminance_, bright_,
++    const VkPipeline all[] = {gbuffer_, decal_, shadow_pipeline_, probe_, probe_resolve_, light_, light_all_, compose_, forward_, forward_emissive_, luminance_, bright_,
+                               reflect_colour_, kawase_, bloom_add_, kawase_sum_, gaussian_, tonemap_, fxaa_, dof_ratio_, dof_down_, dof_blur_, dof_blend_, mb_velocity_,
+                               mb_tile_pipeline_, mb_bake_pipeline_, mb_mcguire_, mb_composite_, velocity_pipeline_, fsblur_, banding_, screen_fx_,
+                               debug_, occlusion_, occlusion_blur_, reflect_make_, reflect_blend_, vfx_composite_, mirror_temporal_pipeline_,
+@@ -443,7 +454,7 @@ bool SceneRenderer::CreatePipelines() {
+ }
+ 
+ void SceneRenderer::DestroyPipelines() {
+-    VkPipeline* all[] = {&gbuffer_, &decal_, &shadow_pipeline_, &probe_, &probe_resolve_, &light_, &compose_, &forward_, &forward_emissive_, &luminance_, &bright_,
++    VkPipeline* all[] = {&gbuffer_, &decal_, &shadow_pipeline_, &probe_, &probe_resolve_, &light_, &light_all_, &compose_, &forward_, &forward_emissive_, &luminance_, &bright_,
+                          &reflect_colour_, &kawase_, &bloom_add_, &kawase_sum_, &gaussian_, &tonemap_, &fxaa_, &dof_ratio_, &dof_down_, &dof_blur_, &dof_blend_,
+                          &mb_velocity_, &mb_tile_pipeline_, &mb_bake_pipeline_, &mb_mcguire_, &mb_composite_, &velocity_pipeline_, &fsblur_,
+                          &banding_, &screen_fx_, &debug_, &occlusion_, &occlusion_blur_, &reflect_make_, &reflect_blend_, &vfx_composite_,
+@@ -555,6 +566,7 @@ void SceneRenderer::Shutdown() {
          ctx.DestroyBuffer(slot.luminance);
          vkDestroyQueryPool(device_, slot.queries, nullptr);
          vkDestroyQueryPool(device_, slot.upscale_queries, nullptr);
@@ -672,7 +832,7 @@ index 1f96981..7fd56b9 100644
      }
      vkDestroyPipelineLayout(device_, layout_, nullptr);
      vkDestroyDescriptorPool(device_, pool_, nullptr);
-@@ -576,7 +579,7 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
+@@ -576,7 +588,7 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
  void SceneRenderer::DestroyTargets() {
      vk::Context& ctx = renderer_->Context();
      RenderTarget* targets[] = {&albedo_, &normal_, &material_, &depth_, &diffuse_, &specular_, &probe_acc_, &hdr_, &bloom_[0], &bloom_[1], &bloom_[2],
@@ -681,7 +841,7 @@ index 1f96981..7fd56b9 100644
                                 &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_,
                                 &mb_tile_[0], &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_,
                                 &mb_blur_[0], &mb_blur_[1], &mirror_history_, &mirror_temporal_, &reflect_layer_, &reflect_offset_,
-@@ -612,6 +615,9 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -612,6 +624,9 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
      vkDeviceWaitIdle(device_);
      DestroyTargets();
      mirror_stale_.valid = false;
@@ -691,7 +851,7 @@ index 1f96981..7fd56b9 100644
      const VkImageUsageFlags color = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
      const VkImageUsageFlags dumped = color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      const uint32_t bloom_width = std::max(1u, static_cast<uint32_t>(std::lround(270.0 * output.width / std::max(output.height, 1u))));
-@@ -626,11 +632,13 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -626,11 +641,13 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
                CreateTarget(probe_acc_, kLightFormat, extent, dumped, c) &&
                CreateTarget(hdr_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(hdr_copy_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
@@ -707,7 +867,7 @@ index 1f96981..7fd56b9 100644
                CreateTarget(ldr_[0], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(ldr_[1], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(history_, kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
-@@ -664,7 +672,7 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -664,7 +681,7 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
      }
      renderer_->Context().Submit([&](VkCommandBuffer cmd) {
          RenderTarget* colors[] = {&albedo_, &normal_, &material_, &diffuse_, &specular_, &probe_acc_, &hdr_, &mirror_, &bloom_[0], &bloom_[1], &bloom_[2],
@@ -716,7 +876,7 @@ index 1f96981..7fd56b9 100644
                                    &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_, &mb_tile_[0],
                                    &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_, &mb_blur_[0],
                                    &mb_blur_[1]};
-@@ -1174,10 +1182,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+@@ -1174,10 +1191,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
      stats_.gpu_ms = span(0, 6);
  }
  
@@ -802,7 +962,7 @@ index 1f96981..7fd56b9 100644
      if (slot.reflection_sampled) {
          vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
          const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
-@@ -1189,7 +1272,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -1189,7 +1281,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -814,7 +974,7 @@ index 1f96981..7fd56b9 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..07a571f 100644
+index 6c9b165..c76a20c 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
 @@ -206,6 +206,28 @@ public:
@@ -918,7 +1078,15 @@ index 6c9b165..07a571f 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -636,6 +708,14 @@ private:
+@@ -441,6 +513,7 @@ private:
+     VkPipeline probe_ = VK_NULL_HANDLE;
+     VkPipeline probe_resolve_ = VK_NULL_HANDLE;
+     VkPipeline light_ = VK_NULL_HANDLE;
++    VkPipeline light_all_ = VK_NULL_HANDLE;  // all of a view's lights in one full-screen pass
+     VkPipeline compose_ = VK_NULL_HANDLE;
+     VkPipeline forward_ = VK_NULL_HANDLE;
+     VkPipeline luminance_ = VK_NULL_HANDLE;
+@@ -636,6 +709,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -1156,10 +1324,10 @@ index 1daa3d8..34f7117 100644
          pitch = target_pitch = ClampPitch(value);
          vr_script_pitch_ = pitch;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..61e37b8 100644
+index 42d8b01..7ebc8d3 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -16,6 +16,51 @@ struct Entry {
+@@ -16,6 +16,56 @@ struct Entry {
  };
  
  constexpr Entry kTexts[] = {
@@ -1196,6 +1364,11 @@ index 42d8b01..61e37b8 100644
 +    {"pc_vp_center", {"Sharp centre", "", "", "Centro nítido", "", "", ""}},
 +    {"pc_note_vp_center", {"How much of the view the sharp centre covers, with the same pixels: smaller is sharper, larger covers more and hides the edge better. The frame rate does not change.", "", "", "Cuánto de la vista cubre el centro nítido, con los mismos píxeles: más pequeño es más nítido; más grande cubre más y disimula mejor el borde. No cambia los fps.", "", "", ""}},
 +    {"pc_vp_dynres", {"Dynamic resolution", "", "", "Resolución dinámica", "", "", ""}},
++    {"pc_vp_hdr", {"HDR (bright lights)", "", "", "HDR (realce de luces)", "", "", ""}},
++    {"pc_vp_hdr_soft", {"Soft", "", "", "Suave", "", "", ""}},
++    {"pc_vp_hdr_medium", {"Medium", "", "", "Medio", "", "", ""}},
++    {"pc_vp_hdr_max", {"Maximum", "", "", "Máximo", "", "", ""}},
++    {"pc_note_vp_hdr", {"The brightest parts of the picture (lamps, light on the walls) shine above white with the headset's HDR; the darks do not change. Costs nothing. Applies right away.", "", "", "Las partes más brillantes de la imagen (lámparas, luz sobre las paredes) brillan por encima del blanco con el HDR del visor; los oscuros no cambian. No cuesta rendimiento. Se aplica al momento.", "", "", ""}},
 +    {"pc_note_vp_dynres", {"While the GPU cannot keep the frame rate, the eyes are drawn smaller (down to half across), and larger again when it can. Smoother, less sharp. Applies right away.", "", "", "Mientras la GPU no llega a la frecuencia, los ojos se dibujan más pequeños (hasta la mitad de ancho) y vuelven a crecer cuando llega. Más fluido, menos nítido. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_left_hand", {"Left hand", "", "", "Mano izquierda", "", "", ""}},
 +    {"pc_vp_right_hand", {"Right hand", "", "", "Mano derecha", "", "", ""}},
@@ -1719,7 +1892,7 @@ index d1485b2..4c5bd1e 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..bdc53d2 100644
+index d629ab3..77bc877 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -1789,7 +1962,7 @@ index d629ab3..bdc53d2 100644
          const pt::AppSettings& s = app_.settings;
          std::vector<pt::game::PcSettingSection> out;
          pt::game::PcSettingSection display{"pc_section_display", 0, {}};
-@@ -1863,12 +1889,83 @@ public:
+@@ -1863,12 +1889,89 @@ public:
              s.vr.enabled = value == 1;
              pt::LogInfo("vr: {} at the next start (PC settings)", s.vr.enabled ? "on" : "off");
              break;
@@ -1840,6 +2013,12 @@ index d629ab3..bdc53d2 100644
 +            pt::visionos::Headset().center = 30 + 5 * std::clamp(value, 0, 10);
 +            pt::visionos::SettingChanged("center", std::to_string(pt::visionos::Headset().center));
 +            return;
++        case kVpHdr: {
++            static constexpr int kHdrSteps[4] = {100, 140, 170, 200};
++            pt::visionos::Headset().hdr = kHdrSteps[std::clamp(value, 0, 3)];
++            pt::visionos::SettingChanged("hdr", std::to_string(pt::visionos::Headset().hdr));
++            return;
++        }
 +        case kVpDynamicRes:
 +            pt::visionos::Headset().dynamic_resolution = value == 1;
 +            pt::visionos::SettingChanged("dynamic_resolution", value == 1 ? "1" : "0");
@@ -1873,7 +2052,7 @@ index d629ab3..bdc53d2 100644
          case kFrameLimit:
              if (!app_.options.fps_limit_override) s.display.fps_limit = value == 1 ? 60 : 30;
              break;
-@@ -1939,7 +2036,13 @@ public:
+@@ -1939,7 +2042,13 @@ public:
              std::string reason;
              pt::ApplyGraphicsPreset(s,static_cast<pt::GraphicsPreset>(std::clamp(value,0,4)),app_.scene.RayTracingSupported(reason));
              app_.textures.SetAnisotropy(s.graphics.anisotropy);
@@ -1887,7 +2066,7 @@ index d629ab3..bdc53d2 100644
              break;
          }
          case kShadowQuality:
-@@ -1995,6 +2098,11 @@ public:
+@@ -1995,6 +2104,11 @@ public:
              return;
          }
          ApplyGraphicsSettings(app_);
@@ -1899,7 +2078,7 @@ index d629ab3..bdc53d2 100644
          Save();
      }
  
-@@ -2197,6 +2305,9 @@ public:
+@@ -2197,6 +2311,9 @@ public:
          if (id == kGraphics) {
              page_ = kGraphicsPage;
          }
@@ -1909,16 +2088,16 @@ index d629ab3..bdc53d2 100644
          if (id == kMicrophoneTest) {
              page_ = kMicrophonePage;
              app_.microphone_test = true;
-@@ -2285,6 +2396,8 @@ private:
+@@ -2285,6 +2402,8 @@ private:
          kArchive, kArchiveLock,
          kVr, kVrMode, kVrFlashlight, kVrTurn,
          kFrameLimit,
 +        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpMetalFx, kVpFov, kVpRecenter,
-+        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes,
++        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr,
          kLoopFirst = 1000,
          kRunSplitFirst = 3000,
          kModFirst = 2000,
-@@ -2572,6 +2685,9 @@ private:
+@@ -2572,6 +2691,9 @@ private:
      int page_ = kMainPage;
      static constexpr float kMouseSteps[] = {0.25f, 0.35f, 0.5f, 0.7f, 1.0f, 1.4f, 2.0f, 2.8f, 4.0f, 5.0f};
      static constexpr float kDeadZoneSteps[] = {0.0f, 0.05f, 26.0f / 255.0f, 0.15f, 0.2f, 0.25f, 0.3f};
@@ -1928,7 +2107,7 @@ index d629ab3..bdc53d2 100644
  
      static pt::game::PcSettingRow Row(int id, std::string label, std::vector<std::string> values, int value, std::string note) {
          pt::game::PcSettingRow row;
-@@ -2642,6 +2758,93 @@ private:
+@@ -2642,6 +2764,95 @@ private:
          return Row(kEnhancedTextures,"pc_enhanced_textures",std::move(values),app_.settings.graphics.enhanced_textures?1:0,note);
      }
  
@@ -1967,6 +2146,8 @@ index d629ab3..bdc53d2 100644
 +        center.wrap = false;
 +        headset.rows.push_back(std::move(center));
 +        headset.rows.push_back(Row(kVpDynamicRes, "pc_vp_dynres", OffOn(), h.dynamic_resolution ? 1 : 0, "pc_note_vp_dynres"));
++        headset.rows.push_back(Row(kVpHdr, "pc_vp_hdr", {"pc_off", "pc_vp_hdr_soft", "pc_vp_hdr_medium", "pc_vp_hdr_max"},
++                                   h.hdr >= 200 ? 3 : h.hdr >= 170 ? 2 : h.hdr >= 140 ? 1 : 0, "pc_note_vp_hdr"));
 +        pt::game::PcSettingRow graphics = Row(kGraphics, "pc_graphics", {"pc_graphics_value"}, 0, "pc_note_graphics");
 +        graphics.link = true;
 +        headset.rows.push_back(std::move(graphics));
@@ -2022,7 +2203,7 @@ index d629ab3..bdc53d2 100644
      std::vector<pt::game::PcSettingSection> GraphicsSections() const {
          const auto& s=app_.settings;
          std::string reason;
-@@ -2690,7 +2893,9 @@ private:
+@@ -2690,7 +2901,9 @@ private:
      std::vector<pt::game::PcSettingSection> TextureSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection textures{"pc_section_textures",0,{}};
@@ -2032,7 +2213,7 @@ index d629ab3..bdc53d2 100644
          auto anisotropy=Row(kAnisotropy,"pc_anisotropy",{"pc_off","2x","4x","8x","16x"},g.anisotropy>=16?4:g.anisotropy>=8?3:g.anisotropy>=4?2:g.anisotropy>=2?1:0,"pc_note_anisotropy");
          anisotropy.wrap=false;textures.rows.push_back(std::move(anisotropy));
          textures.rows.push_back(Row(kTextureDetail,"pc_texture_detail",{"pc_detail_reduced","pc_preset_original","pc_detail_fine"},g.texture_detail,"pc_note_texture_detail"));
-@@ -2724,6 +2929,14 @@ private:
+@@ -2724,6 +2937,14 @@ private:
      std::vector<pt::game::PcSettingSection> EffectSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection effects{"pc_graphics_effects",0,{}};
@@ -2047,7 +2228,7 @@ index d629ab3..bdc53d2 100644
          effects.rows.push_back(Row(kDepthOfField,"pc_dof",OffOn(),g.depth_of_field?1:0,"pc_note_dof"));
          effects.rows.push_back(Row(kMotionBlur,"pc_motion_blur",OffOn(),g.motion_blur?1:0,"pc_note_motion_blur"));
          effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
-@@ -3095,7 +3308,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3095,7 +3316,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
      game.SetThirdPerson(app.settings.camera.third_person || options.third_person);
      pt::game::GameSound sound(game);
      std::vector<float> captured;
@@ -2057,7 +2238,7 @@ index d629ab3..bdc53d2 100644
          sound.System().SetMasterVolume(app.settings.audio.volume);
          if (options.seed) {
              sound.System().SetRandomSeed(options.seed);
-@@ -3139,14 +3353,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3139,14 +3361,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
      const bool pads = app.window || options.virtual_pads;
      if (pads) {
          input.Init();
@@ -2074,7 +2255,7 @@ index d629ab3..bdc53d2 100644
      script.SetPads(options.virtual_pads ? &virtual_pads : nullptr, &input);
      std::vector<float> offline_audio;
      double audio_device_time = 0.0;
-@@ -3207,7 +3421,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3207,7 +3429,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
      float accumulator = 0.0f;
      pt::Camera tick_camera_from = game.ViewCamera();
      pt::Camera motion_camera_from = tick_camera_from;
@@ -2085,7 +2266,7 @@ index d629ab3..bdc53d2 100644
      TickState tick_state;
      std::vector<glm::mat4> blended_skins;
      static const bool render_trace = std::getenv("PT_RENDER_TRACE") != nullptr;
-@@ -3487,6 +3703,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3487,6 +3711,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
          float dt = options.display_rate > 0.0f ? 1.0f / options.display_rate : 1.0f / options.tick_rate;
@@ -2099,7 +2280,7 @@ index d629ab3..bdc53d2 100644
          if (app.window) {
              const uint64_t now = SDL_GetTicksNS();
              dt = std::clamp(static_cast<float>(now - last_ticks) * 1e-9f, 0.0001f, 0.1f);
-@@ -3554,7 +3777,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3554,7 +3785,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (polled.pointer_valid) {
              pending_input.pointer = polled.pointer;
              pending_input.pointer_valid = true;
@@ -2108,7 +2289,7 @@ index d629ab3..bdc53d2 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
-@@ -3876,8 +4099,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3876,8 +4107,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
              previous_microphone_test = app.microphone_test;
          }
          const bool voice_file = !voice_input.empty();
@@ -2125,7 +2306,7 @@ index d629ab3..bdc53d2 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4125,21 +4354,56 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4125,21 +4362,56 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  last_scene_time = game.Time();
                  vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
                                    lighting, vfx_pass, blend);
@@ -2187,7 +2368,7 @@ index d629ab3..bdc53d2 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4832,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4840,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -2204,7 +2385,7 @@ index d629ab3..bdc53d2 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4878,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4886,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

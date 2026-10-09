@@ -42,6 +42,9 @@ struct PTSettings: Codable, Equatable {
     var reflections = false
     /// The textures' anisotropic filtering: 0 (off, trilinear), 2, 4, 8 or 16.
     var anisotropy = 8
+    /// HDR from the game's picture: its brightest parts up to this percent of SDR white (100: off;
+    /// 140, 170, 200). Not part of a preset.
+    var hdr = 170
     /// Foveated rendering (where the eyes look is drawn at the drawable's full resolution).
     var foveation = true
     /// Compositor Services' render quality with foveation (visionOS 26): 0 leaves the system's
@@ -231,7 +234,7 @@ struct PTSettings: Codable, Equatable {
         case preset, resolutionScale, targetFPS, fov, graphicsPreset, shadows
         // A new key: the old one was saved as on by versions in which it did nothing.
         case dynamicResolution = "dynamicResolutionChosen"
-        case ssao, bloom, reflections, anisotropy, foveation, compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
+        case ssao, bloom, reflections, anisotropy, hdr, foveation, compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -252,6 +255,7 @@ struct PTSettings: Codable, Equatable {
         bloom = (try? c.decodeIfPresent(Bool.self, forKey: .bloom)) ?? base.bloom
         reflections = (try? c.decodeIfPresent(Bool.self, forKey: .reflections)) ?? base.reflections
         anisotropy = (try? c.decodeIfPresent(Int.self, forKey: .anisotropy)) ?? base.anisotropy
+        hdr = (try? c.decodeIfPresent(Int.self, forKey: .hdr)) ?? base.hdr
         foveation = (try? c.decodeIfPresent(Bool.self, forKey: .foveation)) ?? base.foveation
         compositorQuality = (try? c.decodeIfPresent(Float.self, forKey: .compositorQuality)) ?? base.compositorQuality
         metalFX = (try? c.decodeIfPresent(Bool.self, forKey: .metalFX)) ?? base.metalFX
@@ -300,6 +304,7 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_BLOOM=\(flag(bloom))",
             "PT_VP_REFLECTIONS=\(flag(reflections))",
             "PT_VP_ANISOTROPY=\(anisotropy)",
+            "PT_VP_HDR=\(hdr)",
             "PT_VP_FOVEATION=\(flag(foveation))",
             "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
             "PT_VP_METALFX=\(flag(metalFX))",

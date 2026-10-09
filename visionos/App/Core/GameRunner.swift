@@ -183,6 +183,7 @@ final class GameRunner: @unchecked Sendable {
         case "bloom": s.bloom = flag
         case "reflections": s.reflections = flag
         case "anisotropy": s.anisotropy = Int(value) ?? s.anisotropy
+        case "hdr": s.hdr = Int(value) ?? s.hdr
         case "turn": s.turnMode = Int(value) ?? s.turnMode
         case "snap_degrees": s.snapDegrees = Int(value) ?? s.snapDegrees
         case "smooth_speed": s.smoothSpeed = Int(value) ?? s.smoothSpeed

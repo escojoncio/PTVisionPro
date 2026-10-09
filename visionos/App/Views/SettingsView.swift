@@ -132,6 +132,12 @@ struct SettingsView: View {
                 Text("8x").tag(8)
                 Text("16x").tag(16)
             }
+            Picker(L("HDR (realce de luces)", "HDR (bright lights)"), selection: int(\.hdr)) {
+                Text(L("No", "Off")).tag(100)
+                Text(L("Suave", "Soft")).tag(140)
+                Text(L("Medio", "Medium")).tag(170)
+                Text(L("Máximo", "Maximum")).tag(200)
+            }
         } header: {
             Text(L("Gráficos", "Graphics"))
         }
