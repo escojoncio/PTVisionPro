@@ -969,12 +969,14 @@ static float EyeFactor(const pt::visionos::HeadsetSettings& h) {
 // pixels are rasterized at that density inside the centre (the setting's share of the field
 // around the eye's axis) and at the wide view's outside it. The scene's targets and the eye
 // images hold the map's physical pixels; the game's shaders and the composition move between the
-// two through tables taken from the map itself. PT_VP_VRR=0 keeps the insets.
+// two through tables taken from the map itself. Off unless PT_VP_VRR=1 (the insets).
 
 bool Host::Impl::VrrWanted() const {
+    // Off by default (build 37, log pt (20): no faster than the insets at the same density, with
+    // artefacts); PT_VP_VRR=1 turns it on.
     static const bool off = [] {
         const char* v = std::getenv("PT_VP_VRR");
-        return v && v[0] == '0';
+        return !(v && v[0] == '1');
     }();
     return !off && !vrr_failed && eye_factor < 0.999f && mtl_device != nil && eye_vrr_pipeline != nil;
 }
