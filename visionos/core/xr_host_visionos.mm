@@ -1005,10 +1005,15 @@ bool Host::Impl::BuildVrr(Host& host) {
     id<MTLRasterizationRateMap> maps[2] = {nil, nil};
     glm::vec4 tangents[2];
     MTLSize physical[2] = {};
-    // The dense zones of each eye: full density where a zone reaches into the centre (symmetric
-    // around the eye's axis, as the inset), the wide view's (`center` of it) elsewhere.
-    bool dense_x[2][kZones] = {};
-    bool dense_y[2][kZones] = {};
+    // How much of each zone lies in the centre (symmetric around the eye's axis, as the inset):
+    // full density there, the wide view's (`center` of it) outside, in between for a zone that is
+    // partly in (no zone drawn denser than the centre needs).
+    float dense_x[2][kZones] = {};
+    float dense_y[2][kZones] = {};
+    auto inside = [](float a, float b, float half) {
+        const float lo = std::min(a, b), hi = std::max(a, b);
+        return std::clamp((std::min(hi, half) - std::max(lo, -half)) / std::max(hi - lo, 1.0e-6f), 0.0f, 1.0f);
+    };
     for (int e = 0; e < 2; ++e) {
         // The eye's own field (left, right, up, down), framed as the game frames it.
         const simd_float4 t = eye_tangents[e];
@@ -1019,10 +1024,10 @@ bool Host::Impl::BuildVrr(Host& host) {
             const float b = static_cast<float>(i + 1) / kZones;
             const float x0 = f.center.x - f.tan_x + a * 2.0f * f.tan_x;
             const float x1 = f.center.x - f.tan_x + b * 2.0f * f.tan_x;
-            dense_x[e][i] = x1 > -center * f.tan_x && x0 < center * f.tan_x;
+            dense_x[e][i] = inside(x0, x1, center * f.tan_x);
             const float y0 = f.center.y + f.tan_y - a * 2.0f * f.tan_y;  // top of the zone
             const float y1 = f.center.y + f.tan_y - b * 2.0f * f.tan_y;
-            dense_y[e][i] = y0 > -center * f.tan_y && y1 < center * f.tan_y;
+            dense_y[e][i] = inside(y1, y0, center * f.tan_y);
         }
     }
     for (int e = 0; e < 2; ++e) {
@@ -1032,8 +1037,8 @@ bool Host::Impl::BuildVrr(Host& host) {
         float qy[kZones];
         for (int i = 0; i < kZones; ++i) {
             const int m = kZones - 1 - i;
-            qx[i] = (dense_x[e][i] || dense_x[1 - e][m]) ? 1.0f : center;
-            qy[i] = (dense_y[0][i] || dense_y[1][i]) ? 1.0f : center;
+            qx[i] = center + (1.0f - center) * std::max(dense_x[e][i], dense_x[1 - e][m]);
+            qy[i] = center + (1.0f - center) * std::max(dense_y[0][i], dense_y[1][i]);
         }
         MTLRasterizationRateLayerDescriptor* layer = [[MTLRasterizationRateLayerDescriptor alloc] initWithSampleCount:MTLSizeMake(kZones, kZones, 1)
                                                                                                          horizontal:qx
@@ -2231,6 +2236,15 @@ void Host::SetFrameDivisor(int divisor) {
 float Host::GpuBudgetMs() const {
     const Impl& x = *impl_;
     if (!pt::visionos::Headset().dynamic_resolution) return 0.0f;
+    if (vrr_.active) {
+        // The eyes go through rate maps at a fixed size: no dynamic resolution then.
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LogInfo("vr: dynamic resolution does nothing with the rate maps (the eyes' size is fixed)");
+        }
+        return 0.0f;
+    }
     // The frame's time, less a margin for the composition (about a millisecond) and the copies
     // into the eye images: what the views may take.
     const float frame_ms = 1000.0f * static_cast<float>(x.divisor) / static_cast<float>(x.Hz());
