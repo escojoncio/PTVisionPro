@@ -163,7 +163,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
-- **Build 29: OK?** (pendiente de CI; sin probar):
+- **Build 29 (run 33): OK** → `releases/download/build-33/PTVisionPro-33.ipa` (sin probar):
   - `light_front_` (scene_renderer.cpp, mismo `PipelineDesc` que `light_` con `GREATER_OR_EQUAL`): en `RecordLighting`, si el
     ojo de la vista está fuera del volumen por `near·4 + 0,05 m` (local por eje, filas de la inversa; determinante > 0), caras
     delanteras (cull BACK) → la pared delante de la luz falla la profundidad antes del shader. Si no, caras traseras como
@@ -547,6 +547,10 @@ Frecuencias: M2 90/96/100 Hz → modos estables 45/90, 48/96, 50/100 (M2 apunta 
 120 Hz → 60/120 como PS VR. La app no puede pedir la frecuencia (comprobado, build 21 la mide y la registra).
 Preset M5 bloqueado sin M5: hecho (build 21).
 
+VRR (estudiado tras build 29): MoltenVK (último y `fae55a1`) no soporta `rasterizationRateMap` ni
+VK_EXT_fragment_density_map → habría que parchearlo. En VRR `[[position]]` del fragmento es físico: 37 de 76 shaders usan
+`gl_FragCoord`/`PixelNdc` (SSAO, SSR, blur, bloom, FXAA, partículas, upscalers...) y necesitarían el decodificador del mapa.
+Alternativa barata: máscara del centro en las vistas anchas.
 Siguiente (tras build 29): prototipo de foveado en una pasada (VRR, `MTLRasterizationRateMap` en las pasadas de MoltenVK)
 frente a máscara del centro en las vistas anchas; medir con `cull (...)` y `gpu labels` si `lighting/lights` baja al mirar paredes.
 
