@@ -38,7 +38,7 @@ index 7486360..0bc0581 100644
  void EndLabel(VkCommandBuffer cmd);
  
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..d084162 100644
+index 40d339d..aba3281 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -610,6 +610,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -100,7 +100,33 @@ index 40d339d..d084162 100644
      if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
          std::map<std::string, std::pair<bool, float>> now;
          for (uint32_t i = 0; i < light_count_; ++i) {
-@@ -2099,9 +2113,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -1422,6 +1436,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+         }
+     };
+     if (probes) {
++        BeginLabel(cmd, "probes");
+         UseTargets(cmd, {{&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                          {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
+                          {&probe_acc_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+@@ -1431,7 +1446,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+         draw_probes(shrink ? 1u : 0u);
+         vkCmdEndRendering(cmd);
+         UseTargets(cmd, {{&probe_acc_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++        EndLabel(cmd);
+     }
++    BeginLabel(cmd, "lights");
+     UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+@@ -1490,6 +1507,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+     }
+     vkCmdEndRendering(cmd);
+     UseTargets(cmd, {{&diffuse_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&specular_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    EndLabel(cmd);
+ }
+ 
+ void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
+@@ -2099,9 +2117,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -115,7 +141,49 @@ index 40d339d..d084162 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2249,6 +2265,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2110,6 +2130,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+     if (main_view && mirror_active_) {
+         UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
+     }
++    // (Each of the three render passes timed on its own: timestamps fall between passes.)
++    BeginLabel(cmd, "compose");
+     BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
+     gpu::PassPush push;
+     push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
+@@ -2133,13 +2155,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+     }
+     Fullscreen(cmd, compose_, push);
+     vkCmdEndRendering(cmd);
++    EndLabel(cmd);
+     if (main_view && dump_requested_ && &output == &hdr_) {
+         RecordDumpCopy(cmd, output, dump_compose_);
+     }
+     UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}});
++    BeginLabel(cmd, "forward");
+     BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, false, false);
+     RecordForward(cmd, view, output);
+     vkCmdEndRendering(cmd);
++    EndLabel(cmd);
+     if (main_view && dump_requested_ && &output == &hdr_) {
+         RecordDumpCopy(cmd, output, dump_forward_);
+     }
+@@ -2147,6 +2172,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+     if (main_view) {
+         Stamp(cmd, 7);
+     }
++    BeginLabel(cmd, "effects");
+     BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
+     if (main_view && up_.enabled) {
+         RecordOpaqueSnapshot(cmd, output);
+@@ -2181,6 +2207,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+         }
+     }
+     vkCmdEndRendering(cmd);
++    EndLabel(cmd);
+     if (main_view && dump_requested_ && &output == &hdr_) {
+         RecordDumpCopy(cmd, output, dump_scene_);
+         dump_recorded_ = true;
+@@ -2249,6 +2276,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -131,7 +199,7 @@ index 40d339d..d084162 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2355,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2366,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -192,7 +260,7 @@ index 40d339d..d084162 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2529,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2540,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -216,8 +284,121 @@ index 40d339d..d084162 100644
          ++frame_counter_;
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
+diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
+index 19dd1a8..5bb0b27 100644
+--- a/src/engine/render/scene_post.cpp
++++ b/src/engine/render/scene_post.cpp
+@@ -89,6 +89,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+ 
+     const bool bloom = toggles.bloom && lighting.valid && std::abs(exposure.bloom_size) >= 1.0e-5f;
+     if (bloom) {
++        BeginLabel(cmd, "bloom");
+         UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+         BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[0], false, {}}});
+         push.f0 = BloomPolynomial(exposure.bloom_extraction);
+@@ -134,19 +135,29 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+             push.f1 = saved_f1;
+         }
+         UseTargets(cmd, {{&bloom_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++        EndLabel(cmd);
+     }
+     Stamp(cmd, 11);
+ 
+-    UseTargets(cmd, {{&flare_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
+-    BeginPass(cmd, output_extent_, {{&flare_, true, {}}});
+-    if (vfx_filter && vr_eye_ < 0) {
+-        vfx_filter(FilterContext(cmd, 1u));
+-        BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
++    // The lens flares' layer: in the headset nothing draws into it (vr_eye_ >= 0), so once
++    // cleared it is left as it is instead of being cleared again for every view.
++    const bool flares = vfx_filter && vr_eye_ < 0;
++    if (flares || !flare_clean_) {
++        BeginLabel(cmd, "flare");
++        UseTargets(cmd, {{&flare_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
++        BeginPass(cmd, output_extent_, {{&flare_, true, {}}});
++        if (flares) {
++            vfx_filter(FilterContext(cmd, 1u));
++            BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
++        }
++        vkCmdEndRendering(cmd);
++        EndLabel(cmd);
+     }
+-    vkCmdEndRendering(cmd);
++    flare_clean_ = !flares;
+     UseTargets(cmd, {{&flare_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
+ 
+     int current = 0;
++    BeginLabel(cmd, "tonemap");
+     UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&ldr_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+     BeginPass(cmd, output_extent_, {{&ldr_[0], false, {}}});
+     push.ids.x = 0;
+@@ -161,9 +172,11 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+     Fullscreen(cmd, tonemap_, push);
+     vkCmdEndRendering(cmd);
+     UseTargets(cmd, {{&ldr_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    EndLabel(cmd);
+ 
+     auto ldr_index = [](int i) { return i == 0 ? gpu::kImgLdrA : gpu::kImgLdrB; };
+-    auto run = [&](VkPipeline pipeline, const gpu::PassPush& p) {
++    auto run = [&](const char* label, VkPipeline pipeline, const gpu::PassPush& p) {
++        BeginLabel(cmd, label);
+         RenderTarget& dst = ldr_[1 - current];
+         UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+         BeginPass(cmd, output_extent_, {{&dst, false, {}}});
+@@ -171,11 +184,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+         vkCmdEndRendering(cmd);
+         UseTargets(cmd, {{&dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
+         current = 1 - current;
++        EndLabel(cmd);
+     };
+ 
+     if (toggles.fxaa && !up_.enabled && !native_aa_order) {
+         push.ids.x = ldr_index(current);
+-        run(fxaa_, push);
++        run("fxaa", fxaa_, push);
+     }
+     if (toggles.depth_of_field && screen.depth_of_field && lighting.valid) {
+         RecordDepthOfField(cmd, screen, current);
+@@ -187,7 +201,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+         gpu::PassPush lut;
+         lut.ids = glm::uvec4(ldr_index(current), 1, 0, post_view_);
+         lut.f0 = glm::vec4(0.0f, lut_blend, 1.0f, 1.0f);
+-        run(tonemap_, lut);
++        run("color lut", tonemap_, lut);
+     }
+ 
+     const bool blur = toggles.full_screen_blur && screen.full_screen_blur && lighting.valid;
+@@ -203,7 +217,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+         const float share = std::clamp(dt * 30.0f, 0.05f, 2.0f);
+         const float rate = std::pow(std::clamp(screen.blur_blend_rate, 0.0f, 0.999f), share);
+         push.f0 = glm::vec4(screen.blur_fetch_band * std::sqrt(share), rate, 0.0f, 0.0f);
+-        run(fsblur_, push);
++        run("screen blur", fsblur_, push);
+         UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+         CopyToHistory(cmd, ldr_[current]);
+         UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
+@@ -214,9 +228,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+     if (screen.colour_banding_canceller && lighting.valid) {
+         UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
+         push.ids = glm::uvec4(ldr_index(current), 0, 0, main_view_.index);
+-        run(banding_, push);
++        run("banding", banding_, push);
+     }
+ 
++    BeginLabel(cmd, "screen");
+     RenderTarget output;
+     output.image = renderer_->SceneColor();
+     output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+@@ -240,6 +255,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+         BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+     }
+     vkCmdEndRendering(cmd);
++    EndLabel(cmd);
+     (void)dt;
+ }
+ 
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..f757cdd 100644
+index 1f96981..7033352 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
 @@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
@@ -237,7 +418,15 @@ index 1f96981..f757cdd 100644
      }
      vkDestroyPipelineLayout(device_, layout_, nullptr);
      vkDestroyDescriptorPool(device_, pool_, nullptr);
-@@ -1174,10 +1177,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+@@ -612,6 +615,7 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+     vkDeviceWaitIdle(device_);
+     DestroyTargets();
+     mirror_stale_.valid = false;
++    flare_clean_ = false;
+     const VkImageUsageFlags color = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+     const VkImageUsageFlags dumped = color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+     const uint32_t bloom_width = std::max(1u, static_cast<uint32_t>(std::lround(270.0 * output.width / std::max(output.height, 1u))));
+@@ -1174,10 +1178,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
      stats_.gpu_ms = span(0, 6);
  }
  
@@ -302,7 +491,7 @@ index 1f96981..f757cdd 100644
 +    }
 +    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 +    std::string line;
-+    for (size_t i = 0; i < rows.size() && i < 24; ++i) {
++    for (size_t i = 0; i < rows.size() && i < 40; ++i) {
 +        if (rows[i].second < 0.05) break;
 +        line += std::format("{}{} {:.2f}", i ? ", " : "", rows[i].first, rows[i].second);
 +    }
@@ -323,7 +512,7 @@ index 1f96981..f757cdd 100644
      if (slot.reflection_sampled) {
          vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
          const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
-@@ -1189,7 +1267,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -1189,7 +1268,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -335,7 +524,7 @@ index 1f96981..f757cdd 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..c06b228 100644
+index 6c9b165..1582f03 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
 @@ -206,6 +206,15 @@ public:
@@ -385,7 +574,15 @@ index 6c9b165..c06b228 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -636,6 +668,14 @@ private:
+@@ -377,6 +409,7 @@ private:
+     RenderTarget hdr_;
+     RenderTarget bloom_[3];
+     RenderTarget flare_;
++    bool flare_clean_ = false;  // flare_ holds the clear and nothing since (skips clearing it again)
+     RenderTarget ldr_[2];
+     RenderTarget history_;
+     RenderTarget dof_half_;
+@@ -636,6 +669,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -401,14 +598,15 @@ index 6c9b165..c06b228 100644
  
  }
 diff --git a/src/engine/xr/xr_host.cpp b/src/engine/xr/xr_host.cpp
-index 5e7cee1..0861d9f 100644
+index 5e7cee1..fee13d0 100644
 --- a/src/engine/xr/xr_host.cpp
 +++ b/src/engine/xr/xr_host.cpp
-@@ -53,6 +53,11 @@ void Host::LocateViews() {}
+@@ -53,6 +53,12 @@ void Host::LocateViews() {}
  void Host::SyncActions() {}
  void Host::EndFrame(const FrameLayers&) {}
  void Host::Haptic(int, float, float) {}
 +void Host::SetFrameDivisor(int) {}
++float Host::GpuBudgetMs() const { return 0.0f; }
 +void Host::SetPointerWanted(bool) {}
 +bool Host::TakeRecenter() { return false; }
 +bool Host::InsetWanted(float&) const { return false; }
@@ -416,11 +614,12 @@ index 5e7cee1..0861d9f 100644
  bool Host::Acquire(Swapchain&) { return false; }
  void Host::Release(Swapchain&) {}
  
-@@ -864,6 +869,12 @@ void Host::Haptic(int hand, float amplitude, float seconds) {
+@@ -864,6 +870,13 @@ void Host::Haptic(int hand, float amplitude, float seconds) {
      x.xrApplyHapticFeedback(x.session, &info, reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
  }
  
 +void Host::SetFrameDivisor(int) {}
++float Host::GpuBudgetMs() const { return 0.0f; }
 +void Host::SetPointerWanted(bool) {}
 +bool Host::TakeRecenter() { return false; }
 +bool Host::InsetWanted(float&) const { return false; }
@@ -430,7 +629,7 @@ index 5e7cee1..0861d9f 100644
  
  }
 diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
-index b5bf253..1f38ee3 100644
+index b5bf253..e508d2a 100644
 --- a/src/engine/xr/xr_host.h
 +++ b/src/engine/xr/xr_host.h
 @@ -37,6 +37,18 @@ struct ControllerState {
@@ -463,7 +662,7 @@ index b5bf253..1f38ee3 100644
  };
  
  class Host final : public vk::ContextCreator {
-@@ -105,11 +121,25 @@ public:
+@@ -105,11 +121,28 @@ public:
      Swapchain& EyeSwapchain(int i) { return eye_swapchains_[i]; }
      Swapchain& HudSwapchain() { return hud_swapchain_; }
      Swapchain& ScreenSwapchain() { return screen_swapchain_; }
@@ -481,6 +680,9 @@ index b5bf253..1f38ee3 100644
 +    // 1: a new picture every display refresh; 2: every other one (the compositor reprojects the
 +    // previous picture in between). Only the visionOS host does anything with it.
 +    void SetFrameDivisor(int divisor);
++    // Dynamic resolution: the GPU time a frame's views may take (the frame's time at the
++    // display's real refresh, less the composition's share); 0 when it is off.
++    float GpuBudgetMs() const;
 +    // Whether the game wants a pointer for its menus (a ray from the hand on visionOS).
 +    void SetPointerWanted(bool wanted);
 +    // True once after the tracking origin moved under the player (a new immersive space, the
@@ -489,7 +691,7 @@ index b5bf253..1f38ee3 100644
  
      struct Impl;
  
-@@ -124,6 +154,7 @@ private:
+@@ -124,6 +157,7 @@ private:
      Swapchain eye_swapchains_[2];
      Swapchain hud_swapchain_;
      Swapchain screen_swapchain_;
@@ -515,10 +717,10 @@ index 1daa3d8..34f7117 100644
          pitch = target_pitch = ClampPitch(value);
          vr_script_pitch_ = pitch;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..873a582 100644
+index 42d8b01..4de03f2 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -16,6 +16,49 @@ struct Entry {
+@@ -16,6 +16,51 @@ struct Entry {
  };
  
  constexpr Entry kTexts[] = {
@@ -554,6 +756,8 @@ index 42d8b01..873a582 100644
 +    {"pc_note_vp_periphery", {"Resolution of the whole view around the centre, relative to the image size. Lower is much lighter for the GPU.", "", "", "Resolución de la vista entera alrededor del centro, respecto al tamaño de imagen. Más baja es mucho más ligera para la GPU.", "", "", ""}},
 +    {"pc_vp_center", {"Sharp centre", "", "", "Centro nítido", "", "", ""}},
 +    {"pc_note_vp_center", {"How much of the view the sharp centre covers. Smaller is sharper and lighter; larger hides the edge better.", "", "", "Cuánto de la vista cubre el centro nítido. Más pequeño es más nítido y ligero; más grande disimula mejor el borde.", "", "", ""}},
++    {"pc_vp_dynres", {"Dynamic resolution", "", "", "Resolución dinámica", "", "", ""}},
++    {"pc_note_vp_dynres", {"While the GPU cannot keep the frame rate, the eyes are drawn smaller (down to half across), and larger again when it can. Smoother, less sharp. Applies right away.", "", "", "Mientras la GPU no llega a la frecuencia, los ojos se dibujan más pequeños (hasta la mitad de ancho) y vuelven a crecer cuando llega. Más fluido, menos nítido. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_left_hand", {"Left hand", "", "", "Mano izquierda", "", "", ""}},
 +    {"pc_vp_right_hand", {"Right hand", "", "", "Mano derecha", "", "", ""}},
 +    {"pc_note_vp_flashlight", {"The flashlight follows your head, as in the original, or the controller in one hand (PlayStation VR2 Sense).", "", "", "La linterna sigue a tu cabeza, como en el original, o al mando de una mano (PlayStation VR2 Sense).", "", "", ""}},
@@ -569,7 +773,7 @@ index 42d8b01..873a582 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..24e2635 100644
+index e8e4ae7..e029ce4 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -657,20 +861,20 @@ index e8e4ae7..24e2635 100644
 +        case 2: state.prompts = PromptStyle{PromptDevice::Nintendo, {'B', 'A', 'Y', 'X'}}; break;
 +        default: state.prompts = PromptStyle{PromptDevice::Xbox, {'A', 'B', 'X', 'Y'}}; break;
 +        }
-+    }
+     }
 +    // A pointer on the panel the UI is on (the HUD, or the virtual screen with the UI on it): in
 +    // the UI's own pixels, which are the HUD's (Renderer::kHudExtent) in both cases.
 +    if (c.pointer_valid) {
 +        state.pointer = c.pointer * glm::vec2(static_cast<float>(Renderer::kHudExtent.width), static_cast<float>(Renderer::kHudExtent.height));
 +        state.pointer_valid = true;
 +        state.click = state.click || c.click;
-     }
++    }
 +    // The pause menu by hand (a long pinch, xr_host_visionos.mm) comes without a controller.
 +    if (!c.active && c.menu) raw |= kRawStart;
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
      state.raw_held |= raw;
-@@ -150,8 +197,11 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -150,17 +197,83 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          return false;
      }
      const glm::vec4 tangents[2] = {host_.Eye(0).tangents, host_.Eye(1).tangents};
@@ -684,11 +888,15 @@ index e8e4ae7..24e2635 100644
          render_size_ = xr::StereoRenderSize(tangents, glm::uvec2(swapchain.width, swapchain.height));
          LogInfo("vr: eyes drawn at {}x{} for {}x{} images (fields L {:.1f} R {:.1f} U {:.1f} D {:.1f} degrees, left eye)", render_size_.x,
                  render_size_.y, swapchain.width, swapchain.height, glm::degrees(host_.Eye(0).angles.x), glm::degrees(host_.Eye(0).angles.y),
-@@ -160,7 +210,67 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
-     for (int i = 0; i < 2; ++i) {
-         frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
+                 glm::degrees(host_.Eye(0).angles.z), glm::degrees(host_.Eye(0).angles.w));
      }
--    const Player& player = game.GetPlayer();
++    // Drawn at the dynamic resolution's size (same proportions): the copy into the eye images
++    // enlarges it.
++    const glm::uvec2 draw = DrawSize();
+     for (int i = 0; i < 2; ++i) {
+-        frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
++        frusta_[i] = xr::FrustumFor(tangents[i], draw, tangents);
++    }
 +    if (cutscene_) {
 +        // A cutscene in stereo: the scene's camera is where the head was when it began, pointing
 +        // where the head pointed (so nothing jumps); the head then turns and leans freely
@@ -725,7 +933,7 @@ index e8e4ae7..24e2635 100644
 +            out.eyes[i] = xr::EyeCamera(logic.position + heading * (rig_.Offset(pose.position) - cutscene_entry_) + correction,
 +                                        glm::normalize(heading * rig_.ToWorld(pose.orientation)), frusta_[i], kNearPlane);
 +        }
-+        out.render = {render_size_.x, render_size_.y};
++        out.render = {draw.x, draw.y};
 +        Place(head.position, head.orientation, menu_open, dt);
 +        auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
 +            if (!host_.Acquire(sc)) return false;
@@ -749,20 +957,23 @@ index e8e4ae7..24e2635 100644
 +    // frame already, not the next.
 +    if (!(player.locks.Mask('B') & 2) && !game.Demos().ControlsPlayer()) {
 +        if (const float turn = player.TakeVrTurn(); std::abs(turn) > 1.0e-5f) rig_.Turn(turn, host_.Head().position);
-+    }
+     }
+-    const Player& player = game.GetPlayer();
      const glm::vec3 feet = player.Feet();
      const glm::vec3 eye = player.Eye();
      const float height = eye.y - feet.y;
-@@ -192,7 +302,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -191,8 +304,8 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+         out.poses[i] = pose;
          out.eyes[i] = xr::EyeCamera(anchor + rig_.Offset(pose.position) + correction, rig_.ToWorld(pose.orientation), frusta_[i], kNearPlane);
      }
-     out.render = {render_size_.x, render_size_.y};
+-    out.render = {render_size_.x, render_size_.y};
 -    Place(head.position, xr::AnglesOf(head.orientation).yaw, menu_open, dt);
++    out.render = {draw.x, draw.y};
 +    Place(head.position, head.orientation, menu_open, dt);
      auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
          if (!host_.Acquire(sc)) return false;
          t.image = sc.images[sc.index];
-@@ -207,6 +317,35 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -207,19 +320,119 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
          return false;
      }
@@ -775,8 +986,9 @@ index e8e4ae7..24e2635 100644
 +    if (!host_.InsetWanted(center) || render_size_.x == 0 || render_size_.y == 0) return false;
 +    if (!host_.EnsureInsetImages({render_size_.x, render_size_.y})) return false;
 +    // The same pixel size as the wide view (the renderer keeps its targets), over `center` of
-+    // its field: as many times denser.
-+    const float aspect = static_cast<float>(render_size_.x) / static_cast<float>(render_size_.y);
++    // its field: as many times denser. (The inset images stay at the full size; a smaller
++    // drawing is enlarged into them, as for the eyes.)
++    const float aspect = static_cast<float>(out.render.width) / static_cast<float>(std::max(out.render.height, 1u));
 +    const float tan_y = std::clamp(center, 0.2f, 0.8f) * frusta_[0].tan_y;
 +    const float tan_x = tan_y * aspect;
 +    out.inset_tangents = glm::vec4(-tan_x, tan_x, tan_y, -tan_y);
@@ -798,7 +1010,72 @@ index e8e4ae7..24e2635 100644
      return true;
  }
  
-@@ -215,11 +354,17 @@ void VrPlay::FinishStereo(const Stereo& stereo) {
++glm::uvec2 VrPlay::DrawSize() const {
++    if (dyn_scale_ >= 0.999f) return render_size_;
++    auto scaled = [&](uint32_t v) { return std::max(16u, 2u * static_cast<uint32_t>(std::lround(static_cast<float>(v) * dyn_scale_ * 0.5f))); };
++    return {scaled(render_size_.x), scaled(render_size_.y)};
++}
++
++void VrPlay::ReportGpu(float frame_gpu_ms) {
++    constexpr float kMinScale = 0.5f;
++    constexpr float kStep = 0.05f;
++    const float budget = host_.GpuBudgetMs();
++    const auto now = std::chrono::steady_clock::now();
++    if (budget <= 0.0f) {
++        // Off (or not known): the image size chosen in the settings.
++        if (dyn_scale_ < 1.0f) {
++            dyn_scale_ = 1.0f;
++            LogInfo("vr: dynamic resolution off, eyes drawn at {}x{}", render_size_.x, render_size_.y);
++        }
++        dyn_sum_ = 0.0;
++        dyn_samples_ = 0;
++        dyn_last_ = {};
++        return;
++    }
++    // A gap (a menu on the virtual screen, a pause): what was measured before it is old.
++    if (dyn_last_ == std::chrono::steady_clock::time_point{} || now - dyn_last_ > std::chrono::milliseconds(500)) {
++        dyn_sum_ = 0.0;
++        dyn_samples_ = 0;
++        dyn_since_ = now;
++    }
++    dyn_last_ = now;
++    if (dyn_settle_ > 0) {
++        --dyn_settle_;
++        dyn_since_ = now;
++        return;
++    }
++    if (!(frame_gpu_ms > 0.0f) || frame_gpu_ms > 1000.0f) return;
++    if (dyn_samples_ == 0) dyn_since_ = now;
++    dyn_sum_ += frame_gpu_ms;
++    ++dyn_samples_;
++    // A decision a second at most, on a second of frames; a change at most every two seconds
++    // (each one makes the renderer's targets again).
++    if (dyn_samples_ < 20 || now - dyn_since_ < std::chrono::seconds(1)) return;
++    const float average = static_cast<float>(dyn_sum_ / dyn_samples_);
++    dyn_sum_ = 0.0;
++    dyn_samples_ = 0;
++    if (dyn_changed_ != std::chrono::steady_clock::time_point{} && now - dyn_changed_ < std::chrono::seconds(2)) return;
++    float scale = dyn_scale_;
++    if (average > budget * 1.03f) {
++        // The cost goes with the pixels, the square of the scale; part of it (shadows) does not,
++        // so this falls a little short and the next second takes the rest.
++        const float wanted = dyn_scale_ * std::sqrt(budget * 0.95f / average);
++        scale = std::max({kMinScale, dyn_scale_ - 0.15f, std::floor(wanted / kStep + 1.0e-3f) * kStep});
++    } else if (average < budget * 0.80f) {
++        scale = std::min(1.0f, dyn_scale_ + kStep);
++    }
++    if (std::abs(scale - dyn_scale_) < 1.0e-3f) return;
++    const float previous = dyn_scale_;
++    dyn_scale_ = scale;
++    dyn_changed_ = now;
++    dyn_settle_ = 8;
++    const glm::uvec2 size = DrawSize();
++    LogInfo("vr: dynamic resolution {:.0f}% -> {:.0f}%: eyes drawn at {}x{} (GPU {:.1f} ms a frame for a budget of {:.1f} ms)", previous * 100.0f,
++            scale * 100.0f, size.x, size.y, average, budget);
++}
++
+ void VrPlay::FinishStereo(const Stereo& stereo) {
+     host_.Release(host_.EyeSwapchain(0));
      host_.Release(host_.EyeSwapchain(1));
      host_.Release(host_.HudSwapchain());
      xr::FrameLayers layers;
@@ -817,7 +1094,7 @@ index e8e4ae7..24e2635 100644
      layers.hud_position = hud_position_;
      layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
      host_.EndFrame(layers);
-@@ -277,7 +422,20 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
+@@ -277,7 +490,20 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
      host_.Haptic(1, amplitude, 0.05f);
  }
  
@@ -839,7 +1116,7 @@ index e8e4ae7..24e2635 100644
      if (!hud_placed_ || (menu_open && !menu_was_open_)) {
          hud_yaw_ = head_yaw_local;
          hud_placed_ = true;
-@@ -289,7 +447,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
+@@ -289,7 +515,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
          }
      }
      menu_was_open_ = menu_open;
@@ -850,10 +1127,18 @@ index e8e4ae7..24e2635 100644
  
  }
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index d1485b2..957a603 100644
+index d1485b2..a158537 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
-@@ -34,6 +34,12 @@ public:
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <chrono>
++
+ #include <glm/glm.hpp>
+ #include <glm/gtc/quaternion.hpp>
+ 
+@@ -34,6 +36,12 @@ public:
          XrTarget hud;
          VkExtent2D render{};
          xr::ViewPose poses[2];
@@ -866,18 +1151,26 @@ index d1485b2..957a603 100644
      };
      bool PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_open, Stereo& out);
      void FinishStereo(const Stereo& stereo);
-@@ -45,7 +51,9 @@ public:
+@@ -43,9 +51,17 @@ public:
+ 
+     void Rumble(uint8_t large_motor, uint8_t small_motor);
      VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
++    // Dynamic resolution: the GPU time of the views drawn this frame, measured. While it stays
++    // above the frame's budget (the host's) the eyes are drawn smaller, and larger again, up to
++    // the image size chosen in the settings, while it stays well below.
++    void ReportGpu(float frame_gpu_ms);
  
  private:
 -    void Place(const glm::vec3& head_local, float head_yaw_local, bool menu_open, float dt);
 +    void Place(const glm::vec3& head_local, const glm::quat& head_orientation_local, bool menu_open, float dt);
 +    // The insets of `out` (its eyes already set): false when there are none this frame.
 +    bool PrepareInsets(Stereo& out);
++    // The size the eyes are drawn at this frame: render_size_ times the dynamic resolution.
++    glm::uvec2 DrawSize() const;
  
      xr::Host& host_;
      const AppSettings::Vr& settings_;
-@@ -53,17 +61,23 @@ private:
+@@ -53,17 +69,30 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -898,11 +1191,18 @@ index d1485b2..957a603 100644
      glm::vec3 last_correction_{0.0f};
      glm::uvec2 render_size_{0, 0};
 +    glm::uvec2 render_for_{0, 0};  // the eye images' size render_size_ was worked out for
++    float dyn_scale_ = 1.0f;       // dynamic resolution: across, 0.5 to 1 of render_size_
++    double dyn_sum_ = 0.0;         // GPU milliseconds measured since the last decision
++    int dyn_samples_ = 0;
++    int dyn_settle_ = 0;           // frames to leave out after a change (their times are the old size's)
++    std::chrono::steady_clock::time_point dyn_since_{};    // the measurement window began
++    std::chrono::steady_clock::time_point dyn_last_{};     // the last sample
++    std::chrono::steady_clock::time_point dyn_changed_{};  // the last change
      xr::EyeFrustum frusta_[2];
      uint32_t raw_previous_ = 0;
      bool snap_armed_ = true;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..3b40ce4 100644
+index d629ab3..23870f2 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -972,13 +1272,14 @@ index d629ab3..3b40ce4 100644
          const pt::AppSettings& s = app_.settings;
          std::vector<pt::game::PcSettingSection> out;
          pt::game::PcSettingSection display{"pc_section_display", 0, {}};
-@@ -1863,12 +1889,76 @@ public:
+@@ -1863,12 +1889,82 @@ public:
              s.vr.enabled = value == 1;
              pt::LogInfo("vr: {} at the next start (PC settings)", s.vr.enabled ? "on" : "off");
              break;
 +#if PT_VISIONOS
 +        case kVpPreset:
-+            pt::visionos::ApplyPreset(std::clamp(value, 0, 2), s);
++            // Without an M5 the row is M2 / custom (HeadsetSections).
++            pt::visionos::ApplyPreset(pt::visionos::Headset().device_m5 ? std::clamp(value, 0, 2) : (value >= 1 ? 2 : 0), s);
 +            if (app_.xr) app_.xr->SetFrameDivisor(pt::visionos::Headset().target_fps == 45 ? 2 : 1);
 +            break;
 +        case kVpFps:
@@ -1021,6 +1322,11 @@ index d629ab3..3b40ce4 100644
 +            pt::visionos::Headset().center = 30 + 5 * std::clamp(value, 0, 6);
 +            pt::visionos::SettingChanged("center", std::to_string(pt::visionos::Headset().center));
 +            return;
++        case kVpDynamicRes:
++            pt::visionos::Headset().dynamic_resolution = value == 1;
++            pt::visionos::SettingChanged("dynamic_resolution", value == 1 ? "1" : "0");
++            HeadsetCustom();
++            return;
 +        case kVrFlashlight:
 +            s.vr.flashlight = value == 0 ? 0 : 1;
 +            s.vr.flashlight_hand = value == 2 ? 1 : 0;
@@ -1049,7 +1355,7 @@ index d629ab3..3b40ce4 100644
          case kFrameLimit:
              if (!app_.options.fps_limit_override) s.display.fps_limit = value == 1 ? 60 : 30;
              break;
-@@ -1939,7 +2029,13 @@ public:
+@@ -1939,7 +2035,13 @@ public:
              std::string reason;
              pt::ApplyGraphicsPreset(s,static_cast<pt::GraphicsPreset>(std::clamp(value,0,4)),app_.scene.RayTracingSupported(reason));
              app_.textures.SetAnisotropy(s.graphics.anisotropy);
@@ -1063,7 +1369,7 @@ index d629ab3..3b40ce4 100644
              break;
          }
          case kShadowQuality:
-@@ -1995,6 +2091,11 @@ public:
+@@ -1995,6 +2097,11 @@ public:
              return;
          }
          ApplyGraphicsSettings(app_);
@@ -1075,7 +1381,7 @@ index d629ab3..3b40ce4 100644
          Save();
      }
  
-@@ -2197,6 +2298,9 @@ public:
+@@ -2197,6 +2304,9 @@ public:
          if (id == kGraphics) {
              page_ = kGraphicsPage;
          }
@@ -1085,16 +1391,16 @@ index d629ab3..3b40ce4 100644
          if (id == kMicrophoneTest) {
              page_ = kMicrophonePage;
              app_.microphone_test = true;
-@@ -2285,6 +2389,8 @@ private:
+@@ -2285,6 +2395,8 @@ private:
          kArchive, kArchiveLock,
          kVr, kVrMode, kVrFlashlight, kVrTurn,
          kFrameLimit,
 +        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpMetalFx, kVpFov, kVpRecenter,
-+        kVpGameFoveation, kVpPeriphery, kVpCenter,
++        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes,
          kLoopFirst = 1000,
          kRunSplitFirst = 3000,
          kModFirst = 2000,
-@@ -2572,6 +2678,9 @@ private:
+@@ -2572,6 +2684,9 @@ private:
      int page_ = kMainPage;
      static constexpr float kMouseSteps[] = {0.25f, 0.35f, 0.5f, 0.7f, 1.0f, 1.4f, 2.0f, 2.8f, 4.0f, 5.0f};
      static constexpr float kDeadZoneSteps[] = {0.0f, 0.05f, 26.0f / 255.0f, 0.15f, 0.2f, 0.25f, 0.3f};
@@ -1104,7 +1410,7 @@ index d629ab3..3b40ce4 100644
  
      static pt::game::PcSettingRow Row(int id, std::string label, std::vector<std::string> values, int value, std::string note) {
          pt::game::PcSettingRow row;
-@@ -2642,6 +2751,90 @@ private:
+@@ -2642,6 +2757,93 @@ private:
          return Row(kEnhancedTextures,"pc_enhanced_textures",std::move(values),app_.settings.graphics.enhanced_textures?1:0,note);
      }
  
@@ -1117,7 +1423,9 @@ index d629ab3..3b40ce4 100644
 +        const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
 +        std::vector<pt::game::PcSettingSection> out;
 +        pt::game::PcSettingSection headset{"pc_vp_headset", 0, {}};
-+        auto preset = Row(kVpPreset, "pc_vp_preset", {"Vision Pro M2", "Vision Pro M5", "pc_vp_custom"}, std::clamp(h.preset, 0, 2), "pc_note_vp_preset");
++        // The M5 preset only on an M5 (its image size is too much for the first headset).
++        auto preset = h.device_m5 ? Row(kVpPreset, "pc_vp_preset", {"Vision Pro M2", "Vision Pro M5", "pc_vp_custom"}, std::clamp(h.preset, 0, 2), "pc_note_vp_preset")
++                                  : Row(kVpPreset, "pc_vp_preset", {"Vision Pro M2", "pc_vp_custom"}, h.preset == 0 ? 0 : 1, "pc_note_vp_preset");
 +        headset.rows.push_back(std::move(preset));
 +        headset.rows.push_back(Row(kVpFps, "pc_vp_fps", {"90 FPS", "45 FPS"}, h.target_fps == 45 ? 1 : 0, "pc_note_vp_fps"));
 +        pt::game::PcSettingRow scale = Row(kVpScale, "pc_vp_scale", {}, 0, "pc_note_vp_restart");
@@ -1140,6 +1448,7 @@ index d629ab3..3b40ce4 100644
 +        for (int i = 0; i <= 6; ++i) center.values.push_back(std::format("{}%", 30 + 5 * i));
 +        center.wrap = false;
 +        headset.rows.push_back(std::move(center));
++        headset.rows.push_back(Row(kVpDynamicRes, "pc_vp_dynres", OffOn(), h.dynamic_resolution ? 1 : 0, "pc_note_vp_dynres"));
 +        pt::game::PcSettingRow graphics = Row(kGraphics, "pc_graphics", {"pc_graphics_value"}, 0, "pc_note_graphics");
 +        graphics.link = true;
 +        headset.rows.push_back(std::move(graphics));
@@ -1195,7 +1504,7 @@ index d629ab3..3b40ce4 100644
      std::vector<pt::game::PcSettingSection> GraphicsSections() const {
          const auto& s=app_.settings;
          std::string reason;
-@@ -2690,7 +2883,9 @@ private:
+@@ -2690,7 +2892,9 @@ private:
      std::vector<pt::game::PcSettingSection> TextureSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection textures{"pc_section_textures",0,{}};
@@ -1205,7 +1514,7 @@ index d629ab3..3b40ce4 100644
          auto anisotropy=Row(kAnisotropy,"pc_anisotropy",{"pc_off","2x","4x","8x","16x"},g.anisotropy>=16?4:g.anisotropy>=8?3:g.anisotropy>=4?2:g.anisotropy>=2?1:0,"pc_note_anisotropy");
          anisotropy.wrap=false;textures.rows.push_back(std::move(anisotropy));
          textures.rows.push_back(Row(kTextureDetail,"pc_texture_detail",{"pc_detail_reduced","pc_preset_original","pc_detail_fine"},g.texture_detail,"pc_note_texture_detail"));
-@@ -2724,6 +2919,14 @@ private:
+@@ -2724,6 +2928,14 @@ private:
      std::vector<pt::game::PcSettingSection> EffectSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection effects{"pc_graphics_effects",0,{}};
@@ -1220,7 +1529,7 @@ index d629ab3..3b40ce4 100644
          effects.rows.push_back(Row(kDepthOfField,"pc_dof",OffOn(),g.depth_of_field?1:0,"pc_note_dof"));
          effects.rows.push_back(Row(kMotionBlur,"pc_motion_blur",OffOn(),g.motion_blur?1:0,"pc_note_motion_blur"));
          effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
-@@ -3095,7 +3298,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3095,7 +3307,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
      game.SetThirdPerson(app.settings.camera.third_person || options.third_person);
      pt::game::GameSound sound(game);
      std::vector<float> captured;
@@ -1230,7 +1539,7 @@ index d629ab3..3b40ce4 100644
          sound.System().SetMasterVolume(app.settings.audio.volume);
          if (options.seed) {
              sound.System().SetRandomSeed(options.seed);
-@@ -3139,14 +3343,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3139,14 +3352,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
      const bool pads = app.window || options.virtual_pads;
      if (pads) {
          input.Init();
@@ -1247,7 +1556,7 @@ index d629ab3..3b40ce4 100644
      script.SetPads(options.virtual_pads ? &virtual_pads : nullptr, &input);
      std::vector<float> offline_audio;
      double audio_device_time = 0.0;
-@@ -3207,7 +3411,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3207,7 +3420,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
      float accumulator = 0.0f;
      pt::Camera tick_camera_from = game.ViewCamera();
      pt::Camera motion_camera_from = tick_camera_from;
@@ -1258,7 +1567,7 @@ index d629ab3..3b40ce4 100644
      TickState tick_state;
      std::vector<glm::mat4> blended_skins;
      static const bool render_trace = std::getenv("PT_RENDER_TRACE") != nullptr;
-@@ -3487,6 +3693,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3487,6 +3702,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
          float dt = options.display_rate > 0.0f ? 1.0f / options.display_rate : 1.0f / options.tick_rate;
@@ -1272,7 +1581,7 @@ index d629ab3..3b40ce4 100644
          if (app.window) {
              const uint64_t now = SDL_GetTicksNS();
              dt = std::clamp(static_cast<float>(now - last_ticks) * 1e-9f, 0.0001f, 0.1f);
-@@ -3554,7 +3767,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3554,7 +3776,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (polled.pointer_valid) {
              pending_input.pointer = polled.pointer;
              pending_input.pointer_valid = true;
@@ -1281,7 +1590,7 @@ index d629ab3..3b40ce4 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
-@@ -3876,8 +4089,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3876,8 +4098,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
              previous_microphone_test = app.microphone_test;
          }
          const bool voice_file = !voice_input.empty();
@@ -1298,7 +1607,7 @@ index d629ab3..3b40ce4 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4125,21 +4344,45 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4125,21 +4353,48 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  last_scene_time = game.Time();
                  vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
                                    lighting, vfx_pass, blend);
@@ -1314,6 +1623,7 @@ index d629ab3..3b40ce4 100644
 +                cull_camera.position -= cull_camera.Forward() * 0.1f;
 +                app.scene.SetVrCullCamera(&cull_camera);
 +#endif
++                float frame_gpu_ms = 0.0f;
 +                for (int eye = 0; eye < views; ++eye) {
                      if (!begin(eye == 0)) {
                          continue;
@@ -1330,6 +1640,7 @@ index d629ab3..3b40ce4 100644
 +                    // the view drawn two renders ago (the inset for an eye, the eye for an inset).
 +                    pt::visionos::ReportEye(views == 4 ? (eye + 2) % 4 : eye, views, app.scene.Stats().gpu_ms, app.scene.Stats().pass_ms, app.scene.Stats().cpu_ms);
 +#endif
++                    frame_gpu_ms += app.scene.Stats().gpu_ms;
                      ui.SetVrHud(true);
                      pt::XrFrame xr_frame;
 -                    xr_frame.eye = &stereo.targets[eye];
@@ -1341,6 +1652,7 @@ index d629ab3..3b40ce4 100644
 +                    if (!inset) save_shots(eye == 0 ? "_left" : "_right");
                  }
                  app.scene.SetVrEye(-1);
++                vr->ReportGpu(frame_gpu_ms);
 +#if PT_VISIONOS
 +                app.scene.SetVrLowDetail(false);
 +                app.scene.SetVrCullCamera(nullptr);
@@ -1348,7 +1660,7 @@ index d629ab3..3b40ce4 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4811,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4823,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -1365,7 +1677,7 @@ index d629ab3..3b40ce4 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4857,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4869,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

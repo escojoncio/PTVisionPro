@@ -25,6 +25,10 @@ struct HeadsetSettings {
     bool game_foveation = true;
     int periphery = 45;  // 30 to 70
     int center = 45;     // 30 to 60
+    // Dynamic resolution: the eyes drawn smaller while the GPU cannot keep the frame rate.
+    bool dynamic_resolution = false;
+    // The headset is an M5 (its preset is offered only then).
+    bool device_m5 = false;
 };
 
 // The launcher's settings into the game's, after pt.ini was read.

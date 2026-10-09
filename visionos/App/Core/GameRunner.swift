@@ -166,7 +166,10 @@ final class GameRunner: @unchecked Sendable {
         var s = model.settings
         let flag = value != "0"
         switch key {
-        case "preset": s.preset = PTSettings.Preset(rawValue: value) ?? .custom
+        case "preset":
+            let preset = PTSettings.Preset(rawValue: value) ?? .custom
+            s.preset = preset == .m5 && model.detectedPreset != .m5 ? .custom : preset
+        case "dynamic_resolution": s.dynamicResolution = flag
         case "resolution_scale": s.resolutionScale = Double(value) ?? s.resolutionScale
         case "target_fps": s.targetFPS = Int(value) ?? s.targetFPS
         case "foveation": s.foveation = flag

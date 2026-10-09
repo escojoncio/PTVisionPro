@@ -194,6 +194,8 @@ final class AppModel {
     }
 
     func apply(preset: PTSettings.Preset) {
+        // The M5's preset only on an M5.
+        guard preset != .m5 || detectedPreset == .m5 else { return }
         settings.apply(preset: preset)
     }
 

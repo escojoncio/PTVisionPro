@@ -128,6 +128,25 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 19:** sin mejora apreciable (18–22 fps): las sombras ya se comparten (centros 0,02 ms) pero el total
   sigue 44–55 ms GPU (4 vistas) + composición 1–1,6 ms. Por vista ~10–12 ms a 1,6 MP. Subtítulos de la radio
   desplazados a un lado (HUD con seguimiento perezoso de 20°).
+- **Prueba build 20:** ~20 fps, térmico serious. Drawable 4493×3604 por ojo; vistas anchas 1213×973 en imágenes
+  (render 1539×1059, 4 vistas ≈ 6,4 MP). `gpu labels` por vista: compose+forward 3,2–3,7, lighting 2,6–2,7, post 2,2–2,3,
+  gbuffer 2,1–2,3, sombras 1,3 (una vez), reflections 1,0 (centros), occlusion 0,9. ≈7 ms/MP: para 45 fps hay que bajar a
+  ≈3,4 ms/MP (×2). El usuario NO quiere bajar resolución (ya baja, dientes de sierra): el camino es coste por píxel.
+- **Build 21:** (pendiente de CI)
+  - Perfilador más fino: `compose and forward/{compose,forward,effects}`, `lighting/{probes,lights}`,
+    `post/{bloom,flare,tonemap,fxaa,color lut,screen blur,banding,screen}` (etiquetas fuera de render pass); log hasta 40 filas.
+  - Flare en el visor: la pasada de limpiar `flare_` se salta mientras nada dibuja en él (`vr_eye_ >= 0`,
+    `flare_clean_`, se reinicia al recrear targets).
+  - Resolución dinámica (`VrPlay::ReportGpu/DrawSize`, `Host::GpuBudgetMs`): **apagada por defecto y en los presets**;
+    fila «Resolución dinámica» (`kVpDynamicRes`, clave `dynamic_resolution`) e interruptor en el launcher (clave Codable
+    nueva `dynamicResolutionChosen`: la vieja se guardó a true sin hacer nada). 0,5–1 en pasos de 0,05, decisión ≥1 s,
+    cambio ≥2 s (cada cambio recrea targets: tirón), presupuesto = (divisor/Hz)·0,9 − 1 ms.
+  - Hz reales del visor: `MeasureRefresh` (huecos entre tiempos de presentación de `WaitFrame`, error frente a
+    90/96/100/120; 120 solo en M5) → log `vr: the display refreshes at N Hz`. **Compositor Services no deja pedir la
+    frecuencia** (solo `minimumFrameRepeatCount`): el modo «una cada dos» da 45 a 90 Hz o 50 a 100 Hz según el sistema.
+  - Preset M5 solo en un M5: `PT_VP_DEVICE` (Swift `detectedPreset`), `HeadsetSettings::device_m5`; menú del juego con
+    2 valores (M2/personalizado) sin M5; `ApplyPreset/ApplySettings` lo rebajan a M2; launcher oculta M5, `load()` pasa
+    un M5 guardado a M2, `apply(preset:)` lo rechaza.
 - **Build 20 (run_number 24): OK** → `releases/download/build-24/PTVisionPro-24.ipa` (sin probar):
   - HUD sin menú pegado a la cabeza (orientación completa, 1,6 m, como el panel de rendimiento): `VrPlay::Place`
     (`head_orientation_local`, `hud_orientation_`); con menú abierto, colocado en el mundo como antes. `ScreenMode`
@@ -417,11 +436,11 @@ Objetivo de rendimiento: **45 fps reales estables** (modo 45 FPS, `SetFrameDivis
 con sombras altas, SSAO, bloom y reflejos (estándar mínimo M2); presupuesto GPU ≈ 22 ms por fotograma para las 4 vistas
 más la composición. Clave para que no maree: profundidad real al drawable (reproyección posicional).
 Frecuencias: M2 90/96/100 Hz → modos estables 45/90, 48/96, 50/100 (M2 apunta a 50/100 si la GPU llega); M5 hasta
-120 Hz → 60/120 como PS VR. Pendiente: ajuste de modo de frecuencia en el menú VISION PRO y presets por visor, si
-Compositor Services permite a la app pedir la frecuencia (comprobar API); 60 reales en pantalla de 90 da judder.
-Preset M5 solo en un M5: bloquearlo en el menú del juego (`kVpPreset`, `HeadsetSections`/handler en main.cpp) y en el
-launcher (`PTSettings`/`SettingsView`), usando la detección `hw.machine` (RealityDevice14 → M2) ya existente; si un
-ajuste guardado trae M5 en un M2, pasar a M2.
+120 Hz → 60/120 como PS VR. La app no puede pedir la frecuencia (comprobado, build 21 la mide y la registra).
+Preset M5 bloqueado sin M5: hecho (build 21).
+
+Siguiente (tras el log de build 21): fusionar pasadas a pantalla completa para la GPU de tiles (compose+forward+effects
+sobre la misma imagen y profundidad; cadena de post: tonemap/LUT/banding/screen), según las subetiquetas.
 
 0. Medir build 18 (log `vr pace` con 4 vistas) y calibrar periphery/center por defecto. Siguiente: resolución
    dinámica por tiempo de GPU, caché de sombras estáticas, profundidad al drawable (reproyección posicional),

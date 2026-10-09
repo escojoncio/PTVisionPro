@@ -39,7 +39,10 @@ struct SettingsView: View {
                 get: { model.settings.preset },
                 set: { model.apply(preset: $0) })) {
                 Text("M2").tag(PTSettings.Preset.m2)
-                Text("M5").tag(PTSettings.Preset.m5)
+                // Only on an M5: its image size is too much for the first headset.
+                if model.detectedPreset == .m5 {
+                    Text("M5").tag(PTSettings.Preset.m5)
+                }
                 Text(L("Personalizado", "Custom")).tag(PTSettings.Preset.custom)
             }
             .pickerStyle(.segmented)
@@ -63,8 +66,8 @@ struct SettingsView: View {
         } header: {
             Text(L("Preset", "Preset"))
         } footer: {
-            Text(L("M2 es el primer Apple Vision Pro; M5 el posterior. Al cambiar un ajuste de imagen, gráficos o visor, el preset pasa a Personalizado.",
-                   "M2 is the first Apple Vision Pro; M5 the later one. Changing a picture, graphics or headset setting makes the preset Custom."))
+            Text(L("M2 es el primer Apple Vision Pro; M5 el posterior (su preset solo se ofrece en un M5). Al cambiar un ajuste de imagen, gráficos o visor, el preset pasa a Personalizado.",
+                   "M2 is the first Apple Vision Pro; M5 the later one (its preset is offered on an M5 only). Changing a picture, graphics or headset setting makes the preset Custom."))
         }
     }
 
@@ -81,9 +84,10 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Picker(L("Imágenes por segundo", "Frames per second"), selection: int(\.targetFPS)) {
-                Text("90").tag(90)
-                Text("45").tag(45)
+                Text(L("Una por refresco (90)", "One per refresh (90)")).tag(90)
+                Text(L("Una cada dos refrescos (45)", "One every other refresh (45)")).tag(45)
             }
+            Toggle(L("Resolución dinámica", "Dynamic resolution"), isOn: bool(\.dynamicResolution))
             LabeledContent(L("Campo de visión", "Field of view")) {
                 Stepper("\(model.settings.fov) %", value: int(\.fov), in: 70...100, step: 5)
             }
@@ -99,8 +103,8 @@ struct SettingsView: View {
         } header: {
             Text(L("Imagen", "Picture"))
         } footer: {
-            Text(L("La escala es relativa a la resolución que recomienda el visor. 45 fps dibuja una imagen cada dos refrescos.",
-                   "The scale is relative to the resolution the headset recommends. 45 fps draws one picture every other refresh."))
+            Text(L("La escala es relativa a la resolución que recomienda el visor. La frecuencia de la pantalla la elige visionOS (normalmente 90 Hz; 96 o 100 según las condiciones, 120 en M5): «una cada dos» da la mitad, 45 a 90 Hz o 50 a 100 Hz. La resolución dinámica dibuja más pequeño mientras la GPU no llega: más fluido, menos nítido.",
+                   "The scale is relative to the resolution the headset recommends. visionOS chooses the display's rate (usually 90 Hz; 96 or 100 depending on conditions, 120 on M5): “every other” gives half of it, 45 at 90 Hz or 50 at 100 Hz. Dynamic resolution draws smaller while the GPU cannot keep up: smoother, less sharp."))
         }
     }
 
