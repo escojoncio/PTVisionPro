@@ -2159,7 +2159,7 @@ void ApplySettings(AppSettings& s) {
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 45.0f)), 30, 70);
     h.center = std::clamp(static_cast<int>(Number("PT_VP_CENTER", 45.0f)), 30, 80);
-    h.hdr = std::clamp(static_cast<int>(Number("PT_VP_HDR", 170.0f)), 100, 200);
+    h.hdr = std::clamp(static_cast<int>(Number("PT_VP_HDR", 100.0f)), 100, 200);
     h.fov = std::clamp(static_cast<int>(Number("PT_VP_FOV", 100.0f)), 70, 100);
 
     // The game's own graphics preset first (textures, filtering, clarity...); the launcher's

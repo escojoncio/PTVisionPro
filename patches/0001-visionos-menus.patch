@@ -209,7 +209,7 @@ index 01f4500..631918f 100644
                              grain_offset[0], grain_offset[1], across, 0.0f};
      vkCmdPushConstants(cmd, xr_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..8147f89 100644
+index 40d339d..d0aef28 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -329,6 +329,13 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -294,7 +294,114 @@ index 40d339d..8147f89 100644
      if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
          std::map<std::string, std::pair<bool, float>> now;
          for (uint32_t i = 0; i < light_count_; ++i) {
-@@ -1422,6 +1443,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1232,14 +1253,90 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+     if (shadow_views_.empty()) {
+         return;
+     }
+-    uint32_t rows = 0;
+-    for (const ShadowView& sv : shadow_views_) {
+-        rows = std::max(rows, static_cast<uint32_t>(sv.rect.offset.y) + sv.rect.extent.height);
++    // Which tiles must be drawn again: a tile is kept when everything that decides its depths is
++    // what it was when it was drawn (the atlas, the tile, the light's view, and each caster's
++    // mesh, material and place); otherwise it is cleared and drawn as before.
++    static const bool cache_off = [] {
++        const char* v = std::getenv("PT_SHADOW_CACHE");
++        return v && std::string_view(v) == "0";
++    }();
++    auto casts = [&](const ShadowView& sv, const Draw& d) {
++        if (!d.sub->shadow || (d.hidden_views & sv.casters) != 0) return false;
++        if (glm::length(d.center - sv.center) > sv.radius + d.radius) return false;
++        return !sv.frustum || SphereInPlanes(d.center, d.radius, sv.planes);
++    };
++    auto mix = [](uint64_t h, const void* data, size_t size) {
++        const auto* bytes = static_cast<const unsigned char*>(data);
++        for (size_t i = 0; i < size; ++i) h = (h ^ bytes[i]) * 1099511628211ull;
++        return h;
++    };
++    std::vector<ShadowTileKey> keys(shadow_views_.size());
++    std::vector<bool> redraw(shadow_views_.size(), true);
++    bool any_redraw = false;
++    for (size_t i = 0; i < shadow_views_.size(); ++i) {
++        const ShadowView& sv = shadow_views_[i];
++        const gpu::View& v = frame_->views[sv.view];
++        uint64_t h = 1469598103934665603ull;
++        const VkImage atlas = shadow_.image.image;
++        h = mix(h, &atlas, sizeof(atlas));
++        h = mix(h, &sv.rect, sizeof(sv.rect));
++        h = mix(h, &v.view_projection, sizeof(v.view_projection));
++        h = mix(h, &v.view, sizeof(v.view));
++        h = mix(h, &v.projection_param, sizeof(v.projection_param));
++        h = mix(h, &v.eye, sizeof(v.eye));
++        h = mix(h, &v.clip_plane, sizeof(v.clip_plane));
++        h = mix(h, &v.shadow, sizeof(v.shadow));
++        h = mix(h, &sv.bias_constant, sizeof(sv.bias_constant));
++        h = mix(h, &sv.bias_slope, sizeof(sv.bias_slope));
++        h = mix(h, &sv.cull, sizeof(sv.cull));
++        bool animated = false;
++        for (const Draw& d : draws_) {
++            if (!casts(sv, d)) continue;
++            if (d.skin_base != gpu::kInvalid || d.sub->skinned) animated = true;
++            h = mix(h, &d.mesh, sizeof(d.mesh));
++            h = mix(h, &d.sub, sizeof(d.sub));
++            h = mix(h, &d.material, sizeof(d.material));
++            h = mix(h, &d.transform, sizeof(d.transform));
++        }
++        keys[i].rect = sv.rect;
++        keys[i].key = h;
++        bool kept = false;
++        if (!cache_off && !animated) {
++            for (const ShadowTileKey& k : shadow_tiles_) {
++                if (k.key == h && k.rect.offset.x == sv.rect.offset.x && k.rect.offset.y == sv.rect.offset.y &&
++                    k.rect.extent.width == sv.rect.extent.width && k.rect.extent.height == sv.rect.extent.height) {
++                    kept = true;
++                    break;
++                }
++            }
++        }
++        // An animated tile gets a key no frame can match.
++        if (animated) keys[i].key = 0;
++        redraw[i] = !kept;
++        any_redraw = any_redraw || !kept;
++        ++(kept ? shadow_tiles_kept_ : shadow_tiles_drawn_);
++    }
++    shadow_tiles_ = std::move(keys);
++    if (const auto now = std::chrono::steady_clock::now(); now - shadow_tiles_logged_ >= std::chrono::seconds(10)) {
++        if (shadow_tiles_logged_ != std::chrono::steady_clock::time_point{}) {
++            LogInfo("shadows: {} tiles kept, {} drawn in the last 10 s", shadow_tiles_kept_, shadow_tiles_drawn_);
++        }
++        shadow_tiles_logged_ = now;
++        shadow_tiles_kept_ = 0;
++        shadow_tiles_drawn_ = 0;
++    }
++    if (!any_redraw) {
++        UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
++        return;
+     }
+     UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}});
+-    BeginPass(cmd, {shadow_.Extent().width, rows}, {}, &shadow_, false, true);
+-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_);
+-    for (const ShadowView& sv : shadow_views_) {
++    for (size_t i = 0; i < shadow_views_.size(); ++i) {
++        if (!redraw[i]) continue;
++        const ShadowView& sv = shadow_views_[i];
++        // A pass over the tile alone, cleared to far (0, reverse Z): the rest of the atlas is
++        // neither loaded nor touched (a tile GPU would otherwise read and write it all).
++        BeginPass(cmd, sv.rect, std::span<const ColorOutput>{}, &shadow_, false, true);
++        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_);
+         SetViewport(cmd, sv.rect);
+         vkCmdSetDepthBias(cmd, sv.bias_constant, 0.0f, sv.bias_slope);
+         const uint8_t casters = sv.casters;
+@@ -1264,8 +1361,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+             }
+             DrawMesh(cmd, d, sv.view, 0, false, false, nullptr, sv.cull, true);
+         }
++        vkCmdEndRendering(cmd);
+     }
+-    vkCmdEndRendering(cmd);
+     UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
+ }
+ 
+@@ -1422,6 +1519,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          }
      };
      if (probes) {
@@ -302,7 +409,7 @@ index 40d339d..8147f89 100644
          UseTargets(cmd, {{&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
                           {&probe_acc_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
-@@ -1431,7 +1453,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1431,7 +1529,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          draw_probes(shrink ? 1u : 0u);
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&probe_acc_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -312,18 +419,21 @@ index 40d339d..8147f89 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1447,7 +1471,30 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1447,7 +1547,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          vkCmdDraw(cmd, 3, 1, 0, 0);
      }
      const bool contact = rt_contact_active_ && view.index == main_view_.index;
 -    if (lights && light_count_ > 0) {
-+    // The camera's own views with up to 32 lights: all of them in one full-screen pass
-+    // (light_all.frag) instead of a volume each. Every light then reads the G-buffer from the
-+    // pass's single read instead of again for each light, which is what the lights cost on a
-+    // tile GPU. The volumes stay for the mirror, ray tracing and the light debugging switches.
-+    static const bool light_debug = std::getenv("PT_LIGHT_DRAW_ONLY") || std::getenv("PT_LIGHT_DRAW_NO_SHADOW") || std::getenv("PT_LIGHT_VOLUMES");
-+    const bool one_pass = lights && light_count_ > 0 && light_count_ <= 32 && light_all_ && !rt_active_ && !contact && view.view_bit == 1 &&
-+                          !light_debug;
++    // All of a view's lights in one full-screen pass (light_all.frag), only with PT_LIGHT_ONE_PASS=1:
++    // measured in the headset (build 26) it was slower than the volumes where many lights overlap
++    // (every pixel evaluates every light), so the volumes stay the default.
++    static const bool light_debug = std::getenv("PT_LIGHT_DRAW_ONLY") || std::getenv("PT_LIGHT_DRAW_NO_SHADOW");
++    static const bool one_pass_wanted = [] {
++        const char* v = std::getenv("PT_LIGHT_ONE_PASS");
++        return v && std::string_view(v) == "1";
++    }();
++    const bool one_pass = one_pass_wanted && lights && light_count_ > 0 && light_count_ <= 32 && light_all_ && !rt_active_ && !contact &&
++                          view.view_bit == 1 && !light_debug;
 +    if (one_pass) {
 +        uint32_t drawn = 0;
 +        uint32_t shadowed = 0;
@@ -344,7 +454,7 @@ index 40d339d..8147f89 100644
          if (rt_active_ || contact) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rt_active_ ? light_rt_ : light_contact_);
              const VkDescriptorSet rt_set = rt_->Set(renderer_->FrameIndex());
-@@ -1490,6 +1537,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1490,6 +1616,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
      }
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&diffuse_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&specular_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -352,7 +462,7 @@ index 40d339d..8147f89 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +1830,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +1909,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -421,7 +531,7 @@ index 40d339d..8147f89 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +1902,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +1981,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -429,7 +539,7 @@ index 40d339d..8147f89 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +1913,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +1992,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -469,7 +579,7 @@ index 40d339d..8147f89 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +1938,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2017,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -477,7 +587,7 @@ index 40d339d..8147f89 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2194,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2273,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -492,7 +602,7 @@ index 40d339d..8147f89 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2207,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2286,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -501,7 +611,7 @@ index 40d339d..8147f89 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2232,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2311,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -518,7 +628,7 @@ index 40d339d..8147f89 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2249,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2328,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -526,7 +636,7 @@ index 40d339d..8147f89 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2284,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2363,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -534,7 +644,7 @@ index 40d339d..8147f89 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2342,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2421,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -547,7 +657,7 @@ index 40d339d..8147f89 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2359,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2438,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -563,7 +673,7 @@ index 40d339d..8147f89 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2449,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2330,10 +2528,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -624,7 +734,7 @@ index 40d339d..8147f89 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2623,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2702,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -974,7 +1084,7 @@ index 1f96981..5d4e4a9 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..c76a20c 100644
+index 6c9b165..bf9b352 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
 @@ -206,6 +206,28 @@ public:
@@ -1078,7 +1188,25 @@ index 6c9b165..c76a20c 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -441,6 +513,7 @@ private:
+@@ -395,6 +467,17 @@ private:
+     RenderTarget reflect_offset_;
+     RenderTarget reflect_history_[2];
+     RenderTarget shadow_;
++    // Shadow tiles kept from frame to frame: a tile whose light, caster list and casters' places
++    // are the same as when it was drawn keeps its depths (RecordShadows); one with a skinned
++    // (animated) caster is always drawn again.
++    struct ShadowTileKey {
++        VkRect2D rect{};
++        uint64_t key = 0;
++    };
++    std::vector<ShadowTileKey> shadow_tiles_;
++    uint32_t shadow_tiles_kept_ = 0;
++    uint32_t shadow_tiles_drawn_ = 0;
++    std::chrono::steady_clock::time_point shadow_tiles_logged_{};
+     RenderTarget ao_[2];
+     RenderTarget refmap_;
+     RenderTarget hdr_copy_;
+@@ -441,6 +524,7 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -1086,7 +1214,7 @@ index 6c9b165..c76a20c 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -636,6 +709,14 @@ private:
+@@ -636,6 +720,14 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
