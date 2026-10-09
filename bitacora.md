@@ -112,6 +112,24 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
     `[[viewport_array_index]]` en los tres vertex shaders. Pipelines con `inputPrimitiveTopology = Triangle`.
     Log único al empezar: `vr: drawable N view(s), N texture(s) (array, N slice(s)), N foveation map(s) of N layer(s)`.
   - Launcher: `AppModel.gameEnded` borra solo `pausedMessage` (estático); el resto de mensajes se mantiene.
+- **Prueba build 16:** estéreo y escenas inmersivas OK. Problemas: tras la escena inicial el jugador mira al
+  revés; reflejos "bamboleantes"; el tamaño de imagen del menú no cambiaba nada (ojos 2696x2162 y render
+  3419x2353 fijos desde el inicio). GPU 97–114 ms ambos ojos (~9 fps).
+- **Build 17 (lanzada):**
+  - Mirar al revés: el centrado (base del rig = yaw de la cámara, 0) ocurre antes del spawn (yaw 180) y el primer
+    look de la cabeza ignoraba el rumbo del juego. `Player::SetVrReference(yaw)` (player.h, nuevo) llamado al
+    centrar en `VrPlay::ApplyControls`: `vr_last_yaw_ = yaw; vr_looked_ = true` → el spawn y la cámara que
+    devuelve una escena giran la vista por la ruta normal (`vr_turn_` → `TakeVrTurn` → `rig_.Turn`).
+    `PrepareStereo` (rama normal) consume `TakeVrTurn` antes de las cámaras: el giro se ve en el mismo
+    fotograma (queda 1 fotograma hacia atrás justo al acabar la escena: el giro se calcula en el `Update` siguiente).
+  - Reflejos: `scene_frame.cpp`, con `vr_eye_ >= 0` y `PT_VISIONOS`, `toggles.local_reflections = false` (SSR
+    distintos por ojo); quedan sondas y espejos. El ajuste «Reflejos» solo afecta ya a la pantalla virtual.
+  - Tamaño de imagen / campo de visión / MetalFX en vivo: `SetupEyes()` en `xr_host_visionos.mm` (StartSession
+    y `PollEvents` con el mutex): `vkDeviceWaitIdle` + command buffer Metal vacío esperado, destruye vistas,
+    imágenes y memoria (`eye_memory[2]`), recrea imágenes y escaladores MetalFX, `have_last = false`. Espera a
+    que el valor lleve 400 ms quieto (`pending_*`). Si falla, vuelve a los valores anteriores (y al menú) y solo
+    termina si eso también falla. `VrPlay` recalcula `render_size_` al cambiar la extensión (`render_for_`).
+    Notas del menú (`pc_settings.cpp`): «se aplica al momento». `Shutdown` libera la memoria de los ojos.
 - **Build 16 (run_number 20): OK** → `releases/download/build-20/PTVisionPro-20.ipa` (la recomendada; sin probar en el visor). **Escenas inmersivas** (`vr_play.cpp/.h` en el parche; ajuste «Escenas inmersivas» en
   `PTSettings.immersiveCutscenes` → `PT_VP_CUTSCENES`, `SettingsView` sección Juego; por defecto sí):
   - `ScreenMode`: con cámara de demo y ajuste activo → `cutscene_` (estéreo), no pantalla virtual. La mirilla
@@ -335,8 +353,11 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
 
 ## Pendiente (siguiente sesión, en orden)
 
-0. Probar build 14 (build-18) hasta pasado el pasillo: en `pt.log` deben salir las líneas del keeper durante las
-   cargas y ningún cierre. Si sigue cerrándose, buscar la última línea `where:`/`vr:`.
+0. Rendimiento (~9 fps, limitado por píxeles): *quad views* (por ojo: campo completo a baja resolución + centro
+   ~45° a la resolución actual, mismo tamaño de render para no recrear objetivos; el compositor Metal funde con
+   borde suave; vistas simétricas, sin tocar la proyección del motor), caché de sombras estáticas (11–13 ms),
+   profundidad al drawable para reproyección posicional a 45 fps. Comodidad: fundido/viñeta en cortes de cámara
+   de las escenas.
 1. Primera prueba en el visor (build 8): ver estéreo. Comprobar orientación de los ejes (ARKit es Y arriba,
    -Z adelante, igual que OpenXR; si la imagen sale girada revisar `QuatOf`/tangentes) y la
    altura (ARKit origen en el suelo; `VrPlay` recentra en la cabeza).

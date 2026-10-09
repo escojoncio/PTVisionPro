@@ -534,10 +534,23 @@ struct Host::Impl {
     uint32_t eye_width = 0;
     uint32_t eye_height = 0;
     float scale = 1.0f;
+    // The drawable's view size (what the image size and field of view are fractions of), whether
+    // MetalFX is wanted (the setting; `metalfx` is whether it runs), and the eyes' memory, for
+    // making the eye images again when those settings change in the menu.
+    uint32_t drawable_width = 0;
+    uint32_t drawable_height = 0;
+    bool metalfx_wanted = true;
+    std::vector<VkDeviceMemory> eye_memory[2];
+    // A change of those settings waits until it has held still for a moment (dragging the image
+    // size slider steps through many values; the images are made once, for the last one).
+    float pending_scale = 0.0f;
+    float pending_fov = 0.0f;
+    bool pending_metalfx = true;
+    std::chrono::steady_clock::time_point pending_since;
     uint32_t next_image[4] = {0, 0, 0, 0};
 
     bool CreateImages(vk::Context& c, VkFormat format, uint32_t width, uint32_t height, uint32_t count, Swapchain& out,
-                      std::vector<id<MTLTexture>>& textures, const char* name) {
+                      std::vector<id<MTLTexture>>& textures, const char* name, std::vector<VkDeviceMemory>* memories = nullptr) {
         out.format = format;
         out.extent = {width, height};
         for (uint32_t i = 0; i < count; ++i) {
@@ -583,6 +596,7 @@ struct Host::Impl {
                 LogError("vr: cannot allocate the {} image {}", name, i);
                 return false;
             }
+            if (memories) memories->push_back(memory);
             VkImageViewCreateInfo view_info{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
             view_info.image = image;
             view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -811,6 +825,92 @@ static void KeepPresenting(Host& host, Host::Impl& x) {
     }
 }
 
+// The eyes' images (and MetalFX's) for an image size, a field of view and the MetalFX setting:
+// made at the start, and again between frames when one of them changes in the game's menu.
+static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, bool metalfx) {
+    vk::Context& ctx = *x.ctx;
+    if (!x.textures[0].empty()) {
+        // Everything that used the old images finished: the game's work, then the composition's
+        // (a Metal command buffer after everything on the queue they share, waited for).
+        vkDeviceWaitIdle(ctx.device);
+        id<MTLCommandBuffer> fence = [x.mtl_queue commandBuffer];
+        [fence commit];
+        [fence waitUntilCompleted];
+        for (int eye = 0; eye < 2; ++eye) {
+            Swapchain& sc = host.EyeSwapchain(eye);
+            for (VkImageView v : sc.views) vkDestroyImageView(ctx.device, v, nullptr);
+            for (VkImage im : sc.images) vkDestroyImage(ctx.device, im, nullptr);
+            for (VkDeviceMemory m : x.eye_memory[eye]) vkFreeMemory(ctx.device, m, nullptr);
+            sc.views.clear();
+            sc.images.clear();
+            sc.index = 0;
+            sc.acquired = false;
+            x.eye_memory[eye].clear();
+            x.textures[eye].clear();
+            x.next_image[eye] = 0;
+            x.scalers[eye] = nil;
+            x.enlarged[eye] = nil;
+        }
+        x.metalfx = false;
+        x.have_last = false;  // its images are gone
+    }
+    x.scale = std::clamp(scale, 0.5f, 2.0f);
+    x.fov_scale = std::clamp(fov_scale, 0.7f, 1.0f);
+    x.metalfx_wanted = metalfx;
+    // The views' pixels the eyes cover, and the eyes' own size.
+    const uint32_t covered_width = std::max(16u, static_cast<uint32_t>(std::lround(x.drawable_width * x.fov_scale)));
+    const uint32_t covered_height = std::max(16u, static_cast<uint32_t>(std::lround(x.drawable_height * x.fov_scale)));
+    x.eye_width = std::max(16u, static_cast<uint32_t>(std::lround(covered_width * x.scale)));
+    x.eye_height = std::max(16u, static_cast<uint32_t>(std::lround(covered_height * x.scale)));
+    LogInfo("vr: drawable view {}x{}, field of view {:.0f} %, eyes drawn at {}x{} (scale {:.2f})", x.drawable_width, x.drawable_height,
+            x.fov_scale * 100.0f, x.eye_width, x.eye_height, x.scale);
+    constexpr uint32_t kImages = 3;
+    const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
+    if (!x.CreateImages(ctx, format, x.eye_width, x.eye_height, kImages, host.EyeSwapchain(0), x.textures[0], "left eye", &x.eye_memory[0]) ||
+        !x.CreateImages(ctx, format, x.eye_width, x.eye_height, kImages, host.EyeSwapchain(1), x.textures[1], "right eye", &x.eye_memory[1])) {
+        return false;
+    }
+    x.view_width = covered_width;
+    x.view_height = covered_height;
+    if (metalfx && (x.eye_width + 8 < covered_width || x.eye_height + 8 < covered_height)) {
+        if ([MTLFXSpatialScalerDescriptor supportsDevice:x.mtl_device]) {
+            bool ok = true;
+            for (int eye = 0; eye < 2 && ok; ++eye) {
+                MTLFXSpatialScalerDescriptor* d = [MTLFXSpatialScalerDescriptor new];
+                d.inputWidth = x.eye_width;
+                d.inputHeight = x.eye_height;
+                d.outputWidth = covered_width;
+                d.outputHeight = covered_height;
+                d.colorTextureFormat = x.textures[eye][0].pixelFormat;
+                d.outputTextureFormat = x.textures[eye][0].pixelFormat;
+                // sRGB images: the scaler works on the encoded (perceptual) values.
+                d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+                x.scalers[eye] = [d newSpatialScalerWithDevice:x.mtl_device];
+                if (!x.scalers[eye]) {
+                    ok = false;
+                    break;
+                }
+                MTLTextureDescriptor* t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:d.outputTextureFormat
+                                                                                              width:covered_width
+                                                                                             height:covered_height
+                                                                                          mipmapped:NO];
+                t.usage = x.scalers[eye].outputTextureUsage | MTLTextureUsageShaderRead;
+                t.storageMode = MTLStorageModePrivate;
+                x.enlarged[eye] = [x.mtl_device newTextureWithDescriptor:t];
+                ok = x.enlarged[eye] != nil;
+            }
+            x.metalfx = ok;
+            LogInfo("vr: MetalFX {} ({}x{} -> {}x{} per eye)", ok ? "on" : "could not be set up", x.eye_width, x.eye_height, covered_width,
+                    covered_height);
+        } else {
+            LogInfo("vr: MetalFX spatial scaling is not supported on this device");
+        }
+    } else {
+        LogInfo("vr: MetalFX {}", metalfx ? "not needed (the eyes are drawn at the views' size)" : "off");
+    }
+    return true;
+}
+
 Host::Host() : impl_(std::make_unique<Impl>()) {}
 Host::~Host() { Shutdown(); }
 
@@ -922,61 +1022,20 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
         error_ = "Compositor Services gave no drawable";
         return false;
     }
-    if (const char* fov = std::getenv("PT_VP_FOV")) x.fov_scale = std::clamp(static_cast<float>(std::atof(fov)) / 100.0f, 0.7f, 1.0f);
     if (const char* sharpen = std::getenv("PT_VP_SHARPEN")) x.sharpen = std::clamp(static_cast<float>(std::atof(sharpen)), 0.0f, 1.0f);
-    // The views' pixels the eyes cover, and the eyes' own size.
-    const uint32_t covered_width = std::max(16u, static_cast<uint32_t>(std::lround(width * x.fov_scale)));
-    const uint32_t covered_height = std::max(16u, static_cast<uint32_t>(std::lround(height * x.fov_scale)));
-    x.eye_width = std::max(16u, static_cast<uint32_t>(std::lround(covered_width * x.scale)));
-    x.eye_height = std::max(16u, static_cast<uint32_t>(std::lround(covered_height * x.scale)));
-    LogInfo("vr: drawable view {}x{}, field of view {:.0f} %, eyes drawn at {}x{} (scale {:.2f})", width, height, x.fov_scale * 100.0f,
-            x.eye_width, x.eye_height, x.scale);
-    constexpr uint32_t kImages = 3;
-    const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
-    if (!x.CreateImages(ctx, format, x.eye_width, x.eye_height, kImages, eye_swapchains_[0], x.textures[0], "left eye") ||
-        !x.CreateImages(ctx, format, x.eye_width, x.eye_height, kImages, eye_swapchains_[1], x.textures[1], "right eye") ||
-        !x.CreateImages(ctx, format, 1920, 1080, kImages, hud_swapchain_, x.textures[2], "HUD") ||
-        !x.CreateImages(ctx, format, 1920, 1080, kImages, screen_swapchain_, x.textures[3], "virtual screen")) {
+    x.drawable_width = width;
+    x.drawable_height = height;
+    const pt::visionos::HeadsetSettings& headset = pt::visionos::Headset();
+    if (!SetupEyes(*this, x, x.scale, static_cast<float>(headset.fov) / 100.0f, headset.metalfx)) {
         error_ = "cannot create the eye images";
         return false;
     }
-    x.view_width = covered_width;
-    x.view_height = covered_height;
-    if (pt::visionos::Headset().metalfx && (x.eye_width + 8 < covered_width || x.eye_height + 8 < covered_height)) {
-        if ([MTLFXSpatialScalerDescriptor supportsDevice:x.mtl_device]) {
-            bool ok = true;
-            for (int eye = 0; eye < 2 && ok; ++eye) {
-                MTLFXSpatialScalerDescriptor* d = [MTLFXSpatialScalerDescriptor new];
-                d.inputWidth = x.eye_width;
-                d.inputHeight = x.eye_height;
-                d.outputWidth = covered_width;
-                d.outputHeight = covered_height;
-                d.colorTextureFormat = x.textures[eye][0].pixelFormat;
-                d.outputTextureFormat = x.textures[eye][0].pixelFormat;
-                // sRGB images: the scaler works on the encoded (perceptual) values.
-                d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
-                x.scalers[eye] = [d newSpatialScalerWithDevice:x.mtl_device];
-                if (!x.scalers[eye]) {
-                    ok = false;
-                    break;
-                }
-                MTLTextureDescriptor* t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:d.outputTextureFormat
-                                                                                              width:covered_width
-                                                                                             height:covered_height
-                                                                                          mipmapped:NO];
-                t.usage = x.scalers[eye].outputTextureUsage | MTLTextureUsageShaderRead;
-                t.storageMode = MTLStorageModePrivate;
-                x.enlarged[eye] = [x.mtl_device newTextureWithDescriptor:t];
-                ok = x.enlarged[eye] != nil;
-            }
-            x.metalfx = ok;
-            LogInfo("vr: MetalFX {} ({}x{} -> {}x{} per eye)", ok ? "on" : "could not be set up", x.eye_width, x.eye_height, covered_width,
-                    covered_height);
-        } else {
-            LogInfo("vr: MetalFX spatial scaling is not supported on this device");
-        }
-    } else {
-        LogInfo("vr: MetalFX {}", pt::visionos::Headset().metalfx ? "not needed (the eyes are drawn at the views' size)" : "off");
+    constexpr uint32_t kImages = 3;
+    const VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
+    if (!x.CreateImages(ctx, format, 1920, 1080, kImages, hud_swapchain_, x.textures[2], "HUD") ||
+        !x.CreateImages(ctx, format, 1920, 1080, kImages, screen_swapchain_, x.textures[3], "virtual screen")) {
+        error_ = "cannot create the HUD images";
+        return false;
     }
     if (const char* overlay = std::getenv("PT_VP_OVERLAY"); overlay && overlay[0] == '1') {
         MTLTextureDescriptor* t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB
@@ -1027,6 +1086,10 @@ void Host::Shutdown() {
             chains[i]->views.clear();
             chains[i]->images.clear();
             x.textures[i].clear();
+            if (i < 2) {
+                for (VkDeviceMemory m : x.eye_memory[i]) vkFreeMemory(x.ctx->device, m, nullptr);
+                x.eye_memory[i].clear();
+            }
         }
         x.ctx = nullptr;
     }
@@ -1088,6 +1151,42 @@ void Host::PollEvents() {
             LogInfo("vr: the immersive space closed; the game waits for a new one");
             x.space_gone = true;
             forget_frame(false);
+        }
+    }
+    // The image size, field of view or MetalFX changed in the game's menu: the eye images again,
+    // now, between frames (the game draws at the new size from the next frame).
+    if (x.running && x.ctx && !x.textures[0].empty()) {
+        pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
+        const float fov = std::clamp(static_cast<float>(h.fov) / 100.0f, 0.7f, 1.0f);
+        const float scale = std::clamp(h.resolution_scale, 0.5f, 2.0f);
+        const auto now = std::chrono::steady_clock::now();
+        if (std::fabs(scale - x.scale) > 0.01f || std::fabs(fov - x.fov_scale) > 0.005f || h.metalfx != x.metalfx_wanted) {
+            if (std::fabs(scale - x.pending_scale) > 0.001f || std::fabs(fov - x.pending_fov) > 0.001f || h.metalfx != x.pending_metalfx) {
+                x.pending_scale = scale;
+                x.pending_fov = fov;
+                x.pending_metalfx = h.metalfx;
+                x.pending_since = now;
+            } else if (now - x.pending_since >= std::chrono::milliseconds(400)) {
+                x.pending_scale = -1.0f;
+                const float old_scale = x.scale;
+                const float old_fov = x.fov_scale;
+                const bool old_metalfx = x.metalfx_wanted;
+                if (!SetupEyes(*this, x, scale, fov, h.metalfx)) {
+                    // Back to what worked, and the menu with it.
+                    LogError("vr: the eye images could not be made at the new size; back to the previous one");
+                    h.resolution_scale = old_scale;
+                    h.fov = static_cast<int>(std::lround(old_fov * 100.0f));
+                    h.metalfx = old_metalfx;
+                    pt::visionos::SettingChanged("resolution_scale", std::format("{:.2f}", old_scale));
+                    if (!SetupEyes(*this, x, old_scale, old_fov, old_metalfx)) {
+                        LogError("vr: the eye images could not be made again; ending");
+                        x.exit_requested = true;
+                        x.running = false;
+                    }
+                }
+            }
+        } else {
+            x.pending_scale = -1.0f;  // back where it was: a later change waits its full moment
         }
     }
     const bool focused = state == cp_layer_renderer_state_running && b.foreground.load();
