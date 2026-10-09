@@ -132,7 +132,19 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (render 1539×1059, 4 vistas ≈ 6,4 MP). `gpu labels` por vista: compose+forward 3,2–3,7, lighting 2,6–2,7, post 2,2–2,3,
   gbuffer 2,1–2,3, sombras 1,3 (una vez), reflections 1,0 (centros), occlusion 0,9. ≈7 ms/MP: para 45 fps hay que bajar a
   ≈3,4 ms/MP (×2). El usuario NO quiere bajar resolución (ya baja, dientes de sierra): el camino es coste por píxel.
-- **Build 21:** (pendiente de CI)
+- **Prueba build 21 (run 25):** pantalla 90 Hz (medida), 18–20 fps, GPU 47–55 ms/frame, térmico fair. El preset M2 iba a
+  90 fps (preset con 90). Por vista: effects 2,3–3,0 (la más cara), lights 1,9–2,4, post 2,2 (bloom 1,4), gbuffer 1,8,
+  occlusion 0,85, forward 0,7, compose 0,27, reflections 1,0 (centros), probes 0,7, shadows 1,2–1,7/frame.
+- **Build 22:**
+  - Bloom compartido: los centros (vistas 2, 3) copian el bloom de la vista ancha de su ojo (`bloom_eye_[2]`, sello
+    `bloom_eye_frame_` = `frame_counter_ + (vr_eye_<=0)`, se invalida al empezar la vista 0) y el tonemap lo muestrea en
+    `0.5 + (uv-0.5)·scale` (`push.f2.x`, `SetVrBloomShare(stereo.inset_scale)`). −1,4 ms × 2. Contrapartida: los brillos SSR
+    (solo en centros) no generan halo.
+  - Subetiquetas `effects/{particles, particles/scene copy, particles composite, scene copy}`.
+  - Vibración: `Host::Haptic` devuelve los motores alcanzados (C/Swift `int`/`Int32`); `VrPlay::Rumble` registra el primer
+    pulso y un resumen cada 10 s; pulso de 0,08 s. Origen: canal de movimiento del audio del juego (como en PS4).
+  - Preset M2 a 45 fps (`kPresets.fps`, `PTSettings.defaults`); M5 a 90.
+- **Build 21:** OK (run 25)
   - Perfilador más fino: `compose and forward/{compose,forward,effects}`, `lighting/{probes,lights}`,
     `post/{bloom,flare,tonemap,fxaa,color lut,screen blur,banding,screen}` (etiquetas fuera de render pass); log hasta 40 filas.
   - Flare en el visor: la pasada de limpiar `flare_` se salta mientras nada dibuja en él (`vr_eye_ >= 0`,

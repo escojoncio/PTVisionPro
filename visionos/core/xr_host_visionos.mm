@@ -92,7 +92,7 @@ struct Bridge {
     std::mutex mutex;
     cp_layer_renderer_t layer = nil;
     pt_vp_controller controller{};
-    void (*haptics)(int, float, float) = nullptr;
+    int (*haptics)(int, float, float) = nullptr;
     void (*setting_changed)(const char*, const char*) = nullptr;
     std::vector<SpatialTouch> touches;
     pt_vp_hand hands[2]{};
@@ -1975,14 +1975,14 @@ float Host::GpuBudgetMs() const {
     return frame_ms * 0.9f - 1.0f;
 }
 
-void Host::Haptic(int hand, float amplitude, float seconds) {
+int Host::Haptic(int hand, float amplitude, float seconds) {
     Bridge& b = bridge();
-    void (*cb)(int, float, float) = nullptr;
+    int (*cb)(int, float, float) = nullptr;
     {
         std::lock_guard<std::mutex> lock(b.mutex);
         cb = b.haptics;
     }
-    if (cb) cb(hand, amplitude, seconds);
+    return cb ? cb(hand, amplitude, seconds) : 0;
 }
 
 }  // namespace pt::xr
@@ -2014,10 +2014,11 @@ struct Preset {
     bool bloom;
     bool reflections;
     bool metalfx;
+    int fps;  // 45: a picture every other refresh (half the display's rate)
 };
 constexpr Preset kPresets[2] = {
-    {0.60f, 3, true, true, true, false},    // Vision Pro M2 (shadows as on PS4)
-    {0.85f, 3, true, true, true, false},    // Vision Pro M5
+    {0.60f, 3, true, true, true, false, 45},    // Vision Pro M2 (shadows as on PS4)
+    {0.85f, 3, true, true, true, false, 90},    // Vision Pro M5
 };
 
 const char* ShadowName(int quality) {
@@ -2032,7 +2033,7 @@ const char* ShadowName(int quality) {
 bool MatchesPreset(int preset, const AppSettings& s, const HeadsetSettings& h) {
     if (preset < 0 || preset > 1) return false;
     const Preset& p = kPresets[preset];
-    return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == 90 && h.foveation && h.metalfx == p.metalfx && h.fov == 100 &&
+    return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == p.fps && h.foveation && h.metalfx == p.metalfx && h.fov == 100 &&
            !h.dynamic_resolution &&
            s.graphics.shadow_quality == p.shadow_quality && s.graphics.ambient_occlusion == p.ssao && s.graphics.bloom == p.bloom &&
            s.graphics.reflections == p.reflections;
@@ -2078,7 +2079,7 @@ void ApplyPreset(int preset, AppSettings& s) {
     }
     const Preset& p = kPresets[h.preset];
     h.resolution_scale = p.resolution_scale;
-    h.target_fps = 90;
+    h.target_fps = p.fps;
     h.foveation = true;
     h.metalfx = p.metalfx;
     h.fov = 100;
@@ -2090,7 +2091,7 @@ void ApplyPreset(int preset, AppSettings& s) {
     s.graphics.reflections = p.reflections;
     SettingChanged("preset", h.preset == 0 ? "m2" : "m5");
     SettingChanged("resolution_scale", std::format("{:.2f}", p.resolution_scale));
-    SettingChanged("target_fps", "90");
+    SettingChanged("target_fps", std::to_string(p.fps));
     SettingChanged("foveation", "1");
     SettingChanged("metalfx", p.metalfx ? "1" : "0");
     SettingChanged("fov", "100");
@@ -2628,7 +2629,7 @@ void pt_vp_set_controller(const pt_vp_controller* state) {
     b.controller = *state;
 }
 
-void pt_vp_haptics_callback(void (*cb)(int hand, float amplitude, float seconds)) {
+void pt_vp_haptics_callback(int (*cb)(int hand, float amplitude, float seconds)) {
     pt::xr::Bridge& b = pt::xr::bridge();
     std::lock_guard<std::mutex> lock(b.mutex);
     b.haptics = cb;

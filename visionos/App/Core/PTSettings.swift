@@ -90,7 +90,8 @@ struct PTSettings: Codable, Equatable {
             settings.preset = preset
             settings.resolutionScale = 0.6
             settings.dynamicResolution = false
-            settings.targetFPS = 90
+            // A picture every other refresh (45 at 90 Hz, 50 at 100 Hz), reprojected in between.
+            settings.targetFPS = 45
             settings.fov = 100
             settings.graphicsPreset = "medium"
             settings.shadows = "high"

@@ -136,7 +136,7 @@ final class GameRunner: @unchecked Sendable {
 
         // The game's haptic pulses, to the controller's motors.
         pt_vp_haptics_callback { hand, amplitude, seconds in
-            PlayStationController.shared.playHaptic(hand: Int(hand), amplitude: amplitude, seconds: seconds)
+            Int32(PlayStationController.shared.playHaptic(hand: Int(hand), amplitude: amplitude, seconds: seconds))
         }
 
         // Whether the app is in front.
