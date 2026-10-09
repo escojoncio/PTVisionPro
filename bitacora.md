@@ -128,7 +128,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
 - **Prueba build 19:** sin mejora apreciable (18–22 fps): las sombras ya se comparten (centros 0,02 ms) pero el total
   sigue 44–55 ms GPU (4 vistas) + composición 1–1,6 ms. Por vista ~10–12 ms a 1,6 MP. Subtítulos de la radio
   desplazados a un lado (HUD con seguimiento perezoso de 20°).
-- **Build 20 (lanzada):**
+- **Build 20 (run_number 24): OK** → `releases/download/build-24/PTVisionPro-24.ipa` (sin probar):
   - HUD sin menú pegado a la cabeza (orientación completa, 1,6 m, como el panel de rendimiento): `VrPlay::Place`
     (`head_orientation_local`, `hud_orientation_`); con menú abierto, colocado en el mundo como antes. `ScreenMode`
     reinicia `menu_was_open_` en pantalla.
