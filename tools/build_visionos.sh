@@ -24,7 +24,12 @@ if [ ! -f "$LIB" ]; then
   if [ ! -d "$MOLTENVK/.git" ]; then
     git clone https://github.com/KhronosGroup/MoltenVK.git "$MOLTENVK"
   fi
-  git -C "$MOLTENVK" checkout --quiet "$MOLTENVK_COMMIT"
+  git -C "$MOLTENVK" checkout --quiet --force "$MOLTENVK_COMMIT"
+  # Our additions to MoltenVK (patches/moltenvk): variable rasterization rate in dynamic rendering.
+  for patch in "$ROOT"/patches/moltenvk/*.patch; do
+    git -C "$MOLTENVK" apply --whitespace=nowarn "$patch"
+    echo "MoltenVK: applied $(basename "$patch")"
+  done
   (cd "$MOLTENVK" && ./fetchDependencies --visionos --no-parallel-build && make visionos)
 fi
 [ -f "$LIB" ] || { echo "MoltenVK xros archive missing"; exit 1; }

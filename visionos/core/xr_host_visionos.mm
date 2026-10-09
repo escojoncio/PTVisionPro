@@ -17,6 +17,7 @@
 // MoltenVK uses, so it runs after the game's rendering without any CPU wait.
 
 #include "engine/xr/xr_host.h"
+#include "engine/xr/xr_view.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -351,6 +352,39 @@ fragment float4 eye_fragment(Varyings in [[stage_in]], texture2d<float> tex [[te
     }
     return float4(SceneLight(float4(c, picture.a), u.grade), 1.0);
 }
+// Variable rasterization rate: the eye image holds the physical pixels of its rate map; `in.uv` is
+// the logical picture's (cursor.xy its size), taken to them through the tables (`vrr`, R32Float,
+// a value per whole pixel: rows cursor.z + 2, + 3 logical x, y to physical), as the game's shaders do.
+float VrrTable(texture2d<float> t, uint row, float x) {
+    uint w = t.get_width();
+    float c = clamp(x, 0.0, float(w - 1));
+    uint i = min(uint(c), w - 2);
+    float a = t.read(uint2(i, row)).x;
+    float b = t.read(uint2(i + 1, row)).x;
+    return mix(a, b, c - float(i));
+}
+fragment float4 eye_vrr_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], texture2d<float> vrr [[texture(1)]],
+                                 constant Uniforms& u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    uint row = uint(u.cursor.z + 0.5);
+    float2 logical = in.uv * u.cursor.xy;
+    float2 physical = float2(VrrTable(vrr, row + 2, logical.x), VrrTable(vrr, row + 3, logical.y));
+    float2 uv = physical / float2(tex.get_width(), tex.get_height());
+    float4 picture = tex.sample(s, uv);
+    float3 c = picture.rgb;
+    float amount = u.pad.x;
+    if (amount > 0.0) {
+        float2 px = 1.0 / float2(tex.get_width(), tex.get_height());
+        float3 n = tex.sample(s, uv + float2(0.0, -px.y)).rgb;
+        float3 so = tex.sample(s, uv + float2(0.0, px.y)).rgb;
+        float3 w = tex.sample(s, uv + float2(-px.x, 0.0)).rgb;
+        float3 e = tex.sample(s, uv + float2(px.x, 0.0)).rgb;
+        float3 lo = min(c, min(min(n, so), min(w, e)));
+        float3 hi = max(c, max(max(n, so), max(w, e)));
+        c = clamp(c + (c * 4.0 - n - so - w - e) * (amount * 0.5), lo, hi);
+    }
+    return float4(SceneLight(float4(c, picture.a), u.grade), 1.0);
+}
 // An eye's sharp centre (the game's foveation) over its wide view: premultiplied, faded out over
 // the last pad.y of each edge so no seam shows.
 fragment float4 inset_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
@@ -496,6 +530,17 @@ struct Host::Impl {
     // drew it: placed by it in the views of any drawable.
     simd_float4 eye_tangents[2] = {simd_make_float4(-1.0f, 1.0f, -1.0f, 1.0f), simd_make_float4(-1.0f, 1.0f, -1.0f, 1.0f)};
     bool have_tangents = false;
+    // Variable rasterization rate (Host::Vrr): each eye's rate map, the tables the composition reads
+    // (the game's, as an R32Float texture) and what they were made for.
+    id<MTLRasterizationRateMap> vrr_maps[2] = {nil, nil};
+    id<MTLTexture> vrr_texture = nil;
+    id<MTLRenderPipelineState> eye_vrr_pipeline = nil;
+    bool vrr_failed = false;  // unsupported, or it failed once: the insets, as before
+    float vrr_center = 0.0f;
+    glm::vec4 vrr_tangents[2]{};
+    bool VrrWanted() const;
+    bool BuildVrr(Host& host);
+    void DropVrr(Host& host);
     // The game centres on the head again (a new tracking origin, or a jump of the head between
     // two frames: the system recentred it after a long press of the Digital Crown).
     bool recenter = false;
@@ -720,6 +765,8 @@ struct Host::Impl {
             return p;
         };
         eye_pipeline = make(@"eye_vertex", false, @"eye_fragment");
+        // (Optional: without it, the insets as before.)
+        eye_vrr_pipeline = make(@"eye_vertex", false, @"eye_vrr_fragment");
         inset_pipeline = make(@"eye_vertex", true, @"inset_fragment");
         quad_pipeline = make(@"quad_vertex", true);
         laser_pipeline = make(@"laser_vertex", true, @"laser_fragment");
@@ -916,6 +963,151 @@ static float EyeFactor(const pt::visionos::HeadsetSettings& h) {
     return h.game_foveation ? std::clamp(static_cast<float>(h.periphery) / 100.0f, 0.3f, 0.7f) : 1.0f;
 }
 
+// --- Variable rasterization rate (MoltenVK's VkRenderingRasterizationRateMapMVK) ----------------
+// Each eye is drawn once, through a Metal rate map, instead of a wide view and an inset: one
+// logical picture of the eye's own field, the size it would have at the inset's density, whose
+// pixels are rasterized at that density inside the centre (the setting's share of the field
+// around the eye's axis) and at the wide view's outside it. The scene's targets and the eye
+// images hold the map's physical pixels; the game's shaders and the composition move between the
+// two through tables taken from the map itself. PT_VP_VRR=0 keeps the insets.
+
+bool Host::Impl::VrrWanted() const {
+    static const bool off = [] {
+        const char* v = std::getenv("PT_VP_VRR");
+        return v && v[0] == '0';
+    }();
+    return !off && !vrr_failed && eye_factor < 0.999f && mtl_device != nil && eye_vrr_pipeline != nil;
+}
+
+void Host::Impl::DropVrr(Host& host) {
+    Host::VrrInfo& info = host.vrr_;
+    if (info.active) {
+        info = Host::VrrInfo{false, info.generation + 1};
+        LogInfo("vrr: off (the insets, if the game's foveation is on)");
+    }
+    vrr_maps[0] = vrr_maps[1] = nil;
+    vrr_texture = nil;
+}
+
+bool Host::Impl::BuildVrr(Host& host) {
+    if (![mtl_device supportsRasterizationRateMapWithLayerCount:1]) {
+        LogInfo("vrr: this device has no rate maps; the insets instead");
+        vrr_failed = true;
+        return false;
+    }
+    const float center = std::clamp(static_cast<float>(pt::visionos::Headset().center) / 100.0f, 0.3f, 0.8f);
+    auto even = [](float v) { return std::max(16u, 2u * static_cast<uint32_t>(std::ceil(v * 0.5f))); };
+    // The picture: the wide view's size at the inset's density (the inset draws `center` of the
+    // field in as many pixels as the wide view draws all of it).
+    const uint32_t lw = even(static_cast<float>(eye_width) / center);
+    const uint32_t lh = even(static_cast<float>(eye_height) / center);
+    constexpr int kZones = 16;  // (a layer descriptor takes few; 16 is safe everywhere)
+    id<MTLRasterizationRateMap> maps[2] = {nil, nil};
+    glm::vec4 tangents[2];
+    MTLSize physical[2] = {};
+    // The dense zones of each eye: full density where a zone reaches into the centre (symmetric
+    // around the eye's axis, as the inset), the wide view's (`center` of it) elsewhere.
+    bool dense_x[2][kZones] = {};
+    bool dense_y[2][kZones] = {};
+    for (int e = 0; e < 2; ++e) {
+        // The eye's own field (left, right, up, down), framed as the game frames it.
+        const simd_float4 t = eye_tangents[e];
+        tangents[e] = glm::vec4(t.x, t.y, t.w, t.z);
+        const xr::EyeFrustum f = xr::OwnFrustumFor(tangents[e], glm::uvec2(lw, lh));
+        for (int i = 0; i < kZones; ++i) {
+            const float a = static_cast<float>(i) / kZones;
+            const float b = static_cast<float>(i + 1) / kZones;
+            const float x0 = f.center.x - f.tan_x + a * 2.0f * f.tan_x;
+            const float x1 = f.center.x - f.tan_x + b * 2.0f * f.tan_x;
+            dense_x[e][i] = x1 > -center * f.tan_x && x0 < center * f.tan_x;
+            const float y0 = f.center.y + f.tan_y - a * 2.0f * f.tan_y;  // top of the zone
+            const float y1 = f.center.y + f.tan_y - b * 2.0f * f.tan_y;
+            dense_y[e][i] = y0 > -center * f.tan_y && y1 < center * f.tan_y;
+        }
+    }
+    for (int e = 0; e < 2; ++e) {
+        // The eyes' fields mirror each other: the union of both patterns, mirrored across, so both
+        // maps have the same physical size (the scene's targets are shared).
+        float qx[kZones];
+        float qy[kZones];
+        for (int i = 0; i < kZones; ++i) {
+            const int m = kZones - 1 - i;
+            qx[i] = (dense_x[e][i] || dense_x[1 - e][m]) ? 1.0f : center;
+            qy[i] = (dense_y[0][i] || dense_y[1][i]) ? 1.0f : center;
+        }
+        MTLRasterizationRateLayerDescriptor* layer = [[MTLRasterizationRateLayerDescriptor alloc] initWithSampleCount:MTLSizeMake(kZones, kZones, 1)
+                                                                                                         horizontal:qx
+                                                                                                           vertical:qy];
+        MTLRasterizationRateMapDescriptor* d = [MTLRasterizationRateMapDescriptor rasterizationRateMapDescriptorWithScreenSize:MTLSizeMake(lw, lh, 0)
+                                                                                                                         layer:layer];
+        d.label = e == 0 ? @"PT left eye" : @"PT right eye";
+        maps[e] = [mtl_device newRasterizationRateMapWithDescriptor:d];
+        if (!maps[e]) {
+            LogError("vrr: the rate map could not be made; the insets instead");
+            vrr_failed = true;
+            return false;
+        }
+        physical[e] = [maps[e] physicalSizeForLayer:0];
+    }
+    // Both eyes share the scene's targets: the same physical size (mirrored fields).
+    if (physical[0].width != physical[1].width || physical[0].height != physical[1].height || physical[0].width < 16 || physical[0].height < 16) {
+        LogError("vrr: the eyes' rate maps differ in size ({}x{} and {}x{}); the insets instead", physical[0].width, physical[0].height,
+                 physical[1].width, physical[1].height);
+        vrr_failed = true;
+        return false;
+    }
+    const uint32_t pw = static_cast<uint32_t>(physical[0].width);
+    const uint32_t ph = static_cast<uint32_t>(physical[0].height);
+    // The tables: a value per whole pixel, four rows an eye (physical x, y to logical; logical x, y
+    // to physical), each axis on its own (a rate map's are).
+    const uint32_t width = std::max({pw, ph, lw, lh}) + 2;
+    std::vector<float> tables(static_cast<size_t>(width) * 8, 0.0f);
+    for (int e = 0; e < 2; ++e) {
+        float* rows[4];
+        for (int k = 0; k < 4; ++k) rows[k] = tables.data() + static_cast<size_t>(e * 4 + k) * width;
+        for (uint32_t i = 0; i < width; ++i) {
+            const float px = static_cast<float>(std::min(i, pw));
+            const float py = static_cast<float>(std::min(i, ph));
+            const float sx = static_cast<float>(std::min(i, lw));
+            const float sy = static_cast<float>(std::min(i, lh));
+            rows[0][i] = static_cast<float>([maps[e] mapPhysicalToScreenCoordinates:MTLCoordinate2DMake(px, ph * 0.5f) forLayer:0].x);
+            rows[1][i] = static_cast<float>([maps[e] mapPhysicalToScreenCoordinates:MTLCoordinate2DMake(pw * 0.5f, py) forLayer:0].y);
+            rows[2][i] = static_cast<float>([maps[e] mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(sx, lh * 0.5f) forLayer:0].x);
+            rows[3][i] = static_cast<float>([maps[e] mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(lw * 0.5f, sy) forLayer:0].y);
+        }
+    }
+    MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:width height:8 mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> texture = [mtl_device newTextureWithDescriptor:td];
+    if (!texture) {
+        LogError("vrr: no texture for the tables; the insets instead");
+        vrr_failed = true;
+        return false;
+    }
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, 8) mipmapLevel:0 withBytes:tables.data() bytesPerRow:width * sizeof(float)];
+    vrr_maps[0] = maps[0];
+    vrr_maps[1] = maps[1];
+    vrr_texture = texture;
+    vrr_center = center;
+    vrr_tangents[0] = tangents[0];
+    vrr_tangents[1] = tangents[1];
+    Host::VrrInfo& info = host.vrr_;
+    info.active = true;
+    ++info.generation;
+    info.maps[0] = (__bridge void*)maps[0];
+    info.maps[1] = (__bridge void*)maps[1];
+    info.logical = {lw, lh};
+    info.physical = {pw, ph};
+    info.tables = std::move(tables);
+    info.table_width = width;
+    const double before = 2.0 * eye_width * eye_height / 1.0e6;
+    LogInfo("vrr: each eye one view through a rate map: a {}x{} picture in {}x{} pixels ({:.2f} MP; wide view and inset {:.2f} MP), centre {:.0f} %, "
+            "its edge at {:.0f} % density",
+            lw, lh, pw, ph, pw * ph / 1.0e6, before, center * 100.0f, center * 100.0f);
+    return true;
+}
+
 static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, bool metalfx, float eye_factor) {
     vk::Context& ctx = *x.ctx;
     if (!x.textures[0].empty()) {
@@ -952,6 +1144,15 @@ static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, b
     const uint32_t covered_height = std::max(16u, static_cast<uint32_t>(std::lround(x.drawable_height * x.fov_scale)));
     x.eye_width = std::max(16u, static_cast<uint32_t>(std::lround(covered_width * x.scale * x.eye_factor)));
     x.eye_height = std::max(16u, static_cast<uint32_t>(std::lround(covered_height * x.scale * x.eye_factor)));
+    // Variable rasterization rate: each eye one view through its rate map (the centre as dense as
+    // an inset, the rest as the wide view), the eye images holding its physical pixels. Else, the
+    // wide views above (and the insets).
+    if (x.VrrWanted() && x.have_tangents && x.BuildVrr(host)) {
+        x.eye_width = host.Vrr().physical.width;
+        x.eye_height = host.Vrr().physical.height;
+    } else {
+        x.DropVrr(host);
+    }
     LogInfo("vr: drawable view {}x{}, field of view {:.0f} %, eyes drawn at {}x{} (scale {:.2f}{})", x.drawable_width, x.drawable_height,
             x.fov_scale * 100.0f, x.eye_width, x.eye_height, x.scale,
             x.eye_factor < 1.0f ? std::format(", wide views at {:.0f} % with the game's foveation", x.eye_factor * 100.0f) : std::string());
@@ -963,7 +1164,7 @@ static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, b
     }
     x.view_width = covered_width;
     x.view_height = covered_height;
-    if (metalfx && (x.eye_width + 8 < covered_width || x.eye_height + 8 < covered_height)) {
+    if (metalfx && !host.Vrr().active && (x.eye_width + 8 < covered_width || x.eye_height + 8 < covered_height)) {
         if ([MTLFXSpatialScalerDescriptor supportsDevice:x.mtl_device]) {
             bool ok = true;
             for (int eye = 0; eye < 2 && ok; ++eye) {
@@ -1189,6 +1390,7 @@ void Host::Shutdown() {
         ar_session_stop(x.ar_session);
         x.ar_session = nil;
     }
+    x.DropVrr(*this);
     x.running = false;
 }
 
@@ -1408,6 +1610,23 @@ void Host::LocateViews() {
         x.eye_tangents[i] = simd_make_float4(tan_left, tan_right, tan_down, tan_up) * k;
     }
     x.have_tangents = true;
+    // Variable rasterization rate: the rate maps (and eye images) once the eyes' fields are known,
+    // and again when they or the centre's size change (the menu). Between frames for the game: it
+    // takes the eye images after this.
+    if (x.running && x.ctx && !x.textures[0].empty() && x.VrrWanted()) {
+        const float center = std::clamp(static_cast<float>(pt::visionos::Headset().center) / 100.0f, 0.3f, 0.8f);
+        bool stale = !vrr_.active || std::fabs(center - x.vrr_center) > 1.0e-3f;
+        // (Only a real change of the fields: the composition follows small drifts on its own.)
+        for (int i = 0; i < 2; ++i) stale = stale || glm::distance(eyes_[i].tangents, x.vrr_tangents[i]) > 2.0e-2f;
+        if (stale && !SetupEyes(*this, x, x.scale, x.fov_scale, x.metalfx_wanted, x.eye_factor)) {
+            LogError("vr: the eye images for the rate maps could not be made; back to the insets");
+            x.vrr_failed = true;
+            if (!SetupEyes(*this, x, x.scale, x.fov_scale, x.metalfx_wanted, x.eye_factor)) {
+                x.exit_requested = true;
+                x.running = false;
+            }
+        }
+    }
     head_.orientation = QuatOf(x.origin_from_device);
     head_.position = PositionOf(x.origin_from_device);
     views_valid_ = true;
@@ -1740,9 +1959,21 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     e = simd_make_float4((m20 - 1.0f) / m00, (m20 + 1.0f) / m00, (m21 - 1.0f) / m11, (m21 + 1.0f) / m11) * k;
                 }
                 u.p0 = simd_make_float4(m00 * e.x - m20, m11 * e.z - m21, m00 * e.y - m20, m11 * e.w - m21);
-                [enc setRenderPipelineState:x.eye_pipeline];
+                // Variable rasterization rate: the image is the whole drawing of the eye's own field
+                // (as the game frames it, OwnFrustumFor at the logical size); the part shown is this
+                // view's field, unwarped through the tables.
+                const Host::VrrInfo& vrr = host.Vrr();
+                const bool unwarp = vrr.active && !use_enlarged && x.vrr_texture && x.eye_vrr_pipeline && x.have_tangents;
+                if (unwarp) {
+                    const glm::uvec2 logical(vrr.logical.width, vrr.logical.height);
+                    const xr::EyeFrustum f = xr::OwnFrustumFor(glm::vec4(e.x, e.y, e.w, e.z), logical);
+                    u.rect = simd_make_float4(f.rect.x, f.rect.y, f.rect.z, f.rect.w);
+                    u.cursor = simd_make_float4(static_cast<float>(logical.x), static_cast<float>(logical.y), static_cast<float>(v * 4), 0.0f);
+                }
+                [enc setRenderPipelineState:unwarp ? x.eye_vrr_pipeline : x.eye_pipeline];
                 [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
                 [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+                if (unwarp) [enc setFragmentTexture:x.vrr_texture atIndex:1];
                 [enc setFragmentTexture:use_enlarged ? x.enlarged[v] : x.textures[v][image(static_cast<int>(v))] atIndex:0];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 // The game's foveation: the eye's sharp centre over its wide view, faded in at the
@@ -1932,7 +2163,7 @@ bool Host::InsetWanted(float& center) const {
     const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
     center = std::clamp(static_cast<float>(h.center) / 100.0f, 0.3f, 0.8f);
     // What the eye images are now (the setting takes effect with them, after its short wait).
-    return impl_->running && impl_->eye_factor < 0.999f;
+    return impl_->running && impl_->eye_factor < 0.999f && !vrr_.active;
 }
 
 bool Host::EnsureInsetImages(VkExtent2D extent) {

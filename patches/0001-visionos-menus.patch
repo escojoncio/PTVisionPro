@@ -1,3 +1,64 @@
+diff --git a/shaders/common.glsl b/shaders/common.glsl
+index 3b70a46..669e071 100644
+--- a/shaders/common.glsl
++++ b/shaders/common.glsl
+@@ -13,6 +13,7 @@ struct View {
+     vec4 jitter;
+     vec4 temporal;
+     vec4 dominant_light;
++    vec4 vrr;
+ };
+ 
+ struct Light {
+@@ -101,6 +102,7 @@ layout(set = 1, binding = 4) uniform texture3D lut2_image;
+ #define RES_LUT1 24
+ #define RES_MATERIAL 25
+ #define RES_DITHER 26
++#define RES_VRR_MAP 35
+ #define RES_COLOR_LUT 27
+ #define RES_COLOR_LUT_PREV 28
+ #define RES_NOISE 29
+@@ -196,7 +198,40 @@ vec3 ViewPosition(View v, vec2 ndc, float depth) {
+     return vec3(ndc * v.projection_param.xy * z, z);
+ }
+ 
++/* Variable rasterization rate (visionOS): the view's scene targets hold physical pixels of a logical
++   picture (v.vrr). Each axis maps on its own through a table (RES_VRR_MAP, a value per whole pixel,
++   linear between): rows vrr.y + 0, 1 physical x, y to logical; + 2, 3 logical x, y to physical. */
++float VrrTable(float row, float x) {
++    int width = textureSize(sampler2D(images[RES_VRR_MAP], samplers[SMP_POINT_CLAMP]), 0).x;
++    float c = clamp(x, 0.0, float(width - 1));
++    int i = min(int(c), width - 2);
++    float a = texelFetch(sampler2D(images[RES_VRR_MAP], samplers[SMP_POINT_CLAMP]), ivec2(i, int(row)), 0).x;
++    float b = texelFetch(sampler2D(images[RES_VRR_MAP], samplers[SMP_POINT_CLAMP]), ivec2(i + 1, int(row)), 0).x;
++    return mix(a, b, c - float(i));
++}
++
++/* A physical pixel position of the view's targets as a logical one (unchanged without the rate map). */
++vec2 VrrLogicalPixel(View v, vec2 physical) {
++    if (!(v.vrr.x > 0.5)) return physical;
++    return vec2(VrrTable(v.vrr.y, physical.x), VrrTable(v.vrr.y + 1.0, physical.y));
++}
++
++/* A uv of the view's targets (physical) as a uv of the logical picture, and back. */
++vec2 VrrLogicalUv(View v, vec2 uv) {
++    if (!(v.vrr.x > 0.5)) return uv;
++    return VrrLogicalPixel(v, uv * v.viewport.xy) / v.vrr.zw;
++}
++
++vec2 VrrPhysicalUv(View v, vec2 uv) {
++    if (!(v.vrr.x > 0.5)) return uv;
++    vec2 logical = uv * v.vrr.zw;
++    return vec2(VrrTable(v.vrr.y + 2.0, logical.x), VrrTable(v.vrr.y + 3.0, logical.y)) * v.viewport.zw;
++}
++
+ vec2 PixelNdc(View v, vec2 frag) {
++    if (v.vrr.x > 0.5) {
++        return VrrLogicalPixel(v, frag) / v.vrr.zw * 2.0 - 1.0 - v.jitter.xy;
++    }
+     return frag * v.viewport.zw * 2.0 - 1.0 - v.jitter.xy;
+ }
+ 
 diff --git a/shaders/composite.frag b/shaders/composite.frag
 index 669c207..1395df9 100644
 --- a/shaders/composite.frag
@@ -113,6 +174,81 @@ index 66d5d0c..0207546 100644
      vec4 g_normal = ImgFetch(IMG_NORMAL, pixel);
      vec4 g_material = ImgFetch(IMG_MATERIAL, pixel);
      s.N = DecodeNormal(g_normal.xyz);
+diff --git a/shaders/reflect_blend_main.glsl b/shaders/reflect_blend_main.glsl
+index 2cafd35..725ac22 100644
+--- a/shaders/reflect_blend_main.glsl
++++ b/shaders/reflect_blend_main.glsl
+@@ -28,13 +28,14 @@ vec4 NoReflection(vec3 N, vec3 plane) {
+ }
+ 
+ vec4 HistoryOffset(View v, vec2 uv, vec2 hit_uv, bool has_hit) {
+-    vec2 ndc = uv * 2.0 - 1.0;
++    // uv, hit_uv: the targets' (physical); positions and the offset out are logical.
++    vec2 ndc = VrrLogicalUv(v, uv) * 2.0 - 1.0;
+     vec3 P = ReflectionViewPosition(ndc, v.projection_param.xy, v.jitter.xy, ViewZ(v, ReflectionFloorDepth(v, uv)));
+     float distance = length(P);
+     float hit_depth = has_hit ? ReflectionFloorDepth(v, hit_uv) : 0.0;
+     has_hit = hit_depth > 0.0;
+     if (has_hit) {
+-        vec3 H = ReflectionViewPosition(hit_uv * 2.0 - 1.0, v.projection_param.xy, v.jitter.xy, ViewZ(v, hit_depth));
++        vec3 H = ReflectionViewPosition(VrrLogicalUv(v, hit_uv) * 2.0 - 1.0, v.projection_param.xy, v.jitter.xy, ViewZ(v, hit_depth));
+         distance += length(H - P);
+     }
+     vec3 virtual_image = P * (distance / max(length(P), 1.0e-6));
+diff --git a/shaders/reflect_make.frag b/shaders/reflect_make.frag
+index 2a25fdf..8aa6692 100644
+--- a/shaders/reflect_make.frag
++++ b/shaders/reflect_make.frag
+@@ -44,7 +44,8 @@ void main() {
+         out_color = vec4(1.0, 1.0, 1.0, 0.0);
+         return;
+     }
+-    vec2 ndc = in_uv * 2.0 - 1.0;
++    // The ray is marched in the logical picture (its uvs through VrrPhysicalUv to the targets).
++    vec2 ndc = VrrLogicalUv(v, uv) * 2.0 - 1.0;
+     vec3 P = ReflectionViewPosition(ndc, v.projection_param.xy, v.jitter.xy, z);
+     vec3 D = P * inversesqrt(dot(P, P));
+     vec3 R = D - 2.0 * dot(plane, D) * plane;
+@@ -68,7 +69,7 @@ void main() {
+     for (int k = 0; k < 16; ++k) {
+         float s = k == 0 && pass.f1.w < 0.5 ? 1.0 : 1.0 + 25.0 * (float(k) + offset);
+         vec2 suv = 0.5 * (start + s * stride) + 0.5;
+-        float sz = SceneZ(suv);
++        float sz = SceneZ(VrrPhysicalUv(v, suv));
+         terminated = terminated || behind_previous || far_limit < sz || Outside(suv);
+         bool behind = 1.0 / (inv_z_step * s + inv_z) > sz;
+         if (k > 0 && behind && !terminated && hit < 0) {
+@@ -90,7 +91,7 @@ void main() {
+     for (int i = 0; i < 6; ++i) {
+         float mid = (hi - lo) * 0.5 + lo;
+         vec2 muv = 0.5 * (start + mid * stride) + 0.5;
+-        float mz = SceneZ(muv);
++        float mz = SceneZ(VrrPhysicalUv(v, muv));
+         float ray_z = 1.0 / (inv_z_step * mid + inv_z);
+         invalid = invalid || Outside(muv) || far_limit < mz;
+         float error = abs(ray_z - mz);
+@@ -115,5 +116,6 @@ void main() {
+     float ray_fade = 1.0 - Saturate(travel * 0.02);
+     float path_fade = 1.0 - Saturate((sqrt(P.z * P.z + 1.0 + P.y * P.y + P.x * P.x) + travel) * 0.002);
+     float confidence = min(path_fade, min(screen_fade, ray_fade)) * (1.0 - Saturate(best_error * 10.0));
+-    out_color = vec4(clamp(0.5 * (best_uv - uv) + 0.5, 0.0, 1.0), confidence, 1.0);
++    // The hit as an offset in the targets' (physical) uvs, as the blend reads it.
++    out_color = vec4(clamp(0.5 * (VrrPhysicalUv(v, best_uv) - uv) + 0.5, 0.0, 1.0), confidence, 1.0);
+ }
+diff --git a/shaders/reflect_temporal.frag b/shaders/reflect_temporal.frag
+index 4246f16..e893146 100644
+--- a/shaders/reflect_temporal.frag
++++ b/shaders/reflect_temporal.frag
+@@ -59,7 +59,8 @@ void main() {
+ 
+     vec4 result = current;
+     if (pass.ids.y != 0u && offset.z >= 0.0) {
+-        vec2 history_pixel = (gl_FragCoord.xy * v.viewport.zw + offset.xy) * v.viewport.xy - 0.5;
++        // The offset is logical (HistoryOffset): back to the targets' pixels through the rate map.
++        vec2 history_pixel = VrrPhysicalUv(v, VrrLogicalUv(v, gl_FragCoord.xy * v.viewport.zw) + offset.xy) * v.viewport.xy - 0.5;
+         ivec2 p0 = ivec2(floor(history_pixel));
+         vec2 f = history_pixel - vec2(p0);
+         vec4 history = vec4(0.0);
 diff --git a/shaders/reflection_depth.glsl b/shaders/reflection_depth.glsl
 index fc1c963..b0eb8e4 100644
 --- a/shaders/reflection_depth.glsl
@@ -242,8 +378,31 @@ index ffee464..5d15d12 100644
          return p;
      }
  };
+diff --git a/src/engine/render/gpu_types.h b/src/engine/render/gpu_types.h
+index 61d401d..3902330 100644
+--- a/src/engine/render/gpu_types.h
++++ b/src/engine/render/gpu_types.h
+@@ -31,6 +31,10 @@ struct View {
+     glm::vec4 jitter{0.0f};
+     glm::vec4 temporal{0.0f};
+     glm::vec4 dominant_light{0.0f, 1.0f, 0.0f, 1.0f};
++    // Variable rasterization rate (visionOS): x 1 when this view's scene targets are physical
++    // pixels of a logical picture, y the first of its four rows in the tables (kResVrrMap), zw the
++    // logical size. Zero otherwise.
++    glm::vec4 vrr{0.0f};
+ };
+ 
+ struct Light {
+@@ -114,6 +118,7 @@ enum Image : uint32_t {
+     kImgVelocity = 32,
+     kImgObjectVelocity = 33,
+     kImgMbTile = 34,
++    kResVrrMap = 35,
+     kImgMbNeighbour = 39,
+     kImgMbBake = 40,
+     kImgMbBlurA = 41,
 diff --git a/src/engine/render/render_util.cpp b/src/engine/render/render_util.cpp
-index c327bd9..1a26215 100644
+index c327bd9..5bc9b33 100644
 --- a/src/engine/render/render_util.cpp
 +++ b/src/engine/render/render_util.cpp
 @@ -39,7 +39,11 @@ void UseTargets(VkCommandBuffer cmd, std::initializer_list<TargetUse> uses) {
@@ -258,21 +417,86 @@ index c327bd9..1a26215 100644
      if (g_checkpoints && vkCmdSetCheckpointNV) {
          vkCmdSetCheckpointNV(cmd, name);
      }
-@@ -54,6 +58,7 @@ void EndLabel(VkCommandBuffer cmd) {
+@@ -54,6 +58,32 @@ void EndLabel(VkCommandBuffer cmd) {
      if (vkCmdEndDebugUtilsLabelEXT) {
          vkCmdEndDebugUtilsLabelEXT(cmd);
      }
 +    if (g_label_hook) g_label_hook(g_label_user, cmd, false, nullptr);
++}
++
++namespace {
++VrrPasses g_vrr;
++bool g_vrr_force = false;
++bool g_vrr_current = false;
++// MoltenVK's VkRenderingRasterizationRateMapMVK (patches/moltenvk), declared here as it is.
++constexpr VkStructureType kRenderingRasterizationRateMapMVK = static_cast<VkStructureType>(1297501008);
++struct RenderingRasterizationRateMapMVK {
++    VkStructureType sType = kRenderingRasterizationRateMapMVK;
++    const void* pNext = nullptr;
++    void* mtlRasterizationRateMap = nullptr;
++};
++}  // namespace
++
++void SetVrrPasses(const VrrPasses& passes) {
++    g_vrr = passes;
++    g_vrr_force = false;
++    g_vrr_current = false;
++}
++
++void ForceVrrNextPass() { g_vrr_force = g_vrr.map != nullptr; }
++
++VkExtent2D VrrViewport(VkExtent2D extent) {
++    return g_vrr_current && extent.width == g_vrr.physical.width && extent.height == g_vrr.physical.height ? g_vrr.logical : extent;
  }
  
  void SetViewport(VkCommandBuffer cmd, VkRect2D area) {
+@@ -89,8 +119,18 @@ void BeginPass(VkCommandBuffer cmd, VkRect2D area, std::span<const ColorOutput>
+     rendering.colorAttachmentCount = count;
+     rendering.pColorAttachments = attachments;
+     rendering.pDepthAttachment = depth ? &depth_info : nullptr;
++    // Variable rasterization rate: a pass of the scene's geometry over the whole physical size.
++    const bool whole = area.offset.x == 0 && area.offset.y == 0 && area.extent.width == g_vrr.physical.width &&
++                       area.extent.height == g_vrr.physical.height;
++    g_vrr_current = g_vrr.map && whole && ((depth && depth->image.image == g_vrr.depth) || g_vrr_force);
++    g_vrr_force = false;
++    RenderingRasterizationRateMapMVK rate_map;
++    if (g_vrr_current) {
++        rate_map.mtlRasterizationRateMap = g_vrr.map;
++        rendering.pNext = &rate_map;
++    }
+     vkCmdBeginRendering(cmd, &rendering);
+-    SetViewport(cmd, area);
++    SetViewport(cmd, g_vrr_current ? VkRect2D{{0, 0}, g_vrr.logical} : area);
+     vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
+     vkCmdSetFrontFace(cmd, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+ }
 diff --git a/src/engine/render/render_util.h b/src/engine/render/render_util.h
-index 7486360..0bc0581 100644
+index 7486360..618420f 100644
 --- a/src/engine/render/render_util.h
 +++ b/src/engine/render/render_util.h
-@@ -35,6 +35,10 @@ void BeginPass(VkCommandBuffer cmd, VkExtent2D extent, std::initializer_list<Col
+@@ -34,7 +34,30 @@ void BeginPass(VkCommandBuffer cmd, VkExtent2D extent, std::initializer_list<Col
+                bool depth_read_only = false, bool clear_depth = false);
  void BeginPass(VkCommandBuffer cmd, VkRect2D area, std::span<const ColorOutput> colors, RenderTarget* depth, bool depth_read_only, bool clear_depth);
  void SetViewport(VkCommandBuffer cmd, VkRect2D area);
++
++// Variable rasterization rate (visionOS, MoltenVK's VkRenderingRasterizationRateMapMVK): while set,
++// every pass over the whole of `physical` that rasterizes the scene's geometry (its depth
++// attachment is `depth`, or ForceVrrNextPass) goes through `map`: its targets hold `physical`
++// pixels, dense in the middle and sparse at the edges, for a `logical` picture. Viewports and
++// scissors of those passes are logical. Full-screen passes without the scene depth stay
++// physical, pixel for pixel (shaders map positions with the tables, common.glsl Vrr*).
++struct VrrPasses {
++    void* map = nullptr;  // an id<MTLRasterizationRateMap>; nullptr: off
++    VkImage depth = VK_NULL_HANDLE;
++    VkExtent2D physical{};
++    VkExtent2D logical{};
++};
++void SetVrrPasses(const VrrPasses& passes);
++// The next pass over the whole physical size uses the map even without the scene depth (a pass
++// that rasterizes the scene's volumes into a target of its own).
++void ForceVrrNextPass();
++// The viewport a pass of `extent` takes: logical inside a pass that uses the map.
++VkExtent2D VrrViewport(VkExtent2D extent);
  void BeginLabel(VkCommandBuffer cmd, const char* name);
 +// A GPU profiler's hook into the labels (begin: true, name; end: false, nullptr), when set.
 +using LabelHook = void (*)(void* user, VkCommandBuffer cmd, bool begin, const char* name);
@@ -310,10 +534,21 @@ index 9bb3b5d..c4444bd 100644
      float grain[4] = {0.0f, 0.0f, 0.0f, 0.0f};
      float grain_offset[2] = {0.0f, 0.0f};
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..c59b97c 100644
+index 40d339d..2d2239b 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
-@@ -329,6 +329,13 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -306,7 +306,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+     skin_matrices_.clear();
+     light_sources_.clear();
+     light_boxes_.clear();
+-    const float aspect = static_cast<float>(output_extent_.width) / static_cast<float>(output_extent_.height);
++    // (With variable rasterization rate the picture's proportions are the logical size's.)
++    const float aspect = VrrActive() ? static_cast<float>(vrr_logical_.width) / static_cast<float>(vrr_logical_.height)
++                                     : static_cast<float>(output_extent_.width) / static_cast<float>(output_extent_.height);
+     const glm::mat4 unjittered = camera.Projection(aspect);
+     glm::mat4 projection = unjittered;
+     if (up_.enabled) {
+@@ -329,9 +331,17 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          v.shadow = glm::vec4(0.0f);
          static const float shadow_rotate = std::getenv("PT_SHADOW_ROTATE") ? 1.0f : 0.0f;
          v.jitter = up_.enabled ? glm::vec4(up_.jitter_ndc, up_.mip_bias, shadow_rotate) : glm::vec4(0.0f);
@@ -327,7 +562,23 @@ index 40d339d..c59b97c 100644
          v.jitter.z += graphics.texture_detail==0?1.0f:graphics.texture_detail==2?-.5f:0.0f;
          v.temporal = glm::vec4(0.0f);
          v.dominant_light = glm::vec4(glm::mat3(v.view) * glm::vec3(0.0f, 1.0f, 0.0f), 1.0f);
-@@ -359,7 +366,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
++        v.vrr = glm::vec4(0.0f);  // (set below for the main views when the rate map is on)
+         return view_count_++;
+     };
+     main_view_ = ViewSetup{};
+@@ -353,13 +363,19 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+     }
+     motion_view_ = add_view(projection, gl_view, camera.position, glm::vec4(0.0f));
+     frame_->views[motion_view_].dominant_light = dominant_light;
++    if (VrrActive()) {
++        // Its targets hold the rate map's physical pixels (common.glsl PixelNdc, Vrr*).
++        const glm::vec4 vrr(1.0f, static_cast<float>(vrr_row_), static_cast<float>(vrr_logical_.width), static_cast<float>(vrr_logical_.height));
++        frame_->views[main_view_.index].vrr = vrr;
++        frame_->views[motion_view_].vrr = vrr;
++    }
+     frame_->views[motion_view_].view_projection = previous_view_projection_;
+     post_view_ = main_view_.index;
+     if (up_.enabled) {
          post_view_ = add_view(unjittered, gl_view, camera.position, glm::vec4(0.0f));
          gpu::View& post = frame_->views[post_view_];
          post.viewport = glm::vec4(output_extent_.width, output_extent_.height, 1.0f / output_extent_.width, 1.0f / output_extent_.height);
@@ -336,7 +587,7 @@ index 40d339d..c59b97c 100644
          post.dominant_light = dominant_light;
      }
  
-@@ -610,6 +617,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -610,6 +626,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          }
      }
  
@@ -355,7 +606,7 @@ index 40d339d..c59b97c 100644
      static const bool legacy_cull = [] {
          const char* s = std::getenv("PT_LIGHT_CULL_LEGACY");
          return s && std::string_view(s) == "1";
-@@ -624,8 +643,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -624,8 +652,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
      mirror_occluders_ = {};
      if (!legacy_cull) {
          const lightcull::OccluderLimits& limits = lightcull::LimitsFromEnv();
@@ -366,7 +617,7 @@ index 40d339d..c59b97c 100644
          if (mirror_active_) {
              mirror_occluders_ = lightcull::BuildOccluderVolumes(lighting.occluders, mirror_current_view_projection_, mirror_view_.eye, limits);
          }
-@@ -664,7 +683,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -664,7 +692,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
                  drop = "box outside the view planes";
              } else if (!mirror_active_) {
                  for (size_t oi = 0; oi < lighting.occluders.size(); ++oi) {
@@ -375,7 +626,7 @@ index 40d339d..c59b97c 100644
                          const glm::vec3 q = lighting.occluders[oi].points[0];
                          drop = explain ? std::format("occluder {} at ({:.2f} {:.2f} {:.2f}) hides box ({:.2f} {:.2f} {:.2f})-({:.2f} {:.2f} {:.2f})", oi, q.x,
                                                       q.y, q.z, box.lo.x, box.lo.y, box.lo.z, box.hi.x, box.hi.y, box.hi.z)
-@@ -698,7 +717,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -698,7 +726,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
              }
          }
          const glm::vec3 cull_rank = l.has_rank_point ? l.rank_point : (box.lo + box.hi) * 0.5f;
@@ -384,7 +635,7 @@ index 40d339d..c59b97c 100644
          const float cull_gate = glm::pi<float>() * (l.intensity.x + l.intensity.y + l.intensity.z) * exposure_;
          if (trace_cull_frame) {
              std::string reason = drop;
-@@ -796,7 +815,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -796,7 +824,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          }
          LogInfo("probe at: blend ({:.4f} {:.4f} {:.4f})", blend.x, blend.y, blend.z);
      }
@@ -395,7 +646,7 @@ index 40d339d..c59b97c 100644
      if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
          std::map<std::string, std::pair<bool, float>> now;
          for (uint32_t i = 0; i < light_count_; ++i) {
-@@ -984,18 +1005,108 @@ void SceneRenderer::BuildShadowViews(const SceneLighting& lighting, const glm::v
+@@ -984,18 +1014,108 @@ void SceneRenderer::BuildShadowViews(const SceneLighting& lighting, const glm::v
          }
          return false;
      };
@@ -508,7 +759,7 @@ index 40d339d..c59b97c 100644
          const float tile_uv = static_cast<float>(shadow_tile) / static_cast<float>(shadow_size);
          const glm::vec3 pos = glm::vec3(g.position);
          if (spot) {
-@@ -1232,14 +1343,99 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -1232,14 +1352,99 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
      if (shadow_views_.empty()) {
          return;
      }
@@ -614,7 +865,7 @@ index 40d339d..c59b97c 100644
          SetViewport(cmd, sv.rect);
          vkCmdSetDepthBias(cmd, sv.bias_constant, 0.0f, sv.bias_slope);
          const uint8_t casters = sv.casters;
-@@ -1264,8 +1460,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -1264,8 +1469,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
              }
              DrawMesh(cmd, d, sv.view, 0, false, false, nullptr, sv.cull, true);
          }
@@ -624,7 +875,7 @@ index 40d339d..c59b97c 100644
      UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
  }
  
-@@ -1282,6 +1478,7 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1282,6 +1487,7 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
          debug_flags = 3;
      }
      const glm::vec4 aux[2] = {glm::vec4(0.0f), glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(reflection_cube_))};
@@ -632,7 +883,7 @@ index 40d339d..c59b97c 100644
      for (int pass = 0; pass < 2; ++pass) {
          vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 0 ? gbuffer_ : decal_);
          if (pass == 1) {
-@@ -1293,9 +1490,13 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1293,9 +1499,13 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
                  continue;
              }
              DrawMesh(cmd, d, view.index, debug_flags, view.mirrored, false, aux);
@@ -646,7 +897,18 @@ index 40d339d..c59b97c 100644
  }
  
  void SceneRenderer::RecordOcclusion(VkCommandBuffer cmd, const ViewSetup& view) {
-@@ -1422,6 +1623,7 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1401,7 +1611,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+         return v && std::string_view(v) == "legacy";
+     }();
+     const bool ao = rt_ao_ready_ && view.index == main_view_.index;
+-    const bool shrink = !up_.enabled && !ao && !legacy_resolve;
++    // (Not at half size with variable rasterization rate: the probes' boxes are rasterized through
++    // the rate map, which is the targets' size.)
++    const bool shrink = !up_.enabled && !ao && !legacy_resolve && !VrrActive();
+     const VkExtent2D acc_area{shrink ? (area.width + 1) / 2 : area.width, shrink ? (area.height + 1) / 2 : area.height};
+     auto draw_probes = [&](uint32_t shrink_flag) {
+         if (ao) {
+@@ -1422,16 +1634,20 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          }
      };
      if (probes) {
@@ -654,7 +916,10 @@ index 40d339d..c59b97c 100644
          UseTargets(cmd, {{&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
                           {&probe_acc_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
-@@ -1431,7 +1633,9 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+         VkClearColorValue transmittance{};
+         transmittance.float32[3] = 1.0f;
++        if (VrrActive()) ForceVrrNextPass();
+         BeginPass(cmd, acc_area, {{&probe_acc_, true, transmittance}});
          draw_probes(shrink ? 1u : 0u);
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&probe_acc_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -664,7 +929,7 @@ index 40d339d..c59b97c 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1447,7 +1651,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1447,7 +1663,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          vkCmdDraw(cmd, 3, 1, 0, 0);
      }
      const bool contact = rt_contact_active_ && view.index == main_view_.index;
@@ -699,7 +964,7 @@ index 40d339d..c59b97c 100644
          if (rt_active_ || contact) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rt_active_ ? light_rt_ : light_contact_);
              const VkDescriptorSet rt_set = rt_->Set(renderer_->FrameIndex());
-@@ -1455,8 +1685,61 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1455,8 +1697,61 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          } else {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, light_);
          }
@@ -762,7 +1027,7 @@ index 40d339d..c59b97c 100644
              const SceneLight& l = *light_sources_[i];
              if (const char* only = std::getenv("PT_LIGHT_DRAW_ONLY"); only && l.name.find(only) == std::string::npos) {
                  continue;
-@@ -1464,15 +1747,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1464,15 +1759,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              if ((l.hidden_views & view.view_bit) != 0) {
                  continue;
              }
@@ -794,7 +1059,7 @@ index 40d339d..c59b97c 100644
              gpu::PassPush push;
              const uint32_t mirror_light = mirror_shadow_lights_[i];
              const bool has_shadow = view.view_bit == 2 ? mirror_light != gpu::kInvalid : (light_shadow_views_[i] & view.view_bit) != 0;
-@@ -1486,10 +1778,48 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1486,10 +1790,48 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              push.m = volume;
              PushConstants(cmd, &push, sizeof(push));
              vkCmdDraw(cmd, 36, 1, 0, 0);
@@ -843,7 +1108,7 @@ index 40d339d..c59b97c 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +2112,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +2124,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -912,7 +1177,7 @@ index 40d339d..c59b97c 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +2184,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +2196,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -920,7 +1185,7 @@ index 40d339d..c59b97c 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +2195,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +2207,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -960,7 +1225,7 @@ index 40d339d..c59b97c 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +2220,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2232,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -968,7 +1233,7 @@ index 40d339d..c59b97c 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2476,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2488,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -983,7 +1248,7 @@ index 40d339d..c59b97c 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2489,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2501,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -992,7 +1257,7 @@ index 40d339d..c59b97c 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2514,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2526,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -1009,7 +1274,7 @@ index 40d339d..c59b97c 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2531,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2543,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -1017,7 +1282,7 @@ index 40d339d..c59b97c 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2566,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2578,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -1025,7 +1290,7 @@ index 40d339d..c59b97c 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2624,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2636,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -1038,7 +1303,7 @@ index 40d339d..c59b97c 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2641,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2653,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -1054,7 +1319,25 @@ index 40d339d..c59b97c 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2330,10 +2731,59 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2325,15 +2738,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+         SettleExposure(lighting_->exposure);
+     }
+     VkCommandBuffer cmd = renderer_->Cmd();
++    // Variable rasterization rate: this view's geometry passes go through its rate map (to the end
++    // of the render, whichever way it ends).
++    struct VrrGuard {
++        ~VrrGuard() { SetVrrPasses({}); }
++    } vrr_guard;
++    if (VrrActive()) {
++        SetVrrPasses({vrr_map_, depth_.image.image, extent_, vrr_logical_});
++        if (static bool logged = false; !logged) {
++            logged = true;
++            LogInfo("vrr: the eyes drawn through rate maps: {}x{} pixels for a {}x{} picture", extent_.width, extent_.height, vrr_logical_.width,
++                    vrr_logical_.height);
++        }
++    }
+     vkCmdResetQueryPool(cmd, slot.queries, 0, kTimestamps);
+     if (up_.enabled) {
          vkCmdResetQueryPool(cmd, slot.upscale_queries, 0, 4);
      }
      queries_ = slot.queries;
@@ -1115,7 +1398,7 @@ index 40d339d..c59b97c 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2905,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2930,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -1140,7 +1423,7 @@ index 40d339d..c59b97c 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
-index 19dd1a8..f100147 100644
+index 19dd1a8..7af5170 100644
 --- a/src/engine/render/scene_post.cpp
 +++ b/src/engine/render/scene_post.cpp
 @@ -5,6 +5,7 @@
@@ -1300,8 +1583,20 @@ index 19dd1a8..f100147 100644
      (void)dt;
  }
  
+@@ -368,7 +404,10 @@ void SceneRenderer::UpdateMotion(const Camera& camera, float dt) {
+     if (!motion_history_valid_) {
+         up_.reset = true;
+     }
+-    const float aspect = static_cast<float>(output_extent_.width) / static_cast<float>(std::max(1u, output_extent_.height));
++    // (The logical picture's proportions with variable rasterization rate, as PrepareFrame.)
++    const float aspect = vrr_map_ && vrr_logical_.height > 0
++                             ? static_cast<float>(vrr_logical_.width) / static_cast<float>(vrr_logical_.height)
++                             : static_cast<float>(output_extent_.width) / static_cast<float>(std::max(1u, output_extent_.height));
+     previous_view_projection_ = previous.Projection(aspect) * previous.View();
+     const float step = std::clamp(interval, 1.0e-4f, 1.0f);
+     frame_time_ = reference ? static_cast<double>(step) : static_cast<double>(step * 0.016666668f) + frame_time_ * 0.9833333333333333;
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..edde8a6 100644
+index 1f96981..35cf177 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
 @@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
@@ -1351,6 +1646,15 @@ index 1f96981..edde8a6 100644
                           &reflect_colour_, &kawase_, &bloom_add_, &kawase_sum_, &gaussian_, &tonemap_, &fxaa_, &dof_ratio_, &dof_down_, &dof_blur_, &dof_blend_,
                           &mb_velocity_, &mb_tile_pipeline_, &mb_bake_pipeline_, &mb_mcguire_, &mb_composite_, &velocity_pipeline_, &fsblur_,
                           &banding_, &screen_fx_, &debug_, &occlusion_, &occlusion_blur_, &reflect_make_, &reflect_blend_, &vfx_composite_,
+@@ -545,7 +560,7 @@ void SceneRenderer::Shutdown() {
+     ctx.DestroyBuffer(dump_scene_);
+     ctx.DestroyBuffer(dump_mirror_);
+     ctx.DestroyImage(shadow_.image);
+-    vk::Image* images[] = {&lut1_, &lut2_, &material_tex_, &dither_, &color_lut_, &color_lut_prev_, &noise_, &mask_, &white_};
++    vk::Image* images[] = {&lut1_, &lut2_, &material_tex_, &dither_, &color_lut_, &color_lut_prev_, &noise_, &mask_, &white_, &vrr_tables_};
+     for (vk::Image* image : images) {
+         ctx.DestroyImage(*image);
+     }
 @@ -555,6 +570,7 @@ void SceneRenderer::Shutdown() {
          ctx.DestroyBuffer(slot.luminance);
          vkDestroyQueryPool(device_, slot.queries, nullptr);
@@ -1403,7 +1707,35 @@ index 1f96981..edde8a6 100644
                                    &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_, &mb_tile_[0],
                                    &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_, &mb_blur_[0],
                                    &mb_blur_[1]};
-@@ -1174,10 +1195,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+@@ -773,6 +794,7 @@ void SceneRenderer::WriteImageDescriptors() {
+     set_image(gpu::kResLut1, lut1_);
+     set_image(gpu::kResMaterial, material_tex_);
+     set_image(gpu::kResDither, dither_);
++    set_image(gpu::kResVrrMap, vrr_tables_);
+     set_image(gpu::kResColorLut, color_lut_);
+     set_image(gpu::kResColorLutPrev, color_lut_prev_);
+     set_image(gpu::kResNoise, noise_);
+@@ -824,6 +846,19 @@ void SceneRenderer::WriteImageDescriptors() {
+     }
+ }
+ 
++bool SceneRenderer::SetVrrTables(const float* data, uint32_t width, uint32_t rows) {
++    if (!data || width < 2 || rows == 0) return false;
++    // Nothing in flight may still read the descriptors about to change.
++    vkDeviceWaitIdle(device_);
++    if (!UploadImage(vrr_tables_, VK_FORMAT_R32_SFLOAT, {width, rows, 1}, data, sizeof(float) * width * rows)) {
++        LogError("vrr: the rate map tables could not be uploaded");
++        return false;
++    }
++    WriteImageDescriptors();
++    LogInfo("vrr: rate map tables {}x{}", width, rows);
++    return true;
++}
++
+ bool SceneRenderer::UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size) {
+     vk::Context& ctx = renderer_->Context();
+     if (!image.image || image.format != format || image.extent.width != extent.width || image.extent.height != extent.height ||
+@@ -1174,10 +1209,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
      stats_.gpu_ms = span(0, 6);
  }
  
@@ -1489,7 +1821,7 @@ index 1f96981..edde8a6 100644
      if (slot.reflection_sampled) {
          vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
          const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
-@@ -1189,7 +1285,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -1189,7 +1299,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -1501,10 +1833,10 @@ index 1f96981..edde8a6 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..f0dae50 100644
+index 6c9b165..9bd5893 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,30 @@ public:
+@@ -206,6 +206,41 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
@@ -1522,6 +1854,17 @@ index 6c9b165..f0dae50 100644
 +    // view's image, wide uv = 0.5 + (inset uv - 0.5) * xy + zw.
 +    // Native HDR in the headset (above 1: the brightest the scene may go, times SDR white).
 +    void SetVrHdrPeak(float peak) { vr_hdr_peak_ = peak; }
++    // Variable rasterization rate (visionOS): the eye drawn next goes through `map` (an
++    // id<MTLRasterizationRateMap>): a `logical` picture in targets of `physical` pixels (the render
++    // extent), its four rows in the tables from `row` (SetVrrTables). nullptr: none.
++    void SetVrVrr(void* map, VkExtent2D logical, VkExtent2D physical, int row) {
++        vrr_map_ = map;
++        vrr_logical_ = logical;
++        vrr_physical_ = physical;
++        vrr_row_ = row;
++    }
++    // The rate maps' tables (common.glsl VrrTable): `rows` rows of `width` floats.
++    bool SetVrrTables(const float* data, uint32_t width, uint32_t rows);
 +    void SetVrInsetShare(const glm::vec4* place) {
 +        vr_share_scale_ = place ? 1.0f : 0.0f;
 +        if (place) {
@@ -1535,7 +1878,7 @@ index 6c9b165..f0dae50 100644
  
  private:
      struct FrameSlot {
-@@ -222,7 +246,30 @@ private:
+@@ -222,7 +257,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -1566,7 +1909,7 @@ index 6c9b165..f0dae50 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -301,6 +348,7 @@ private:
+@@ -301,6 +359,7 @@ private:
      bool EnsureShadowTarget();
      void RecordRtAmbientOcclusion(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordLighting(VkCommandBuffer cmd, const ViewSetup& view);
@@ -1574,7 +1917,7 @@ index 6c9b165..f0dae50 100644
      void RecordLuminance(VkCommandBuffer cmd);
      void RecordForward(VkCommandBuffer cmd, const ViewSetup& view, RenderTarget& output);
      void RecordPost(VkCommandBuffer cmd, const SceneLighting& lighting, float dt);
-@@ -342,6 +390,8 @@ private:
+@@ -342,6 +401,8 @@ private:
      void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
      void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
      void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
@@ -1583,7 +1926,7 @@ index 6c9b165..f0dae50 100644
      void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordUpscale(VkCommandBuffer cmd, float dt);
      void ReadUpscaleTimestamps(FrameSlot& slot);
-@@ -377,6 +427,32 @@ private:
+@@ -377,6 +438,32 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
@@ -1616,7 +1959,7 @@ index 6c9b165..f0dae50 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -395,6 +471,24 @@ private:
+@@ -395,6 +482,24 @@ private:
      RenderTarget reflect_offset_;
      RenderTarget reflect_history_[2];
      RenderTarget shadow_;
@@ -1641,7 +1984,25 @@ index 6c9b165..f0dae50 100644
      RenderTarget ao_[2];
      RenderTarget refmap_;
      RenderTarget hdr_copy_;
-@@ -441,6 +535,8 @@ private:
+@@ -418,6 +523,17 @@ private:
+     vk::Buffer dump_mirror_;
+     VkExtent2D output_extent_{0, 0};
+     bool targets_upscaled_ = false;
++    // Variable rasterization rate (SetVrVrr): on for the view being drawn when its targets are the
++    // map's physical size.
++    bool VrrActive() const {
++        return vrr_map_ && vrr_tables_.image && !targets_upscaled_ && extent_.width == vrr_physical_.width &&
++               extent_.height == vrr_physical_.height && vrr_logical_.width > 0 && vrr_logical_.height > 0;
++    }
++    void* vrr_map_ = nullptr;
++    VkExtent2D vrr_logical_{};
++    VkExtent2D vrr_physical_{};
++    int vrr_row_ = 0;
++    vk::Image vrr_tables_;
+     bool history_valid_ = false;
+ 
+     vk::Image lut1_;
+@@ -441,6 +557,8 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -1650,7 +2011,7 @@ index 6c9b165..f0dae50 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -636,6 +732,26 @@ private:
+@@ -636,6 +754,26 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -1677,6 +2038,31 @@ index 6c9b165..f0dae50 100644
  };
  
  }
+diff --git a/src/engine/render/vfx_pass.cpp b/src/engine/render/vfx_pass.cpp
+index 1c8c44e..971aafc 100644
+--- a/src/engine/render/vfx_pass.cpp
++++ b/src/engine/render/vfx_pass.cpp
+@@ -9,6 +9,7 @@
+ 
+ #include "engine/core/log.h"
+ #include "engine/fs/vfs.h"
++#include "engine/render/render_util.h"
+ 
+ namespace pt {
+ 
+@@ -396,8 +397,10 @@ uint32_t VfxPass::DrawLayer(VkCommandBuffer cmd, VkDescriptorSet set, vfx::Layer
+         if (!bound) {
+             VkDescriptorSet sets[2] = {textures_->Set(), set};
+             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 2, sets, 0, nullptr);
+-            VkViewport viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f};
+-            VkRect2D scissor{{0, 0}, extent};
++            // (Logical inside a pass with variable rasterization rate: VrrViewport.)
++            const VkExtent2D screen = VrrViewport(extent);
++            VkViewport viewport{0.0f, 0.0f, static_cast<float>(screen.width), static_cast<float>(screen.height), 0.0f, 1.0f};
++            VkRect2D scissor{{0, 0}, screen};
+             vkCmdSetViewport(cmd, 0, 1, &viewport);
+             vkCmdSetScissor(cmd, 0, 1, &scissor);
+             bound = true;
 diff --git a/src/engine/render/vk_context.cpp b/src/engine/render/vk_context.cpp
 index f6a961d..de1420b 100644
 --- a/src/engine/render/vk_context.cpp
@@ -1759,7 +2145,7 @@ index 5e7cee1..6610b7f 100644
  
  }
 diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
-index b5bf253..984ae53 100644
+index b5bf253..e457ac5 100644
 --- a/src/engine/xr/xr_host.h
 +++ b/src/engine/xr/xr_host.h
 @@ -37,6 +37,18 @@ struct ControllerState {
@@ -1792,7 +2178,7 @@ index b5bf253..984ae53 100644
  };
  
  class Host final : public vk::ContextCreator {
-@@ -100,16 +116,34 @@ public:
+@@ -100,16 +116,49 @@ public:
      const ViewPose& Head() const { return head_; }
      bool ViewsValid() const { return views_valid_; }
      const ControllerState& Controllers() const { return controllers_; }
@@ -1825,14 +2211,30 @@ index b5bf253..984ae53 100644
 +    // True once after the tracking origin moved under the player (a new immersive space, the
 +    // system's recentring, or the menu's "recentre"): the game centres on the head again.
 +    bool TakeRecenter();
++    // Variable rasterization rate (visionOS): while `active`, each eye is one view drawn through
++    // its rate map (`maps[eye]`, an id<MTLRasterizationRateMap>): a `logical` picture in eye
++    // images of `physical` pixels, dense around the eye's axis. `tables`: `table_width` floats a
++    // row, four rows an eye (physical x, y to logical; logical x, y to physical) for the shaders.
++    // `generation` changes whenever they do.
++    struct VrrInfo {
++        bool active = false;
++        uint32_t generation = 0;
++        void* maps[2] = {nullptr, nullptr};
++        VkExtent2D logical{};
++        VkExtent2D physical{};
++        std::vector<float> tables;
++        uint32_t table_width = 0;
++    };
++    const VrrInfo& Vrr() const { return vrr_; }
  
      struct Impl;
  
-@@ -124,6 +158,7 @@ private:
+@@ -124,6 +173,8 @@ private:
      Swapchain eye_swapchains_[2];
      Swapchain hud_swapchain_;
      Swapchain screen_swapchain_;
 +    Swapchain inset_swapchains_[2];
++    VrrInfo vrr_;
      int64_t display_time_ = 0;
      double display_period_ = 1.0 / 90.0;
      bool frame_open_ = false;
@@ -1993,7 +2395,7 @@ index 42d8b01..b825960 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..d8fdd6b 100644
+index e8e4ae7..f200f79 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -2081,20 +2483,20 @@ index e8e4ae7..d8fdd6b 100644
 +        case 2: state.prompts = PromptStyle{PromptDevice::Nintendo, {'B', 'A', 'Y', 'X'}}; break;
 +        default: state.prompts = PromptStyle{PromptDevice::Xbox, {'A', 'B', 'X', 'Y'}}; break;
 +        }
-     }
++    }
 +    // A pointer on the panel the UI is on (the HUD, or the virtual screen with the UI on it): in
 +    // the UI's own pixels, which are the HUD's (Renderer::kHudExtent) in both cases.
 +    if (c.pointer_valid) {
 +        state.pointer = c.pointer * glm::vec2(static_cast<float>(Renderer::kHudExtent.width), static_cast<float>(Renderer::kHudExtent.height));
 +        state.pointer_valid = true;
 +        state.click = state.click || c.click;
-+    }
+     }
 +    // The pause menu by hand (a long pinch, xr_host_visionos.mm) comes without a controller.
 +    if (!c.active && c.menu) raw |= kRawStart;
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
      state.raw_held |= raw;
-@@ -150,17 +197,97 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -150,17 +197,119 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          return false;
      }
      const glm::vec4 tangents[2] = {host_.Eye(0).tangents, host_.Eye(1).tangents};
@@ -2116,17 +2518,38 @@ index e8e4ae7..d8fdd6b 100644
                  render_size_.y, swapchain.width, swapchain.height, glm::degrees(host_.Eye(0).angles.x), glm::degrees(host_.Eye(0).angles.y),
                  glm::degrees(host_.Eye(0).angles.z), glm::degrees(host_.Eye(0).angles.w));
      }
++#if PT_VISIONOS
++    // Variable rasterization rate: the eyes' picture is the rate maps' logical size (the eye images
++    // hold their physical pixels); no dynamic resolution then.
++    const xr::Host::VrrInfo& vrr = host_.Vrr();
++    if (vrr.active && (render_size_.x != vrr.logical.width || render_size_.y != vrr.logical.height)) {
++        render_size_ = glm::uvec2(vrr.logical.width, vrr.logical.height);
++        LogInfo("vr: eyes drawn through rate maps, a {}x{} picture in {}x{} pixels", render_size_.x, render_size_.y, vrr.physical.width,
++                vrr.physical.height);
++    }
++    const glm::uvec2 draw = vrr.active ? render_size_ : DrawSize();
++    // The eye images hold the whole drawing (the composition places it by its own field).
++    auto finish_vrr = [&](Stereo& s) {
++        s.logical = {};
++        if (!vrr.active) return;
++        s.render = vrr.physical;
++        s.logical = vrr.logical;
++        s.targets[0].rect = s.targets[1].rect = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
++    };
++#else
 +    // Drawn at the dynamic resolution's size (same proportions): the copy into the eye images
 +    // enlarges it.
 +    const glm::uvec2 draw = DrawSize();
++    auto finish_vrr = [](Stereo& s) { s.logical = {}; };
++#endif
 +#if PT_VISIONOS
-+    for (int i = 0; i < 2; ++i) {
+     for (int i = 0; i < 2; ++i) {
+-        frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
 +        frusta_[i] = xr::OwnFrustumFor(tangents[i], draw);
 +    }
 +    head_frustum_ = xr::FrustumFor(tangents[0], draw, tangents);
 +#else
-     for (int i = 0; i < 2; ++i) {
--        frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
++    for (int i = 0; i < 2; ++i) {
 +        frusta_[i] = xr::FrustumFor(tangents[i], draw, tangents);
 +    }
 +    head_frustum_ = frusta_[0];
@@ -2183,6 +2606,7 @@ index e8e4ae7..d8fdd6b 100644
 +            for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
 +            return false;
 +        }
++        finish_vrr(out);
 +        out.inset = PrepareInsets(out);
 +        return true;
 +    }
@@ -2196,7 +2620,7 @@ index e8e4ae7..d8fdd6b 100644
      const glm::vec3 feet = player.Feet();
      const glm::vec3 eye = player.Eye();
      const float height = eye.y - feet.y;
-@@ -185,14 +312,14 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -185,14 +334,14 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
      const glm::vec3 correction = kept - offset;
      last_anchor_ = anchor;
      last_correction_ = correction;
@@ -2214,10 +2638,11 @@ index e8e4ae7..d8fdd6b 100644
      auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
          if (!host_.Acquire(sc)) return false;
          t.image = sc.images[sc.index];
-@@ -207,19 +334,133 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -207,19 +356,134 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
          return false;
      }
++    finish_vrr(out);
 +    out.inset = PrepareInsets(out);
 +    return true;
 +}
@@ -2349,7 +2774,7 @@ index e8e4ae7..d8fdd6b 100644
      layers.hud_position = hud_position_;
      layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
      host_.EndFrame(layers);
-@@ -268,16 +509,48 @@ void VrPlay::EndEmpty() {
+@@ -268,16 +532,48 @@ void VrPlay::EndEmpty() {
  }
  
  void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
@@ -2401,7 +2826,7 @@ index e8e4ae7..d8fdd6b 100644
      if (!hud_placed_ || (menu_open && !menu_was_open_)) {
          hud_yaw_ = head_yaw_local;
          hud_placed_ = true;
-@@ -289,7 +562,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
+@@ -289,7 +585,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
          }
      }
      menu_was_open_ = menu_open;
@@ -2412,7 +2837,7 @@ index e8e4ae7..d8fdd6b 100644
  
  }
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index d1485b2..4c5bd1e 100644
+index d1485b2..2a3364a 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
 @@ -1,5 +1,7 @@
@@ -2423,7 +2848,7 @@ index d1485b2..4c5bd1e 100644
  #include <glm/glm.hpp>
  #include <glm/gtc/quaternion.hpp>
  
-@@ -34,6 +36,15 @@ public:
+@@ -34,6 +36,18 @@ public:
          XrTarget hud;
          VkExtent2D render{};
          xr::ViewPose poses[2];
@@ -2436,10 +2861,13 @@ index d1485b2..4c5bd1e 100644
 +        // Where each inset sits in its eye's wide-view image: wide uv = 0.5 + (inset uv - 0.5) *
 +        // xy + zw (zw zero for a wide view centred on the eye's axis).
 +        glm::vec4 inset_share[2]{};
++        // Variable rasterization rate (visionOS): the eyes' picture size (`render` is then the
++        // physical size of the eye images); zero without it.
++        VkExtent2D logical{};
      };
      bool PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_open, Stereo& out);
      void FinishStereo(const Stereo& stereo);
-@@ -43,9 +54,17 @@ public:
+@@ -43,9 +57,17 @@ public:
  
      void Rumble(uint8_t large_motor, uint8_t small_motor);
      VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
@@ -2458,7 +2886,7 @@ index d1485b2..4c5bd1e 100644
  
      xr::Host& host_;
      const AppSettings::Vr& settings_;
-@@ -53,18 +72,40 @@ private:
+@@ -53,18 +75,40 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -2500,7 +2928,7 @@ index d1485b2..4c5bd1e 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..dfedeb0 100644
+index d629ab3..a9de177 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -2934,9 +3362,14 @@ index d629ab3..dfedeb0 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4125,21 +4372,64 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4123,23 +4370,83 @@ int RunGame(App& app, pt::Vfs& vfs) {
+                 app.renderer.SetRenderExtent(stereo.render);
+                 scene_builder.Build(game, stereo.head, scene_dt, lighting, light_blend);
                  last_scene_time = game.Time();
-                 vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
+-                vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
++                // (The picture's proportions: the logical size with variable rasterization rate.)
++                const VkExtent2D picture = stereo.logical.width > 0 ? stereo.logical : stereo.render;
++                vfx_scene.Prepare(game, stereo.head, static_cast<float>(picture.width) / static_cast<float>(std::max(1u, picture.height)),
                                    lighting, vfx_pass, blend);
 -                for (int eye = 0; eye < 2; ++eye) {
 -                    if (!begin(eye == 0)) {
@@ -2959,6 +3392,14 @@ index d629ab3..dfedeb0 100644
 +                    app.scene.SetVrHdrPeak(peak > 1.001f ? peak : 0.0f);
 +                    app.renderer.xr_hdr = peak > 1.001f;
 +                }
++                // Variable rasterization rate: the rate maps' tables to the shaders when they change.
++                const pt::xr::Host::VrrInfo& vrr = vr->Host().Vrr();
++                {
++                    static uint32_t uploaded = 0;
++                    if (vrr.active && vrr.generation != uploaded && app.scene.SetVrrTables(vrr.tables.data(), vrr.table_width, 8)) {
++                        uploaded = vrr.generation;
++                    }
++                }
 +#endif
 +                // With insets: left wide, left inset, right wide, right inset (views 0, 2, 1, 3).
 +                static constexpr int kInsetOrder[4] = {0, 2, 1, 3};
@@ -2973,6 +3414,12 @@ index d629ab3..dfedeb0 100644
 -                    app.scene.Render(stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
 +                    app.scene.SetVrLowDetail(stereo.inset && !inset);
++                    // Each eye through its own rate map (its rows in the tables from eye * 4).
++                    if (vrr.active && stereo.logical.width > 0 && !inset) {
++                        app.scene.SetVrVrr(vrr.maps[eye], stereo.logical, stereo.render, eye * 4);
++                    } else {
++                        app.scene.SetVrVrr(nullptr, {}, {}, 0);
++                    }
 +#endif
 +                    app.scene.Render(inset ? stereo.insets[eye - 2] : stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
@@ -2996,6 +3443,7 @@ index d629ab3..dfedeb0 100644
 +                vr->ReportGpu(frame_gpu_ms);
 +#if PT_VISIONOS
 +                app.scene.SetVrLowDetail(false);
++                app.scene.SetVrVrr(nullptr, {}, {}, 0);
 +                app.scene.SetVrCullCamera(nullptr);
 +                app.scene.SetVrInsetShare(nullptr);
 +                app.scene.SetVrHdrPeak(0.0f);
@@ -3004,7 +3452,7 @@ index d629ab3..dfedeb0 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4858,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4875,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -3021,7 +3469,7 @@ index d629ab3..dfedeb0 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4904,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4921,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

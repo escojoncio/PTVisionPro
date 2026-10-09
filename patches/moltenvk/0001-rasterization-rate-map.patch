@@ -1,0 +1,129 @@
+diff --git a/MoltenVK/MoltenVK/API/mvk_private_api.h b/MoltenVK/MoltenVK/API/mvk_private_api.h
+index fdfa71a..577fa36 100644
+--- a/MoltenVK/MoltenVK/API/mvk_private_api.h
++++ b/MoltenVK/MoltenVK/API/mvk_private_api.h
+@@ -452,6 +452,30 @@ typedef enum {
+ typedef uint32_t MVKMSLSPIRVHeader;
+ 
+ 
++
++#pragma mark -
++#pragma mark Rasterization rate map (variable rasterization rate) for dynamic rendering
++
++/**
++ * MoltenVK private extension: Metal variable rasterization rate in Vulkan dynamic rendering.
++ *
++ * Chain a VkRenderingRasterizationRateMapMVK to the pNext of the VkRenderingInfo given to
++ * vkCmdBeginRendering() and the Metal render passes of that rendering use the given
++ * MTLRasterizationRateMap (MTLRenderPassDescriptor.rasterizationRateMap). Its attachments are
++ * then the map's physical size (physicalSizeForLayer:0), which is also the render area to give,
++ * while viewports and scissors are in the map's screen (logical) coordinates, as Metal expects.
++ *
++ * The map is not retained: the app keeps it alive until the command buffer has completed.
++ * In fragment shaders the position is physical; attributes interpolate in screen space.
++ */
++#define VK_STRUCTURE_TYPE_RENDERING_RASTERIZATION_RATE_MAP_MVK ((VkStructureType)1297501008)
++
++typedef struct VkRenderingRasterizationRateMapMVK {
++	VkStructureType sType;                 /**< VK_STRUCTURE_TYPE_RENDERING_RASTERIZATION_RATE_MAP_MVK */
++	const void* pNext;
++	void* mtlRasterizationRateMap;         /**< An id<MTLRasterizationRateMap>, or NULL for none. */
++} VkRenderingRasterizationRateMapMVK;
++
+ #ifdef __cplusplus
+ }
+ #endif	//  __cplusplus
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
+index 142499d..5187443 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.h
+@@ -160,6 +160,7 @@ protected:
+ 	MVKSmallVector<VkRenderingAttachmentInfo, N> _colorAttachments;
+ 	VkRenderingAttachmentInfo _depthAttachment;
+ 	VkRenderingAttachmentInfo _stencilAttachment;
++	id<MTLRasterizationRateMap> _mtlRasterizationRateMap = nil;	// VkRenderingRasterizationRateMapMVK (not retained)
+ };
+ 
+ // Concrete template class implementations.
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.mm b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.mm
+index f04a56e..d1fc373 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdRendering.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdRendering.mm
+@@ -152,11 +152,19 @@ VkResult MVKCmdBeginRendering<N>::setContent(MVKCommandBuffer* cmdBuff,
+ 
+ 	cmdBuff->_currentSubpassInfo.beginRendering(pRenderingInfo->viewMask);
+ 
++	_mtlRasterizationRateMap = nil;
++	for (const auto* next = (const VkBaseInStructure*)pRenderingInfo->pNext; next; next = next->pNext) {
++		if (next->sType == VK_STRUCTURE_TYPE_RENDERING_RASTERIZATION_RATE_MAP_MVK) {
++			_mtlRasterizationRateMap = (id<MTLRasterizationRateMap>)((const VkRenderingRasterizationRateMapMVK*)next)->mtlRasterizationRateMap;
++		}
++	}
++
+ 	return VK_SUCCESS;
+ }
+ 
+ template <size_t N>
+ void MVKCmdBeginRendering<N>::encode(MVKCommandEncoder* cmdEncoder) {
++	cmdEncoder->_mtlRasterizationRateMap = _mtlRasterizationRateMap;
+ 	cmdEncoder->beginRendering(this, &_renderingInfo);
+ }
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
+index f6c9462..706de73 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.h
+@@ -325,6 +325,9 @@ public:
+ 	/** Clips the scissor to ensure it fits inside the render area.  */
+ 	MTLScissorRect clipToRenderArea(MTLScissorRect scissor);
+ 
++	/** The current dynamic rendering's rasterization rate map (VkRenderingRasterizationRateMapMVK), or nil. */
++	id<MTLRasterizationRateMap> _mtlRasterizationRateMap = nil;
++
+ 	/** Updates the color attachment locations. */
+ 	void updateColorAttachmentLocations(const MVKArrayRef<uint32_t> colorAttLocs);
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+index de39c96..4969833 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandBuffer.mm
+@@ -804,6 +804,14 @@ void MVKCommandEncoder::beginMetalRenderPass(MVKCommandUse cmdUse) {
+ 	VkExtent2D raFullExtent = { _renderArea.offset.x + _renderArea.extent.width, _renderArea.offset.y + _renderArea.extent.height };
+     mtlRPDesc.renderTargetWidth = max(min(raFullExtent.width, (fbExtent.width ? fbExtent.width : raFullExtent.width)), 1u);
+     mtlRPDesc.renderTargetHeight = max(min(raFullExtent.height, (fbExtent.height ? fbExtent.height : raFullExtent.height)), 1u);
++	// Variable rasterization rate (VkRenderingRasterizationRateMapMVK): the attachments are the map's
++	// physical size; Metal rasterizes the map's screen space into them.
++	if (_mtlRasterizationRateMap && isDynamicRendering()) {
++		MTLSize physical = [_mtlRasterizationRateMap physicalSizeForLayer: 0];
++		mtlRPDesc.rasterizationRateMap = _mtlRasterizationRateMap;
++		mtlRPDesc.renderTargetWidth = max<NSUInteger>(physical.width, 1);
++		mtlRPDesc.renderTargetHeight = max<NSUInteger>(physical.height, 1);
++	}
+     if (_canUseLayeredRendering) {
+         uint32_t renderTargetArrayLength;
+         bool found3D = false, found2D = false;
+@@ -922,6 +930,14 @@ VkRect2D MVKCommandEncoder::clipToRenderArea(VkRect2D rect) {
+ 	uint32_t raRight = raLeft + _renderArea.extent.width;
+ 	uint32_t raBottom = max(_renderArea.offset.y, 0);
+ 	uint32_t raTop = raBottom + _renderArea.extent.height;
++	// With a rasterization rate map, scissors are in its screen (logical) space.
++	if (_mtlRasterizationRateMap && isDynamicRendering()) {
++		MTLSize screen = _mtlRasterizationRateMap.screenSize;
++		raLeft = 0;
++		raBottom = 0;
++		raRight = (uint32_t)screen.width;
++		raTop = (uint32_t)screen.height;
++	}
+ 
+ 	rect.offset.x      = mvkClamp<uint32_t>(rect.offset.x, raLeft, max(raRight - 1, raLeft));
+ 	rect.offset.y      = mvkClamp<uint32_t>(rect.offset.y, raBottom, max(raTop - 1, raBottom));
+@@ -1028,7 +1044,9 @@ void MVKCommandEncoder::finalizeDispatchState() {
+ }
+ 
+ void MVKCommandEncoder::endRendering() {
++	bool ending = !hasMoreMultiviewPasses();
+ 	endRenderpass();
++	if (ending) { _mtlRasterizationRateMap = nil; }
+ }
+ 
+ void MVKCommandEncoder::endRenderpass() {

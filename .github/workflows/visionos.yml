@@ -45,7 +45,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/moltenvk/Package/Release/MoltenVK
-          key: moltenvk-xros-${{ hashFiles('upstream/pt-ipad/source-lock.json') }}-v1
+          key: moltenvk-xros-${{ hashFiles('upstream/pt-ipad/source-lock.json', 'patches/moltenvk/*.patch') }}-v1
 
       - name: MoltenVK license (cached package has no repository)
         if: steps.moltenvk.outputs.cache-hit == 'true'
