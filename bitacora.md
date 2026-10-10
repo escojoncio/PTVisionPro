@@ -167,6 +167,22 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   píxeles que la ancha (`PrepareInsets`), así que su densidad era periferia/centro × tamaño de imagen: bajar la periferia
   bajaba también el centro (30 → centro 810x650, imagen mala); subirla pagaba centro y lados en alta (45 → 4 vistas 1214x974,
   4,7 MP, 40–47 ms, térmico serious). Coste medido ≈ 7,5 ms/MP + ~6 ms fijos por frame.
+- **Prueba build 37 (log pt (24)):** funciona: 50 fps estables, GPU 13,4 ms (4 vistas, 40°, centro 100 %, periferia 15 %;
+  zona 722x580, periferia 406x326). Problema: zona nítida demasiado alta (el usuario ve ~10 % borroso arriba y ~30 % abajo); la
+  quiere circular. Reparto (ms por vista): ancha post 2,5 (bloom: 41 pasadas casi de coste fijo), ancha compose+forward 2,6
+  (efectos 1,4: partículas + kept + composite; forward 0,67), ancha luminance 0,53; centro lighting 0,73, gbuffer 0,4, post 0,6.
+- **Build 38 (pendiente de run): zona nítida circular y con altura.**
+  - vr_play `PrepareInsets`: imagen cuadrada (tan_x = tan_y = radio), centro en `lift_y` (tangente, arriba +), acotado dentro de
+    los campos de ambos ojos; `insets[i].offset = (0, lift_y/tan_y)`; `inset_tangents = (-r, r, lift+r, lift-r)`;
+    `inset_share.w = (f.center.y - lift_y)/(2 f.tan_y)`. Log `vr: sharp zone a circle N degrees across, M degrees from the eye's axis...`.
+  - `Host::InsetWanted(center, density, lift)` (xr_host.h, stubs xr_host.cpp); `HeadsetSettings.center_up` (-20..10°, def. -8,
+    `PT_VP_CENTER_UP`). `inset_fragment`: círculo inscrito, fundido en el 15 % exterior del radio, `discard_fragment` fuera;
+    aro rojo de prueba a mitad del fundido.
+  - Menú: fila `kVpCenterUp` "Altura de la zona nítida" (-20..+10° de 2 en 2), textos de ancho/borde = círculo/aro. Launcher:
+    `centerUp` (`PT_VP_CENTER_UP`, `center_up` desde el juego), stepper -20...10.
+  - Siguiente (pedido por el usuario: más fps para subir el centro de 60 a 80 %): bloom calculado una vez por frame (vista 0) y
+    reutilizado por la ancha derecha y los centros (−~2 ms/frame); bloom con menos pasadas (gaussianas separables a menor
+    resolución); `wide/luminance` solo en la vista 0; partículas de la ancha derecha; máscara del círculo en las anchas.
 - **Prueba build 36 (log pt (23)):** el usuario no entendía las opciones y veía nítidas las esquinas. Causas:
   (1) `SetupEyes` acotaba `eye_factor` a ≥0,2 y `EyeFactor` permitía 0,15 → con periferia 15 las imágenes de ojo se rehacían
   cada ~0,45 s (582 veces; tirones, 16–31 fps). (2) "Tamaño del centro" era % de la TANGENTE media del campo: 60–80 % cubría

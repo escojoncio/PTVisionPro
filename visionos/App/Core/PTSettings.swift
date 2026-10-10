@@ -58,6 +58,8 @@ struct PTSettings: Codable, Equatable {
     var periphery = 20
     /// Width of the sharp zone in the middle of the view, degrees across (20 to 70).
     var center = 40
+    /// Height of the sharp zone's centre, degrees above the eye's forward axis (-20 to 10).
+    var centerUp = -8
     /// Density of the sharp centre, percent of the image size (50 to 100), on its own: the
     /// periphery no longer changes it.
     var centerResolution = 100
@@ -245,7 +247,7 @@ struct PTSettings: Codable, Equatable {
         case periphery = "peripheryDensity"
         // Degrees now (it used to be a share of the field: the earlier choice does not carry over).
         case center = "sharpZoneDegrees"
-        case compositorQuality, metalFX, sharpen, gameFoveation, centerResolution
+        case compositorQuality, metalFX, sharpen, gameFoveation, centerResolution, centerUp
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -274,6 +276,7 @@ struct PTSettings: Codable, Equatable {
         periphery = min(max((try? c.decodeIfPresent(Int.self, forKey: .periphery)) ?? base.periphery, 10), 50)
         center = (try? c.decodeIfPresent(Int.self, forKey: .center)) ?? base.center
         centerResolution = (try? c.decodeIfPresent(Int.self, forKey: .centerResolution)) ?? base.centerResolution
+        centerUp = min(max((try? c.decodeIfPresent(Int.self, forKey: .centerUp)) ?? base.centerUp, -20), 10)
         sharpen = (try? c.decodeIfPresent(Double.self, forKey: .sharpen)) ?? base.sharpen
         turnMode = (try? c.decodeIfPresent(Int.self, forKey: .turnMode)) ?? base.turnMode
         snapDegrees = (try? c.decodeIfPresent(Int.self, forKey: .snapDegrees)) ?? base.snapDegrees
@@ -323,6 +326,7 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_GAME_FOVEATION=\(flag(gameFoveation))",
             "PT_VP_PERIPHERY=\(periphery)",
             "PT_VP_CENTER_DEG=\(center)",
+            "PT_VP_CENTER_UP=\(centerUp)",
             "PT_VP_CENTER_RES=\(centerResolution)",
             "PT_VP_SHARPEN=\(String(format: "%.1f", sharpen))",
             "PT_VP_TURN=\(turnMode)",

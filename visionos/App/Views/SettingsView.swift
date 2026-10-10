@@ -172,6 +172,10 @@ struct SettingsView: View {
                 Stepper("\(model.settings.center)°", value: int(\.center), in: 20...70, step: 5)
             }
             .disabled(!model.settings.gameFoveation)
+            LabeledContent(L("Altura de la zona nítida", "Sharp zone height")) {
+                Stepper("\(model.settings.centerUp > 0 ? "+" : "")\(model.settings.centerUp)°", value: int(\.centerUp), in: -20...10, step: 2)
+            }
+            .disabled(!model.settings.gameFoveation)
             LabeledContent(L("Nitidez de la zona nítida", "Sharp zone resolution")) {
                 Stepper("\(model.settings.centerResolution) %", value: int(\.centerResolution), in: 50...100, step: 5)
             }
@@ -183,8 +187,8 @@ struct SettingsView: View {
         } header: {
             Text(L("Foveado del juego", "Game foveation"))
         } footer: {
-            Text(L("Solo una zona en el centro de la vista se dibuja nítida; todo lo de fuera, a baja resolución. Ancho: grados de esa zona (40° es más o menos lo que miras de frente; más ancha cuesta mucho más). Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un marco rojo donde acaba la zona.",
-                   "Only a zone in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: that zone's degrees across (40° is about what you look at straight ahead; wider costs much more). Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red frame where the zone ends."))
+            Text(L("Solo un círculo en el centro de la vista se dibuja nítido; todo lo de fuera, a baja resolución. Ancho: diámetro del círculo en grados (40° es más o menos lo que miras de frente; más ancho cuesta mucho más). Altura: súbelo (+) o bájalo (-) hasta que lo borroso de arriba y de abajo te parezca igual. Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un aro rojo donde acaba la zona.",
+                   "Only a circle in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: the circle's diameter in degrees (40° is about what you look at straight ahead; wider costs much more). Height: move it up (+) or down (-) until the blur above and below look the same. Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red ring where the zone ends."))
         }
     }
 
