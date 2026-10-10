@@ -393,6 +393,12 @@ fragment float4 inset_fragment(Varyings in [[stage_in]], texture2d<float> tex [[
     float2 edge = min(in.uv, 1.0 - in.uv);
     float f = max(u.pad.y, 1.0e-3);
     float a = smoothstep(0.0, f, edge.x) * smoothstep(0.0, f, edge.y);
+    if (u.color.a > 0.0) {
+        // The sharp zone's edge shown (a test setting): an opaque red frame halfway through the
+        // fade, where the sharp picture is half blended into the periphery.
+        float rim = 1.0 - smoothstep(0.003, 0.006, abs(min(edge.x, edge.y) - 0.5 * f));
+        return float4(mix(c * a, u.color.rgb, rim), max(a, rim));
+    }
     return float4(c * a, a);
 }
 // A laser from the hand: a thin strip from p0 to p1 that faces the eye.
@@ -959,8 +965,15 @@ static void KeepPresenting(Host& host, Host::Impl& x) {
 // made at the start, and again between frames when one of them changes in the game's menu.
 // The eye images' size relative to the image size: the periphery setting with the game's
 // foveation (the eye images are then the wide views), the whole of it without.
+// The sharp zone's half width as a tangent (its degrees across, around the forward axis).
+static float CenterTangent(const pt::visionos::HeadsetSettings& h) {
+    const float degrees = std::clamp(static_cast<float>(h.center_deg), 20.0f, 70.0f);
+    return std::tan(degrees * 0.5f * 3.14159265f / 180.0f);
+}
+// The rate maps' dense share of the field (VRR, off by default): about the same zone.
+static float VrrCenterFraction() { return std::clamp(CenterTangent(pt::visionos::Headset()) / 1.2f, 0.2f, 0.8f); }
 static float EyeFactor(const pt::visionos::HeadsetSettings& h) {
-    return h.game_foveation ? std::clamp(static_cast<float>(h.periphery) / 100.0f, 0.15f, 0.6f) : 1.0f;
+    return h.game_foveation ? std::clamp(static_cast<float>(h.periphery) / 100.0f, 0.1f, 0.5f) : 1.0f;
 }
 
 // --- Variable rasterization rate (MoltenVK's VkRenderingRasterizationRateMapMVK) ----------------
@@ -997,7 +1010,7 @@ bool Host::Impl::BuildVrr(Host& host) {
         vrr_failed = true;
         return false;
     }
-    const float center = std::clamp(static_cast<float>(pt::visionos::Headset().center) / 100.0f, 0.3f, 0.8f);
+    const float center = VrrCenterFraction();
     auto even = [](float v) { return std::max(16u, 2u * static_cast<uint32_t>(std::ceil(v * 0.5f))); };
     // The picture: the wide view's size at the inset's density (the inset draws `center` of the
     // field in as many pixels as the wide view draws all of it).
@@ -1149,7 +1162,8 @@ static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, b
     x.scale = std::clamp(scale, 0.5f, 2.0f);
     x.fov_scale = std::clamp(fov_scale, 0.7f, 1.0f);
     x.metalfx_wanted = metalfx;
-    x.eye_factor = std::clamp(eye_factor, 0.2f, 1.0f);
+    // (The same range as EyeFactor: a narrower one here made the images again at every check.)
+    x.eye_factor = std::clamp(eye_factor, 0.1f, 1.0f);
     // The views' pixels the eyes cover, and the eyes' own size.
     const uint32_t covered_width = std::max(16u, static_cast<uint32_t>(std::lround(x.drawable_width * x.fov_scale)));
     const uint32_t covered_height = std::max(16u, static_cast<uint32_t>(std::lround(x.drawable_height * x.fov_scale)));
@@ -1625,7 +1639,7 @@ void Host::LocateViews() {
     // and again when they or the centre's size change (the menu). Between frames for the game: it
     // takes the eye images after this.
     if (x.running && x.ctx && !x.textures[0].empty() && x.VrrWanted()) {
-        const float center = std::clamp(static_cast<float>(pt::visionos::Headset().center) / 100.0f, 0.3f, 0.8f);
+        const float center = VrrCenterFraction();
         bool stale = !vrr_.active || std::fabs(center - x.vrr_center) > 1.0e-3f;
         // (Only a real change of the fields: the composition follows small drifts on its own.)
         for (int i = 0; i < 2; ++i) stale = stale || glm::distance(eyes_[i].tangents, x.vrr_tangents[i]) > 2.0e-2f;
@@ -1994,6 +2008,8 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     Uniforms w = u;
                     w.p0 = simd_make_float4(m00 * t.x - m20, m11 * t.w - m21, m00 * t.y - m20, m11 * t.z - m21);
                     w.pad[1] = 0.12f;  // the fade, as a fraction of the inset from each edge
+                    // The menu's "show the sharp zone's edge": a red frame where it ends.
+                    w.color = pt::visionos::Headset().show_border ? simd_make_float4(1.0f, 0.1f, 0.1f, 1.0f) : simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                     w.grade = u.grade;  // as its wide view (none with MetalFX: no seam)
                     [enc setRenderPipelineState:x.inset_pipeline];
                     [enc setVertexBytes:&w length:sizeof(w) atIndex:0];
@@ -2172,7 +2188,7 @@ void Host::SetPointerWanted(bool wanted) { impl_->pointer_wanted = wanted; }
 
 bool Host::InsetWanted(float& center, float& density) const {
     const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
-    center = std::clamp(static_cast<float>(h.center) / 100.0f, 0.3f, 0.8f);
+    center = CenterTangent(h);
     // The centre's density over the wide view's (the eye images as they are now).
     density = std::clamp(static_cast<float>(h.center_res) / 100.0f, 0.5f, 1.0f) / std::max(impl_->eye_factor, 0.1f);
     // What the eye images are now (the setting takes effect with them, after its short wait).
@@ -2406,8 +2422,8 @@ void ApplySettings(AppSettings& s) {
     h.foveation = Flag("PT_VP_FOVEATION", true);
     h.metalfx = Flag("PT_VP_METALFX", false);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
-    h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 25.0f)), 15, 60);
-    h.center = std::clamp(static_cast<int>(Number("PT_VP_CENTER", 45.0f)), 30, 80);
+    h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 20.0f)), 10, 50);
+    h.center_deg = std::clamp(static_cast<int>(Number("PT_VP_CENTER_DEG", 40.0f)), 20, 70);
     h.center_res = std::clamp(static_cast<int>(Number("PT_VP_CENTER_RES", 100.0f)), 50, 100);
     h.hdr = std::clamp(static_cast<int>(Number("PT_VP_HDR", 200.0f)), 100, 200);
     h.fov = std::clamp(static_cast<int>(Number("PT_VP_FOV", 100.0f)), 70, 100);

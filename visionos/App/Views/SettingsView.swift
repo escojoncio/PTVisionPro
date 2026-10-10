@@ -22,6 +22,7 @@ struct SettingsView: View {
                 pictureSection
                 graphicsSection
                 headsetSection
+                foveationSection
                 controllerSection
                 gameSection
                 BackgroundSection()
@@ -88,7 +89,7 @@ struct SettingsView: View {
                 Text(L("Una cada dos refrescos (45)", "One every other refresh (45)")).tag(45)
             }
             Toggle(L("Resolución dinámica", "Dynamic resolution"), isOn: bool(\.dynamicResolution))
-            LabeledContent(L("Campo de visión", "Field of view")) {
+            LabeledContent(L("Campo de visión dibujado", "Drawn field of view")) {
                 Stepper("\(model.settings.fov) %", value: int(\.fov), in: 70...100, step: 5)
             }
             LabeledContent(L("Nitidez", "Sharpness")) {
@@ -145,7 +146,7 @@ struct SettingsView: View {
 
     private var headsetSection: some View {
         Section {
-            Toggle(L("Renderizado foveado", "Foveated rendering"), isOn: bool(\.foveation))
+            Toggle(L("Foveado del visor (Apple)", "Headset foveation (Apple)"), isOn: bool(\.foveation))
             Picker(L("Calidad del visor", "Headset render quality"), selection: float(\.compositorQuality)) {
                 Text(L("La del sistema", "System")).tag(Float(0))
                 Text("60 %").tag(Float(0.6))
@@ -156,24 +157,34 @@ struct SettingsView: View {
             }
             .disabled(!model.settings.foveation)
             Toggle(L("Escalado MetalFX", "MetalFX upscaling"), isOn: bool(\.metalFX))
-            Toggle(L("Foveado del juego", "Game foveation"), isOn: bool(\.gameFoveation))
-            LabeledContent(L("Calidad de la periferia", "Periphery quality")) {
-                Stepper("\(model.settings.periphery) %", value: int(\.periphery), in: 15...60, step: 5)
-            }
-            .disabled(!model.settings.gameFoveation)
-            LabeledContent(L("Resolución del centro", "Centre resolution")) {
-                Stepper("\(model.settings.centerResolution) %", value: int(\.centerResolution), in: 50...100, step: 5)
-            }
-            .disabled(!model.settings.gameFoveation)
-            LabeledContent(L("Tamaño del centro nítido", "Sharp centre size")) {
-                Stepper("\(model.settings.center) %", value: int(\.center), in: 30...80, step: 5)
-            }
-            .disabled(!model.settings.gameFoveation)
         } header: {
             Text(L("Visor", "Headset"))
         } footer: {
-            Text(L("Foveado: máxima nitidez donde miras y menos detalle alrededor. Calidad del visor (con foveado): la resolución de las imágenes que compone el visor; más alta es más nítida pero usa más memoria, y el juego dibuja a partir de ella (la escala de resolución es relativa a esta). MetalFX: cada ojo se dibuja al tamaño de imagen y se amplía con nitidez a la resolución del visor (útil por debajo del 100 %). Foveado del juego: cada ojo se dibuja entero a baja resolución (calidad de la periferia) y su centro otra vez con detalle; la resolución del centro y la de la periferia son independientes, y el tamaño del centro decide cuánto de la vista es nítido (más grande cuesta más).",
-                   "Foveation: sharpest where you look, less detail around it. Headset render quality (with foveation): the resolution of the pictures the headset composes; higher is sharper but uses more memory, and the game draws from it (the resolution scale is relative to it). MetalFX: each eye is drawn at the image size and enlarged sharply to the headset's resolution (useful below 100 %). Game foveation: each eye is drawn whole at a low resolution (periphery quality) and its centre again in detail; the centre's and the periphery's resolutions are independent, and the centre's size decides how much of the view is sharp (larger costs more)."))
+            Text(L("Foveado del visor (Apple): lo hace el propio visor al componer la imagen final; no cambia lo que dibuja el juego. Calidad del visor: resolución de las imágenes que compone el visor. MetalFX: amplía con nitidez cada ojo a la resolución del visor.",
+                   "Headset foveation (Apple): done by the headset itself when it composes the final picture; it does not change what the game draws. Headset render quality: resolution of the pictures the headset composes. MetalFX: enlarges each eye sharply to the headset's resolution."))
+        }
+    }
+
+    private var foveationSection: some View {
+        Section {
+            Toggle(L("Foveado del juego", "Game foveation"), isOn: bool(\.gameFoveation))
+            LabeledContent(L("Ancho de la zona nítida", "Sharp zone width")) {
+                Stepper("\(model.settings.center)°", value: int(\.center), in: 20...70, step: 5)
+            }
+            .disabled(!model.settings.gameFoveation)
+            LabeledContent(L("Nitidez de la zona nítida", "Sharp zone resolution")) {
+                Stepper("\(model.settings.centerResolution) %", value: int(\.centerResolution), in: 50...100, step: 5)
+            }
+            .disabled(!model.settings.gameFoveation)
+            LabeledContent(L("Nitidez de la periferia", "Periphery resolution")) {
+                Stepper("\(model.settings.periphery) %", value: int(\.periphery), in: 10...50, step: 5)
+            }
+            .disabled(!model.settings.gameFoveation)
+        } header: {
+            Text(L("Foveado del juego", "Game foveation"))
+        } footer: {
+            Text(L("Solo una zona en el centro de la vista se dibuja nítida; todo lo de fuera, a baja resolución. Ancho: grados de esa zona (40° es más o menos lo que miras de frente; más ancha cuesta mucho más). Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un marco rojo donde acaba la zona.",
+                   "Only a zone in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: that zone's degrees across (40° is about what you look at straight ahead; wider costs much more). Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red frame where the zone ends."))
         }
     }
 

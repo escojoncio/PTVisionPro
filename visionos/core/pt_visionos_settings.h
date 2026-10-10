@@ -19,14 +19,15 @@ struct HeadsetSettings {
     bool foveation = true;
     bool metalfx = false;  // the eyes drawn at the image size and enlarged by MetalFX
     int fov = 100;        // percent of the views' field of view the game draws (70 to 100)
-    // The game's own foveation: each eye drawn wide at a low density (`periphery`, percent of
-    // the image size) and its centre again (`center`, percent of the eye's field of view across)
-    // at its own density (`center_res`, percent of the image size), independent of the
-    // periphery's; the composition lays the centre over the wide view.
+    // The game's own foveation: each eye drawn whole at a low density (`periphery`, percent of
+    // the image size) and a sharp zone around its forward axis again (`center_deg` degrees
+    // across, height in the view's proportions) at its own density (`center_res`, percent of the
+    // image size), independent of the periphery's; the composition lays it over the wide view.
     bool game_foveation = true;
-    int periphery = 25;    // 15 to 60
-    int center = 45;       // 30 to 80
+    int periphery = 20;    // 10 to 50
+    int center_deg = 40;   // 20 to 70
     int center_res = 100;  // 50 to 100
+    bool show_border = false;  // a red frame where the sharp zone ends (the menu; not kept)
     // Native HDR: the scene's real light above white, up to this percent of SDR white (100: off,
     // up to the headset's 200). Not part of a preset: it costs almost nothing.
     int hdr = 200;
