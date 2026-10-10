@@ -167,6 +167,43 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   píxeles que la ancha (`PrepareInsets`), así que su densidad era periferia/centro × tamaño de imagen: bajar la periferia
   bajaba también el centro (30 → centro 810x650, imagen mala); subirla pagaba centro y lados en alta (45 → 4 vistas 1214x974,
   4,7 MP, 40–47 ms, térmico serious). Coste medido ≈ 7,5 ms/MP + ~6 ms fijos por frame.
+- **Prueba build 38 (run 42, log pt (25)):** sin cierres, zona circular OK. Ajuste final del usuario: periferia 10 %, zona 70°,
+  imagen 60 %, altura -10 → 45 fps estables, GPU 19–20 ms (4 vistas; zona 830x830, periferia 270x216); térmico fair a ~7 min.
+  Las anchas cuestan ~4,5 ms cada una casi todo fijo (bloom 1,2–1,7, sombras ancha izq. 1,1–2,4, partículas). Imagen 100 % + 70°:
+  26–28 fps. MetalFX espacial (270x216 → 4493x3604 por ojo): composición 6,7 ms y −10 fps → eliminado.
+- **Build 39 (pendiente de run): MetalFX temporal en la zona nítida, un bloom por fotograma, profundidad al compositor, menú VR.**
+  - MoltenVK `patches/moltenvk/0002-metal-encode-command.patch`: comando privado `vkCmdEncodeMetalMVK(cmd, fn, data, size)`
+    (`MVKCmdEncodeMetal` en MVKCmdDebug.h/.mm, pool en MVKCommandTypePools.def, símbolo en vulkan.mm): al codificar cierra los
+    encoders (`endCurrentMetalEncoding`) y llama `fn(data, MTLCommandBuffer)`; copia ≤1024 bytes de datos.
+  - `visionos/core/metalfx_upscaler.mm` (nuevo; en `pt_visionos` vía prepare_source.py, ARC): backend `UpscalerKind::MetalFx`
+    (upscale.h/.cpp: `MetalFx = 6`, `SetPlatformUpscaler`, fábrica en `UpscaleHost::Available`). Registro explícito
+    `pt::RegisterMetalFxUpscaler()` en `ApplySettings` (un estático no se enlazaría). Un `MTLFXTemporalScaler` por vista
+    (`UpscaleDispatch::history` = `vr_eye_`), creado en el primer Dispatch con los formatos reales; comprueba usos de textura;
+    autoExposure, reactive mask (R8), depthReversed, jitter = el del motor (FSR; `PT_METALFX_JITTER_SIGN=-1` lo invierte),
+    motion scale = tamaño de render. Log `upscale: MetalFX picture N jitter (...)` las 8 primeras veces (verificar signo).
+    `upscaled_` con COLOR_ATTACHMENT.
+  - Motor por vista (scene_renderer.h): `vr_last_camera_[4]`, `vr_has_last_camera_[4]`, `vr_jitter_index_[4]`, `vr_reset_[4]`,
+    `vr_motion_pending_` (la historia de objetos avanza solo en la vista 0), `VrSkipsUpscale()` (anchas `vr_low_detail_` no
+    reescalan, sin soltar el backend), `SetupUpscaler` sale si `vr_eye_ < 0` (pantalla virtual). `upscale_motion.frag`: suma
+    `pass.f0.xy` = `camera_.offset` al ndc actual (antes el movimiento de cámara salía desplazado en vistas descentradas).
+    En VR: SSR temporal y espejo temporal apagados (historia compartida entre ojos), sondas a media resolución (`shrink`).
+    main.cpp aplica `Headset().aa` cada fotograma a `app.scene.upscale` (0 FXAA; 1 NativeAA; 2–4 Custom 0,85/0,75/0,67 `AaScale`).
+  - Bloom una vez por fotograma: `Stereo::bloom_place[3]` (vr_play: inset izq., inset der. y ancha der. en el uv de la ancha
+    izq.), `SceneRenderer::SetVrBloomShare` (tras `SetVrInsetShare`; `PT_BLOOM_PER_EYE=1` lo desactiva); `RecordPost`: ojos 1,2,3
+    reutilizan si `shared_bloom_frame_[0] == ShareStamp()`. La franja exterior del ojo derecho lee el borde de la izquierda.
+  - Profundidad al compositor: `xr::Swapchain::depth_images/depth_views` y `XrTarget::depth/depth_view`; el host crea imágenes
+    R32F gemelas de ojos e insets (`CreateDepthImages`, `DestroyDepthImages`, `depth_textures[6]`). `SceneRenderer::SetVrDepthOut`
+    + `RecordVrDepth` (shader nuevo `xr_depth.frag`: distancia en m, máx. 2x2 = lo más cercano) al final de cada vista, solo si
+    `Headset().scene_depth`. Composición: `SceneOut` con `[[depth(any)]]` en `eye_fragment`/`inset_fragment`, `SceneDepth` con
+    las filas z/w de `cp_drawable_compute_projection`; estado `depth_out` (escribe) solo si hay distancias; paneles sin escribir.
+  - Ajustes: `HeadsetSettings.aa` (def. 1, `PT_VP_AA`), `scene_depth` (def. sí, `PT_VP_SCENE_DEPTH`), `metalfx` siempre false.
+    Menú: página VISION PRO = preajuste, "Imágenes por segundo" (90 reales / 45 reproyectados a 90), "Profundidad para la
+    reproyección", tamaño, campo de visión, resolución dinámica, HDR; página VR = comodidad (col. 0) + sección "Foveado y nitidez"
+    (col. 1: foveado Apple, foveado del juego, ancho, altura, nitidez zona, periferia, borde, AA). Ids `kVpAa`, `kVpSceneDepth`.
+    Launcher: `PTSettings.aa` (clave `sharpZoneAntialiasing`), `sceneDepth`; Picker AA en foveado, toggle profundidad en Imagen;
+    `metalFX` se ignora al cargar.
+  - Revisión adversarial (Sonnet) aplicada: depth_out solo con distancias, layout DEPTH_READ_ONLY y clear en RecordVrDepth,
+    reset por historia, RecordVrDepth omitido sin profundidad. Pendiente de confirmar en el visor: signo del jitter de MetalFX.
 - **Prueba build 37 (log pt (24)):** funciona: 50 fps estables, GPU 13,4 ms (4 vistas, 40°, centro 100 %, periferia 15 %;
   zona 722x580, periferia 406x326). Problema: zona nítida demasiado alta (el usuario ve ~10 % borroso arriba y ~30 % abajo); la
   quiere circular. Reparto (ms por vista): ancha post 2,5 (bloom: 41 pasadas casi de coste fijo), ancha compose+forward 2,6
@@ -684,6 +721,10 @@ Editar el parche: `prepare_source.py --edit`, tocar `build/port-src`, `git -C bu
   traductor/runtime AOT o emulación; `platform/visionos` sin cambios → descartado, nada aplicable.
 
 ## Pendiente (siguiente sesión, en orden)
+
+Tras build 39 (en orden): (1) comprobar MetalFX (aristas limpias sin estelas; si tiemblan/emborronan → invertir jitter);
+(2) comprobar 45→90 con profundidad (girar/moverse la cabeza cerca de paredes); (3) si convence, *spacewarp* propio
+(fotograma intermedio extrapolado con vectores de movimiento, para stick y animaciones); (4) bloom con menos pasadas.
 
 Objetivo de rendimiento: **45 fps reales estables** (modo 45 FPS, `SetFrameDivisor(2)`, el compositor reproyecta a 90),
 con sombras altas, SSAO, bloom y reflejos (estándar mínimo M2); presupuesto GPU ≈ 22 ms por fotograma para las 4 vistas

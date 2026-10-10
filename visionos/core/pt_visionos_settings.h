@@ -17,7 +17,7 @@ struct HeadsetSettings {
     float resolution_scale = 0.6f;
     int target_fps = 90;
     bool foveation = true;
-    bool metalfx = false;  // the eyes drawn at the image size and enlarged by MetalFX
+    bool metalfx = false;  // (old: MetalFX spatial over the whole eye; always off, see `aa`)
     int fov = 100;        // percent of the views' field of view the game draws (70 to 100)
     // The game's own foveation: each eye drawn whole at a low density (`periphery`, percent of
     // the image size) and a sharp zone around its forward axis again (`center_deg` degrees
@@ -32,11 +32,24 @@ struct HeadsetSettings {
     // Native HDR: the scene's real light above white, up to this percent of SDR white (100: off,
     // up to the headset's 200). Not part of a preset: it costs almost nothing.
     int hdr = 200;
+    // Antialiasing of the sharp views (the insets, or the eyes without the game's foveation):
+    // 0 FXAA; 1 MetalFX temporal at the full size (antialiasing only); 2-4 MetalFX temporal
+    // drawing at 85, 75 or 67 % and rebuilding the full size from the past frames.
+    int aa = 1;
+    // The scene's depth handed to the compositor with each picture, so its reprojection (45 to
+    // 90, and every picture's correction to the latest head pose) moves near things correctly.
+    bool scene_depth = true;
     // Dynamic resolution: the eyes drawn smaller while the GPU cannot keep the frame rate.
     bool dynamic_resolution = false;
     // The headset is an M5 (its preset is offered only then).
     bool device_m5 = false;
 };
+
+// What each antialiasing step draws, as a fraction of the sharp view's size (HeadsetSettings::aa).
+inline float AaScale(int aa) {
+    static constexpr float kScales[5] = {1.0f, 1.0f, 0.85f, 0.75f, 0.67f};
+    return kScales[aa < 0 ? 0 : aa > 4 ? 4 : aa];
+}
 
 // The launcher's settings into the game's, after pt.ini was read.
 void ApplySettings(AppSettings& settings);

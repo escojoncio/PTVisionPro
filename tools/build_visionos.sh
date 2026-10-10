@@ -25,7 +25,8 @@ if [ ! -f "$LIB" ]; then
     git clone https://github.com/KhronosGroup/MoltenVK.git "$MOLTENVK"
   fi
   git -C "$MOLTENVK" checkout --quiet --force "$MOLTENVK_COMMIT"
-  # Our additions to MoltenVK (patches/moltenvk): variable rasterization rate in dynamic rendering.
+  # Our additions to MoltenVK (patches/moltenvk): variable rasterization rate in dynamic rendering,
+  # and Metal work encoded inside a Vulkan command buffer (vkCmdEncodeMetalMVK, for MetalFX).
   for patch in "$ROOT"/patches/moltenvk/*.patch; do
     git -C "$MOLTENVK" apply --whitespace=nowarn "$patch"
     echo "MoltenVK: applied $(basename "$patch")"

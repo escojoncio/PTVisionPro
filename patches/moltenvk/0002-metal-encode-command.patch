@@ -1,0 +1,135 @@
+diff --git a/MoltenVK/MoltenVK/API/mvk_private_api.h b/MoltenVK/MoltenVK/API/mvk_private_api.h
+index 577fa36..d9d20c2 100644
+--- a/MoltenVK/MoltenVK/API/mvk_private_api.h
++++ b/MoltenVK/MoltenVK/API/mvk_private_api.h
+@@ -476,6 +476,29 @@ typedef struct VkRenderingRasterizationRateMapMVK {
+ 	void* mtlRasterizationRateMap;         /**< An id<MTLRasterizationRateMap>, or NULL for none. */
+ } VkRenderingRasterizationRateMapMVK;
+ 
++
++#pragma mark -
++#pragma mark Metal work inside a Vulkan command buffer
++
++/**
++ * MoltenVK private command: app-encoded Metal work at a point of a Vulkan command buffer.
++ *
++ * When the command buffer is encoded, MoltenVK ends its current Metal encoder (outside a render
++ * pass only) and calls callback(data, mtlCommandBuffer), where mtlCommandBuffer is the
++ * id<MTLCommandBuffer> the surrounding Vulkan commands are encoded into. The callback encodes its
++ * own work (e.g. a MetalFX effect) on it and returns; the following Vulkan commands go into new
++ * encoders after it. The dataSize bytes at pData are copied into the command (at most 1024).
++ * The resources it touches should be hazard-tracked (MoltenVK's defaults) or fenced by the app.
++ */
++typedef void (*PFN_vkMetalEncodeCallbackMVK)(void* pData, void* mtlCommandBuffer);
++typedef void (VKAPI_PTR *PFN_vkCmdEncodeMetalMVK)(VkCommandBuffer commandBuffer, PFN_vkMetalEncodeCallbackMVK callback,
++												   const void* pData, uint32_t dataSize);
++
++#ifndef VK_NO_PROTOTYPES
++VKAPI_ATTR void VKAPI_CALL vkCmdEncodeMetalMVK(VkCommandBuffer commandBuffer, PFN_vkMetalEncodeCallbackMVK callback,
++												const void* pData, uint32_t dataSize);
++#endif
++
+ #ifdef __cplusplus
+ }
+ #endif	//  __cplusplus
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDebug.h b/MoltenVK/MoltenVK/Commands/MVKCmdDebug.h
+index 85f6d38..1fda24a 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDebug.h
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDebug.h
+@@ -19,6 +19,7 @@
+ #pragma once
+ 
+ #include "MVKCommand.h"
++#include "MVKSmallVector.h"
+ 
+ #import <Metal/Metal.h>
+ 
+@@ -83,6 +84,25 @@ protected:
+ };
+ 
+ 
++#pragma mark -
++#pragma mark MVKCmdEncodeMetal
++
++/** App-encoded Metal work (vkCmdEncodeMetalMVK). */
++class MVKCmdEncodeMetal : public MVKCommand {
++
++public:
++	VkResult setContent(MVKCommandBuffer* cmdBuff, void (*callback)(void*, void*), const void* pData, uint32_t dataSize);
++
++	void encode(MVKCommandEncoder* cmdEncoder) override;
++
++protected:
++	MVKCommandTypePool<MVKCommand>* getTypePool(MVKCommandPool* cmdPool) override;
++
++	void (*_callback)(void*, void*) = nullptr;
++	MVKSmallVector<uint8_t, 256> _data;
++};
++
++
+ #pragma mark -
+ #pragma mark Support functions
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCmdDebug.mm b/MoltenVK/MoltenVK/Commands/MVKCmdDebug.mm
+index 9936a2e..34ca27e 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCmdDebug.mm
++++ b/MoltenVK/MoltenVK/Commands/MVKCmdDebug.mm
+@@ -68,6 +68,24 @@ void MVKCmdDebugMarkerEnd::encode(MVKCommandEncoder* cmdEncoder) {
+ }
+ 
+ 
++#pragma mark -
++#pragma mark MVKCmdEncodeMetal
++
++VkResult MVKCmdEncodeMetal::setContent(MVKCommandBuffer* cmdBuff, void (*callback)(void*, void*), const void* pData, uint32_t dataSize) {
++	if (!callback || dataSize > 1024 || (dataSize && !pData)) { return VK_ERROR_INITIALIZATION_FAILED; }
++	_callback = callback;
++	_data.clear();
++	const uint8_t* bytes = (const uint8_t*)pData;
++	for (uint32_t i = 0; i < dataSize; i++) { _data.push_back(bytes[i]); }
++	return VK_SUCCESS;
++}
++
++void MVKCmdEncodeMetal::encode(MVKCommandEncoder* cmdEncoder) {
++	cmdEncoder->endCurrentMetalEncoding();
++	_callback(_data.empty() ? nullptr : _data.data(), (void*)cmdEncoder->_mtlCmdBuffer);
++}
++
++
+ #pragma mark -
+ #pragma mark MVKCmdDebugMarkerInsert
+ 
+diff --git a/MoltenVK/MoltenVK/Commands/MVKCommandTypePools.def b/MoltenVK/MoltenVK/Commands/MVKCommandTypePools.def
+index 9d3b046..551b7b0 100644
+--- a/MoltenVK/MoltenVK/Commands/MVKCommandTypePools.def
++++ b/MoltenVK/MoltenVK/Commands/MVKCommandTypePools.def
+@@ -144,6 +144,7 @@ MVK_CMD_TYPE_POOL(PushDescriptorSetWithTemplate)
+ MVK_CMD_TYPE_POOL(DebugMarkerBegin)
+ MVK_CMD_TYPE_POOL(DebugMarkerEnd)
+ MVK_CMD_TYPE_POOL(DebugMarkerInsert)
++MVK_CMD_TYPE_POOL(EncodeMetal)
+ MVK_CMD_TYPE_POOLS_FROM_THRESHOLD(WaitEvents, 1)
+ MVK_CMD_TYPE_POOL(SetEvent)
+ MVK_CMD_TYPE_POOL_LAST(ResetEvent)
+diff --git a/MoltenVK/MoltenVK/Vulkan/vulkan.mm b/MoltenVK/MoltenVK/Vulkan/vulkan.mm
+index 9ee0c4e..25b4f00 100644
+--- a/MoltenVK/MoltenVK/Vulkan/vulkan.mm
++++ b/MoltenVK/MoltenVK/Vulkan/vulkan.mm
+@@ -3868,6 +3868,17 @@ MVK_PUBLIC_VULKAN_SYMBOL void vkCmdDebugMarkerEndEXT(
+ 	MVKTraceVulkanCallEnd();
+ }
+ 
++MVK_PUBLIC_VULKAN_SYMBOL void vkCmdEncodeMetalMVK(
++	VkCommandBuffer                             commandBuffer,
++	PFN_vkMetalEncodeCallbackMVK                callback,
++	const void*                                 pData,
++	uint32_t                                    dataSize) {
++
++	MVKTraceVulkanCallStart();
++	MVKAddCmd(EncodeMetal, commandBuffer, callback, pData, dataSize);
++	MVKTraceVulkanCallEnd();
++}
++
+ MVK_PUBLIC_VULKAN_SYMBOL void vkCmdDebugMarkerInsertEXT(
+ 	VkCommandBuffer                             commandBuffer,
+ 	const VkDebugMarkerMarkerInfoEXT*           pMarkerInfo) {

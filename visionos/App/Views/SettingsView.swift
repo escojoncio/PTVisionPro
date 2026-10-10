@@ -85,9 +85,10 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Picker(L("Imágenes por segundo", "Frames per second"), selection: int(\.targetFPS)) {
-                Text(L("Una por refresco (90)", "One per refresh (90)")).tag(90)
-                Text(L("Una cada dos refrescos (45)", "One every other refresh (45)")).tag(45)
+                Text(L("90 reales", "90 real")).tag(90)
+                Text(L("45 reproyectados a 90", "45 reprojected to 90")).tag(45)
             }
+            Toggle(L("Profundidad para la reproyección", "Depth for reprojection"), isOn: bool(\.sceneDepth))
             Toggle(L("Resolución dinámica", "Dynamic resolution"), isOn: bool(\.dynamicResolution))
             LabeledContent(L("Campo de visión dibujado", "Drawn field of view")) {
                 Stepper("\(model.settings.fov) %", value: int(\.fov), in: 70...100, step: 5)
@@ -104,8 +105,8 @@ struct SettingsView: View {
         } header: {
             Text(L("Imagen", "Picture"))
         } footer: {
-            Text(L("La escala es relativa a la resolución que recomienda el visor. La frecuencia de la pantalla la elige visionOS (normalmente 90 Hz; 96 o 100 según las condiciones, 120 en M5): «una cada dos» da la mitad, 45 a 90 Hz o 50 a 100 Hz. La resolución dinámica dibuja más pequeño mientras la GPU no llega: más fluido, menos nítido.",
-                   "The scale is relative to the resolution the headset recommends. visionOS chooses the display's rate (usually 90 Hz; 96 or 100 depending on conditions, 120 on M5): “every other” gives half of it, 45 at 90 Hz or 50 at 100 Hz. Dynamic resolution draws smaller while the GPU cannot keep up: smoother, less sharp."))
+            Text(L("La escala es relativa a la resolución que recomienda el visor. La frecuencia de la pantalla la elige visionOS (normalmente 90 Hz; 96 o 100 según las condiciones, 120 en M5): «45 reproyectados» da la mitad, 45 a 90 Hz o 50 a 100 Hz: el juego dibuja una de cada dos y el visor crea la intermedia con el movimiento de tu cabeza. Con la profundidad, lo cercano y lo lejano se desplazan bien al mover la cabeza; caminar con el stick y las animaciones siguen a 45. La resolución dinámica dibuja más pequeño mientras la GPU no llega: más fluido, menos nítido.",
+                   "The scale is relative to the resolution the headset recommends. visionOS chooses the display's rate (usually 90 Hz; 96 or 100 depending on conditions, 120 on M5): “45 reprojected” gives half of it, 45 at 90 Hz or 50 at 100 Hz: the game draws every other one and the headset makes the one in between from your head's movement. With depth, near and far things shift correctly as you move your head; walking with the stick and animations stay at 45. Dynamic resolution draws smaller while the GPU cannot keep up: smoother, less sharp."))
         }
     }
 
@@ -156,12 +157,11 @@ struct SettingsView: View {
                 Text("100 %").tag(Float(1.0))
             }
             .disabled(!model.settings.foveation)
-            Toggle(L("Escalado MetalFX", "MetalFX upscaling"), isOn: bool(\.metalFX))
         } header: {
             Text(L("Visor", "Headset"))
         } footer: {
-            Text(L("Foveado del visor (Apple): lo hace el propio visor al componer la imagen final; no cambia lo que dibuja el juego. Calidad del visor: resolución de las imágenes que compone el visor. MetalFX: amplía con nitidez cada ojo a la resolución del visor.",
-                   "Headset foveation (Apple): done by the headset itself when it composes the final picture; it does not change what the game draws. Headset render quality: resolution of the pictures the headset composes. MetalFX: enlarges each eye sharply to the headset's resolution."))
+            Text(L("Foveado del visor (Apple): lo hace el propio visor al componer la imagen final; no cambia lo que dibuja el juego. Calidad del visor: resolución de las imágenes que compone el visor.",
+                   "Headset foveation (Apple): done by the headset itself when it composes the final picture; it does not change what the game draws. Headset render quality: resolution of the pictures the headset composes."))
         }
     }
 
@@ -184,11 +184,18 @@ struct SettingsView: View {
                 Stepper("\(model.settings.periphery) %", value: int(\.periphery), in: 10...50, step: 5)
             }
             .disabled(!model.settings.gameFoveation)
+            Picker(L("Antialiasing de la zona nítida", "Sharp zone antialiasing"), selection: int(\.aa)) {
+                Text(L("FXAA (básico)", "FXAA (basic)")).tag(0)
+                Text("MetalFX 100 %").tag(1)
+                Text("MetalFX 85 %").tag(2)
+                Text("MetalFX 75 %").tag(3)
+                Text("MetalFX 67 %").tag(4)
+            }
         } header: {
             Text(L("Foveado del juego", "Game foveation"))
         } footer: {
-            Text(L("Solo un círculo en el centro de la vista se dibuja nítido; todo lo de fuera, a baja resolución. Ancho: diámetro del círculo en grados (40° es más o menos lo que miras de frente; más ancho cuesta mucho más). Altura: súbelo (+) o bájalo (-) hasta que lo borroso de arriba y de abajo te parezca igual. Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un aro rojo donde acaba la zona.",
-                   "Only a circle in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: the circle's diameter in degrees (40° is about what you look at straight ahead; wider costs much more). Height: move it up (+) or down (-) until the blur above and below look the same. Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red ring where the zone ends."))
+            Text(L("Solo un círculo en el centro de la vista se dibuja nítido; todo lo de fuera, a baja resolución. Ancho: diámetro del círculo en grados (40° es más o menos lo que miras de frente; más ancho cuesta mucho más). Altura: súbelo (+) o bájalo (-) hasta que lo borroso de arriba y de abajo te parezca igual. Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un aro rojo donde acaba la zona. Antialiasing: MetalFX combina varios fotogramas (bordes limpios, menos parpadeo que FXAA); al 85/75/67 % la zona se dibuja más pequeña y MetalFX reconstruye el tamaño completo: más fps.",
+                   "Only a circle in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: the circle's diameter in degrees (40° is about what you look at straight ahead; wider costs much more). Height: move it up (+) or down (-) until the blur above and below look the same. Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red ring where the zone ends. Antialiasing: MetalFX combines several frames (clean edges, less shimmer than FXAA); at 85/75/67 % the zone is drawn smaller and MetalFX rebuilds the full size: more frames per second."))
         }
     }
 

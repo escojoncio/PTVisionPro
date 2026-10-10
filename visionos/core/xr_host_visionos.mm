@@ -62,6 +62,10 @@
 #include "engine/platform/apple_host.h"
 #include "engine/platform/graphics_presets.h"
 
+namespace pt {
+void RegisterMetalFxUpscaler();  // metalfx_upscaler.mm
+}
+
 // The game loop's last turn (steady clock, ns) and its thread: the watchdog's view of it.
 namespace pt::visionos {
 std::atomic<int64_t> g_loop_ns{0};
@@ -264,7 +268,24 @@ struct Uniforms {
     float4 color;    // laser
     uint4 target;    // the view's slice of the drawable's texture (x) and its viewport (y)
     float4 grade;    // the game's picture: native HDR on (x > 1: its peak, the gain is in the image's alpha)
+    float4 depthp;   // the scene's depth to the drawable: x 1 on; y, z: the projection's z row (P22, P32)
+    float4 depthq;   // x, y: its w row (P23, P33); z: the drawable's "far" depth
 };
+// What the compositor reprojects with: the drawable's depth of the scene under this pixel, from the
+// game's distances along the view's axis (metres; 0 nothing: far), through the view's projection.
+struct SceneOut {
+    float4 color [[color(0)]];
+    float depth [[depth(any)]];
+};
+float SceneDepth(texture2d<float> distances, float2 uv, constant Uniforms& u) {
+    if (u.depthp.x < 0.5) return u.depthq.z;
+    constexpr sampler n(filter::nearest, address::clamp_to_edge);
+    float z = distances.sample(n, uv).x;
+    if (!(z > 0.0)) return u.depthq.z;
+    float cz = u.depthp.y * -z + u.depthp.z;
+    float cw = u.depthq.x * -z + u.depthq.y;
+    return abs(cw) > 1.0e-6 ? clamp(cz / cw, 0.0, 1.0) : u.depthq.z;
+}
 // The drawable is extended linear Display P3 (rgba16Float): the game's linear sRGB colours are
 // converted to it, and 1 is SDR white, with headroom above it for highlights (EDR).
 float3 ToDisplayP3(float3 c) {
@@ -335,7 +356,8 @@ fragment float4 composite_fragment(Varyings in [[stage_in]], texture2d<float> te
 }
 // An eye image, sharpened as much as the settings say: the difference with its four
 // neighbours added back, kept within their range so no halo appears.
-fragment float4 eye_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
+fragment SceneOut eye_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], texture2d<float> distances [[texture(2)]],
+                               constant Uniforms& u [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float4 picture = tex.sample(s, in.uv);
     float3 c = picture.rgb;
@@ -350,7 +372,10 @@ fragment float4 eye_fragment(Varyings in [[stage_in]], texture2d<float> tex [[te
         float3 hi = max(c, max(max(n, so), max(w, e)));
         c = clamp(c + (c * 4.0 - n - so - w - e) * (amount * 0.5), lo, hi);
     }
-    return float4(SceneLight(float4(c, picture.a), u.grade), 1.0);
+    SceneOut result;
+    result.color = float4(SceneLight(float4(c, picture.a), u.grade), 1.0);
+    result.depth = SceneDepth(distances, in.uv, u);
+    return result;
 }
 // Variable rasterization rate: the eye image holds the physical pixels of its rate map; `in.uv` is
 // the logical picture's (cursor.xy its size), taken to them through the tables (`vrr`, R32Float,
@@ -387,7 +412,8 @@ fragment float4 eye_vrr_fragment(Varyings in [[stage_in]], texture2d<float> tex 
 }
 // An eye's sharp zone (the game's foveation) over its wide view: a circle inscribed in its
 // square image, premultiplied, faded out over its outer pad.y of the radius so no seam shows.
-fragment float4 inset_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
+fragment SceneOut inset_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], texture2d<float> distances [[texture(2)]],
+                                 constant Uniforms& u [[buffer(0)]]) {
     float r = length(in.uv * 2.0 - 1.0);  // 0 at the centre, 1 at the circle's edge
     float f = max(u.pad.y, 1.0e-3);
     float a = 1.0 - smoothstep(1.0 - f, 1.0, r);
@@ -400,7 +426,10 @@ fragment float4 inset_fragment(Varyings in [[stage_in]], texture2d<float> tex [[
     if (a <= 0.0 && rim <= 0.0) discard_fragment();
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 c = SceneLight(tex.sample(s, in.uv), u.grade);
-    return float4(mix(c * a, u.color.rgb, rim), max(a, rim));
+    SceneOut result;
+    result.color = float4(mix(c * a, u.color.rgb, rim), max(a, rim));
+    result.depth = SceneDepth(distances, in.uv, u);
+    return result;
 }
 // A laser from the hand: a thin strip from p0 to p1 that faces the eye.
 vertex Varyings laser_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer(0)]]) {
@@ -435,6 +464,8 @@ struct Uniforms {
     simd_float4 color;
     simd_uint4 target;
     simd_float4 grade;  // HDR peak (1: off), knee
+    simd_float4 depthp;  // (as in the shader) on, P22, P32
+    simd_float4 depthq;  // P23, P33, far depth
 };
 
 // The game picture's native HDR (Headset().hdr, percent of SDR white at the brightest; 100: off).
@@ -500,6 +531,10 @@ struct Host::Impl {
     id<MTLRenderPipelineState> laser_pipeline = nil;
     id<MTLDepthStencilState> depth_write = nil;
     std::vector<id<MTLTexture>> textures[6];  // per swapchain: eye 0, eye 1, HUD, screen, inset 0, inset 1
+    // Beside the eyes' and insets' images (0, 1, 4, 5): the views' depth as distances (R32Float),
+    // written by the game (xr_depth.frag) and turned into the drawable's depth when composing.
+    std::vector<id<MTLTexture>> depth_textures[6];
+    id<MTLDepthStencilState> depth_out = nil;  // writes the drawable's depth (the scene's)
 
     // The frame in flight: the drawable the headset shows, and while a high-quality video is
     // being recorded (visionOS 26) a second one for the recording.
@@ -726,6 +761,28 @@ struct Host::Impl {
         return true;
     }
 
+    // The depth images beside a swapchain's colour images (optional: on failure, none).
+    void CreateDepthImages(vk::Context& c, Swapchain& sc, int which, const char* name, std::vector<VkDeviceMemory>* memories) {
+        Swapchain made;
+        std::vector<id<MTLTexture>> made_textures;
+        if (!CreateImages(c, VK_FORMAT_R32_SFLOAT, sc.extent.width, sc.extent.height, static_cast<uint32_t>(sc.images.size()), made, made_textures, name,
+                          memories)) {
+            for (VkImageView v : made.views) vkDestroyImageView(c.device, v, nullptr);
+            for (VkImage im : made.images) vkDestroyImage(c.device, im, nullptr);
+            LogWarn("vr: no depth images for the {}: the compositor reprojects without the scene's depth", name);
+            return;
+        }
+        sc.depth_images = std::move(made.images);
+        sc.depth_views = std::move(made.views);
+        depth_textures[which] = std::move(made_textures);
+    }
+    static void DestroyDepthImages(VkDevice device, Swapchain& sc) {
+        for (VkImageView v : sc.depth_views) vkDestroyImageView(device, v, nullptr);
+        for (VkImage im : sc.depth_images) vkDestroyImage(device, im, nullptr);
+        sc.depth_views.clear();
+        sc.depth_images.clear();
+    }
+
     bool InitMetal(vk::Context& c) {
         VkExportMetalDeviceInfoEXT device_info{VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT};
         VkExportMetalCommandQueueInfoEXT queue_info{VK_STRUCTURE_TYPE_EXPORT_METAL_COMMAND_QUEUE_INFO_EXT};
@@ -781,6 +838,8 @@ struct Host::Impl {
         ds.depthWriteEnabled = NO;
         ds.depthCompareFunction = MTLCompareFunctionAlways;
         depth_write = [mtl_device newDepthStencilStateWithDescriptor:ds];
+        ds.depthWriteEnabled = YES;
+        depth_out = [mtl_device newDepthStencilStateWithDescriptor:ds];
         return eye_pipeline && inset_pipeline && quad_pipeline && laser_pipeline;
     }
 
@@ -1146,6 +1205,8 @@ static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, b
             Swapchain& sc = host.EyeSwapchain(eye);
             for (VkImageView v : sc.views) vkDestroyImageView(ctx.device, v, nullptr);
             for (VkImage im : sc.images) vkDestroyImage(ctx.device, im, nullptr);
+            Host::Impl::DestroyDepthImages(ctx.device, sc);
+            x.depth_textures[eye].clear();
             for (VkDeviceMemory m : x.eye_memory[eye]) vkFreeMemory(ctx.device, m, nullptr);
             sc.views.clear();
             sc.images.clear();
@@ -1188,6 +1249,8 @@ static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, b
         !x.CreateImages(ctx, format, x.eye_width, x.eye_height, kImages, host.EyeSwapchain(1), x.textures[1], "right eye", &x.eye_memory[1])) {
         return false;
     }
+    x.CreateDepthImages(ctx, host.EyeSwapchain(0), 0, "left eye depth", &x.eye_memory[0]);
+    x.CreateDepthImages(ctx, host.EyeSwapchain(1), 1, "right eye depth", &x.eye_memory[1]);
     x.view_width = covered_width;
     x.view_height = covered_height;
     if (metalfx && !host.Vrr().active && (x.eye_width + 8 < covered_width || x.eye_height + 8 < covered_height)) {
@@ -1401,6 +1464,8 @@ void Host::Shutdown() {
         for (int i = 0; i < 6; ++i) {
             for (VkImageView v : chains[i]->views) vkDestroyImageView(x.ctx->device, v, nullptr);
             for (VkImage im : chains[i]->images) vkDestroyImage(x.ctx->device, im, nullptr);
+            Host::Impl::DestroyDepthImages(x.ctx->device, *chains[i]);
+            x.depth_textures[i].clear();
             chains[i]->views.clear();
             chains[i]->images.clear();
             x.textures[i].clear();
@@ -1985,6 +2050,15 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     e = simd_make_float4((m20 - 1.0f) / m00, (m20 + 1.0f) / m00, (m21 - 1.0f) / m11, (m21 + 1.0f) / m11) * k;
                 }
                 u.p0 = simd_make_float4(m00 * e.x - m20, m11 * e.z - m21, m00 * e.y - m20, m11 * e.w - m21);
+                // The scene's depth for the compositor's reprojection (the setting; images beside the eyes').
+                const bool has_depth_target = cp_drawable_get_depth_texture(drawable, texture_index) != nil;
+                const bool scene_depth = pt::visionos::Headset().scene_depth && has_depth_target && !use_enlarged;
+                u.depthp = simd_make_float4(0.0f, proj.columns[2][2], proj.columns[3][2], 0.0f);
+                u.depthq = simd_make_float4(proj.columns[2][3], proj.columns[3][3], far_depth, 0.0f);
+                auto distances = [&](int which) -> id<MTLTexture> {
+                    const uint32_t i = image(which);
+                    return scene_depth && i < x.depth_textures[which].size() ? x.depth_textures[which][i] : nil;
+                };
                 // Variable rasterization rate: the image is the whole drawing of the eye's own field
                 // (as the game frames it, OwnFrustumFor at the logical size); the part shown is this
                 // view's field, unwarped through the tables.
@@ -2000,7 +2074,18 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
                 [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
                 if (unwarp) [enc setFragmentTexture:x.vrr_texture atIndex:1];
-                [enc setFragmentTexture:use_enlarged ? x.enlarged[v] : x.textures[v][image(static_cast<int>(v))] atIndex:0];
+                id<MTLTexture> eye_picture = use_enlarged ? x.enlarged[v] : x.textures[v][image(static_cast<int>(v))];
+                id<MTLTexture> eye_distances = unwarp ? nil : distances(static_cast<int>(v));
+                if (eye_distances) {
+                    u.depthp.x = 1.0f;
+                    [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
+                    [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+                }
+                // (Without depth the texture slot still holds a texture: the picture, never read.)
+                [enc setFragmentTexture:eye_distances ? eye_distances : eye_picture atIndex:2];
+                [enc setFragmentTexture:eye_picture atIndex:0];
+                // (Only with the game's depth: else the clear, "far", stays; the inset below keeps this state.)
+                [enc setDepthStencilState:eye_distances ? x.depth_out : x.depth_write];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 // The game's foveation: the eye's sharp centre over its wide view, faded in at the
                 // edge. Symmetric around the eye's forward axis (tangents left, right, up, down).
@@ -2012,12 +2097,18 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     // The menu's "show the sharp zone's edge": a red frame where it ends.
                     w.color = pt::visionos::Headset().show_border ? simd_make_float4(1.0f, 0.1f, 0.1f, 1.0f) : simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                     w.grade = u.grade;  // as its wide view (none with MetalFX: no seam)
+                    id<MTLTexture> inset_picture = x.textures[4 + v][image(4 + static_cast<int>(v))];
+                    id<MTLTexture> inset_distances = distances(4 + static_cast<int>(v));
+                    w.depthp.x = inset_distances ? 1.0f : 0.0f;
                     [enc setRenderPipelineState:x.inset_pipeline];
                     [enc setVertexBytes:&w length:sizeof(w) atIndex:0];
                     [enc setFragmentBytes:&w length:sizeof(w) atIndex:0];
-                    [enc setFragmentTexture:x.textures[4 + v][image(4 + static_cast<int>(v))] atIndex:0];
+                    [enc setFragmentTexture:inset_picture atIndex:0];
+                    [enc setFragmentTexture:inset_distances ? inset_distances : inset_picture atIndex:2];
                     [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 }
+                // (The panels, lasers and the performance line leave the scene's depth as it is.)
+                [enc setDepthStencilState:x.depth_write];
             }
             if (layers.screen || layers.hud) {
                 const simd_float4x4 projection = cp_drawable_compute_projection(drawable, cp_axis_direction_convention_right_up_back, v);
@@ -2213,6 +2304,8 @@ bool Host::EnsureInsetImages(VkExtent2D extent) {
             Swapchain& sc = inset_swapchains_[i];
             for (VkImageView v : sc.views) vkDestroyImageView(ctx.device, v, nullptr);
             for (VkImage im : sc.images) vkDestroyImage(ctx.device, im, nullptr);
+            Host::Impl::DestroyDepthImages(ctx.device, sc);
+            x.depth_textures[4 + i].clear();
             for (VkDeviceMemory m : x.inset_memory[i]) vkFreeMemory(ctx.device, m, nullptr);
             sc.views.clear();
             sc.images.clear();
@@ -2235,6 +2328,8 @@ bool Host::EnsureInsetImages(VkExtent2D extent) {
         pt::visionos::SettingChanged("game_foveation", "0");
         return false;
     }
+    x.CreateDepthImages(ctx, inset_swapchains_[0], 4, "left inset depth", &x.inset_memory[0]);
+    x.CreateDepthImages(ctx, inset_swapchains_[1], 5, "right inset depth", &x.inset_memory[1]);
     x.inset_extent = extent;
     return true;
 }
@@ -2411,6 +2506,7 @@ void ApplyPreset(int preset, AppSettings& s) {
 
 void ApplySettings(AppSettings& s) {
     HeadsetSettings& h = Headset();
+    pt::RegisterMetalFxUpscaler();  // (before the game makes its device)
     if (const char* device = Env("PT_VP_DEVICE")) h.device_m5 = std::string(device) == "m5";
     if (const char* preset = Env("PT_VP_PRESET")) {
         const std::string v = preset;
@@ -2422,7 +2518,12 @@ void ApplySettings(AppSettings& s) {
     h.resolution_scale = std::clamp(Number("PT_VP_RESOLUTION_SCALE", 0.6f), 0.5f, 2.0f);
     h.target_fps = static_cast<int>(Number("PT_VP_TARGET_FPS", 90.0f)) == 45 ? 45 : 90;
     h.foveation = Flag("PT_VP_FOVEATION", true);
-    h.metalfx = Flag("PT_VP_METALFX", false);
+    // MetalFX spatial over the whole eye is gone: it enlarged the low-density periphery to the
+    // drawable's full size (6-7 ms a frame for nothing). MetalFX is now the sharp views' temporal
+    // antialiasing (`aa`), inside the game's frame.
+    h.metalfx = false;
+    h.aa = std::clamp(static_cast<int>(Number("PT_VP_AA", 1.0f)), 0, 4);
+    h.scene_depth = Flag("PT_VP_SCENE_DEPTH", true);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 20.0f)), 10, 50);
     h.center_deg = std::clamp(static_cast<int>(Number("PT_VP_CENTER_DEG", 40.0f)), 20, 70);
@@ -2475,10 +2576,11 @@ void ApplySettings(AppSettings& s) {
     s.ray_tracing = {};
     s.camera.third_person = false;
     s.extras.livesplit = false;
-    LogInfo("visionos: {} headset, preset {}, image {:.0f} %, {} frames a second, dynamic resolution {}, foveation {}, MetalFX {}, shadows {}, SSAO {}, bloom {}, "
+    LogInfo("visionos: {} headset, preset {}, image {:.0f} %, {} frames a second, dynamic resolution {}, foveation {}, antialiasing {}, shadows {}, SSAO {}, bloom {}, "
             "reflections {}, anisotropic filtering {}x",
             h.device_m5 ? "M5" : "M2", h.preset == 0 ? "M2" : h.preset == 1 ? "M5" : "custom", h.resolution_scale * 100.0f, h.target_fps,
-            h.dynamic_resolution ? "on" : "off", h.foveation ? "on" : "off", h.metalfx ? "on" : "off",
+            h.dynamic_resolution ? "on" : "off", h.foveation ? "on" : "off",
+            h.aa == 0 ? std::string("FXAA") : std::format("MetalFX temporal {:.0f} %", AaScale(h.aa) * 100.0f),
             ShadowName(s.graphics.shadow_quality), s.graphics.ambient_occlusion, s.graphics.bloom, s.graphics.reflections, s.graphics.anisotropy);
 }
 

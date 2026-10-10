@@ -389,6 +389,20 @@ index d39d6a6..4c2b603 100644
          vec3 b = pass.f0.x > 0.0 ? min(vec3(0.5), Img(IMG_BLOOM_SUM, SMP_LINEAR_CLAMP, bloom_uv).rgb) : vec3(0.0);
          vec3 x2 = x * x;
          vec3 r = clamp(x2 + b - x2 * b, 0.0, 1.0);
+diff --git a/shaders/upscale_motion.frag b/shaders/upscale_motion.frag
+index 00687d9..f352904 100644
+--- a/shaders/upscale_motion.frag
++++ b/shaders/upscale_motion.frag
+@@ -27,7 +27,8 @@ void main() {
+     }
+     vec2 motion = vec2(0.0);
+     if (previous.w > 1.0e-6) {
+-        motion = (previous.xy / previous.w - ndc) * 0.5;
++        // (f0.xy: the view's off-centre shift, which the previous projection holds; zero on a monitor.)
++        motion = (previous.xy / previous.w - (ndc + pass.f0.xy)) * 0.5;
+     }
+     out_motion = vec4(motion, 0.0, 0.0);
+ }
 diff --git a/shaders/vfx_composite.frag b/shaders/vfx_composite.frag
 index 1be202c..25df602 100644
 --- a/shaders/vfx_composite.frag
@@ -425,6 +439,44 @@ index 8ed00c4..8e3f88f 100644
 +    // params.z: a headset eye with native HDR, its gain in the alpha (1 = none).
 +    out_color = vec4(Decode(color), p.params.z > 0.5 ? clamp(c.a, 0.0, 1.0) : 1.0);
  }
+diff --git a/shaders/xr_depth.frag b/shaders/xr_depth.frag
+new file mode 100644
+index 0000000..78df473
+--- /dev/null
++++ b/shaders/xr_depth.frag
+@@ -0,0 +1,32 @@
++#version 460
++#include "common.glsl"
++
++// A headset view's depth for the compositor (its reprojection between pictures): the distance
++// along the view's axis, in metres, of the scene's nearest surface under each pixel of the eye
++// image (0: nothing, the far distance). The image may be another size than the scene's depth.
++
++layout(push_constant) uniform PassPush {
++    uvec4 ids;
++    vec4 f0;  // xy: the scene depth's size
++    vec4 f1;
++    vec4 f2;
++    mat4 m;
++} pass;
++
++layout(location = 0) in vec2 in_uv;
++layout(location = 0) out vec4 out_distance;
++
++void main() {
++    View v = frame.views[pass.ids.w];
++    ivec2 size = ivec2(pass.f0.xy);
++    // The nearest of the depth texels under this pixel (2x2 around it): edges keep the closer
++    // surface, so a near object is never reprojected as if it were the wall behind it.
++    vec2 texel = in_uv * pass.f0.xy - 0.5;
++    ivec2 p0 = ivec2(floor(texel));
++    float depth = 0.0;
++    for (int i = 0; i < 4; ++i) {
++        ivec2 p = clamp(p0 + ivec2(i & 1, i >> 1), ivec2(0), size - 1);
++        depth = max(depth, ImgFetch(IMG_DEPTH, p).x);  // (reversed: larger is nearer)
++    }
++    out_distance = vec4(depth > 0.0 ? ViewZ(v, depth) : 0.0, 0.0, 0.0, 0.0);
++}
 diff --git a/src/engine/render/camera.h b/src/engine/render/camera.h
 index ffee464..5d15d12 100644
 --- a/src/engine/render/camera.h
@@ -676,10 +728,20 @@ index 01f4500..33cccaf 100644
                              grain_offset[0], grain_offset[1], across, 0.0f};
      vkCmdPushConstants(cmd, xr_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
 diff --git a/src/engine/render/renderer.h b/src/engine/render/renderer.h
-index 9bb3b5d..bf6d173 100644
+index 9bb3b5d..d9886c0 100644
 --- a/src/engine/render/renderer.h
 +++ b/src/engine/render/renderer.h
-@@ -56,6 +56,8 @@ public:
+@@ -27,6 +27,9 @@ struct XrTarget {
+     VkFormat format = VK_FORMAT_UNDEFINED;
+     VkExtent2D extent{};
+     glm::vec4 rect{0.0f, 0.0f, 1.0f, 1.0f};
++    // (visionOS) The view's depth image beside it, the colour image's size (xr::Swapchain::depth_images).
++    VkImage depth = VK_NULL_HANDLE;
++    VkImageView depth_view = VK_NULL_HANDLE;
+ };
+ 
+ struct XrFrame {
+@@ -56,6 +59,8 @@ public:
  
      float exposure = 1.0f;
      float output_brightness = 1.0f;
@@ -688,7 +750,7 @@ index 9bb3b5d..bf6d173 100644
      float fade[4] = {0.0f, 0.0f, 0.0f, 0.0f};
      float grain[4] = {0.0f, 0.0f, 0.0f, 0.0f};
      float grain_offset[2] = {0.0f, 0.0f};
-@@ -65,6 +67,10 @@ public:
+@@ -65,6 +70,10 @@ public:
      void SetGrainNoise(VkImageView view);
  
      void SetRenderExtent(VkExtent2D extent) { render_extent_ = extent; }
@@ -699,7 +761,7 @@ index 9bb3b5d..bf6d173 100644
      void SetXrFrame(const XrFrame& frame) { xr_frame_ = frame; xr_pending_ = true; }
      static constexpr VkExtent2D kHudExtent{1920, 1080};
  
-@@ -114,6 +120,18 @@ private:
+@@ -114,6 +123,18 @@ private:
      VkPipeline composite_pipeline_ = VK_NULL_HANDLE;
  
      VkExtent2D render_extent_{0, 0};
@@ -719,7 +781,7 @@ index 9bb3b5d..bf6d173 100644
      XrFrame xr_frame_;
      bool xr_pending_ = false;
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..8200592 100644
+index 40d339d..3eab5d0 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -306,7 +306,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -751,7 +813,7 @@ index 40d339d..8200592 100644
          return view_count_++;
      };
      main_view_ = ViewSetup{};
-@@ -353,13 +363,19 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -353,16 +363,28 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
      }
      motion_view_ = add_view(projection, gl_view, camera.position, glm::vec4(0.0f));
      frame_->views[motion_view_].dominant_light = dominant_light;
@@ -772,7 +834,44 @@ index 40d339d..8200592 100644
          post.dominant_light = dominant_light;
      }
  
-@@ -610,6 +626,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
++    // A headset frame's views: the previous transforms move on at its first view only (see vr_motion_pending_).
++    if (VrView() && vr_eye_ == 0 && vr_motion_pending_) {
++        motion_history_.swap(motion_history_next_);
++        motion_history_next_.clear();
++        vr_motion_pending_ = false;
++    }
+     DrawPairKeys pair_keys;
+     for (const DrawItem& item : items) {
+         if (!item.mesh) {
+@@ -451,8 +473,15 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+             draws_.push_back(d);
+         }
+     }
+-    motion_history_.swap(motion_history_next_);
+-    motion_history_next_.clear();
++    if (VrView()) {
++        vr_motion_pending_ = true;  // (the other views of this frame fill the same entries again)
++    } else {
++        if (vr_motion_pending_) {
++            vr_motion_pending_ = false;
++        }
++        motion_history_.swap(motion_history_next_);
++        motion_history_next_.clear();
++    }
+     if (dump_requested_) {
+         for (const Draw& d : draws_) {
+             if (glm::distance(d.center, camera.position) < d.radius + 0.3f) {
+@@ -474,7 +503,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+ 
+     mirror_active_ = false;
+     mirror_stale_active_ = false;
+-    mirror_temporal_enabled_ = up_.enabled && !std::getenv("PT_MIRROR_TEMPORAL_OFF");
++    // (Not on a headset: one mirror history for views of both eyes would mix them.)
++    mirror_temporal_enabled_ = up_.enabled && !VrView() && !std::getenv("PT_MIRROR_TEMPORAL_OFF");
+     mirrors_.clear();
+     static const bool trace_active = std::getenv("PT_MIRROR_TRACE") != nullptr;
+     if (trace_active) {
+@@ -610,6 +640,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          }
      }
  
@@ -791,7 +890,7 @@ index 40d339d..8200592 100644
      static const bool legacy_cull = [] {
          const char* s = std::getenv("PT_LIGHT_CULL_LEGACY");
          return s && std::string_view(s) == "1";
-@@ -624,8 +652,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -624,8 +666,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
      mirror_occluders_ = {};
      if (!legacy_cull) {
          const lightcull::OccluderLimits& limits = lightcull::LimitsFromEnv();
@@ -802,7 +901,7 @@ index 40d339d..8200592 100644
          if (mirror_active_) {
              mirror_occluders_ = lightcull::BuildOccluderVolumes(lighting.occluders, mirror_current_view_projection_, mirror_view_.eye, limits);
          }
-@@ -664,7 +692,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -664,7 +706,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
                  drop = "box outside the view planes";
              } else if (!mirror_active_) {
                  for (size_t oi = 0; oi < lighting.occluders.size(); ++oi) {
@@ -811,7 +910,7 @@ index 40d339d..8200592 100644
                          const glm::vec3 q = lighting.occluders[oi].points[0];
                          drop = explain ? std::format("occluder {} at ({:.2f} {:.2f} {:.2f}) hides box ({:.2f} {:.2f} {:.2f})-({:.2f} {:.2f} {:.2f})", oi, q.x,
                                                       q.y, q.z, box.lo.x, box.lo.y, box.lo.z, box.hi.x, box.hi.y, box.hi.z)
-@@ -698,7 +726,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -698,7 +740,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
              }
          }
          const glm::vec3 cull_rank = l.has_rank_point ? l.rank_point : (box.lo + box.hi) * 0.5f;
@@ -820,7 +919,7 @@ index 40d339d..8200592 100644
          const float cull_gate = glm::pi<float>() * (l.intensity.x + l.intensity.y + l.intensity.z) * exposure_;
          if (trace_cull_frame) {
              std::string reason = drop;
-@@ -796,7 +824,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -796,7 +838,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          }
          LogInfo("probe at: blend ({:.4f} {:.4f} {:.4f})", blend.x, blend.y, blend.z);
      }
@@ -831,7 +930,7 @@ index 40d339d..8200592 100644
      if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
          std::map<std::string, std::pair<bool, float>> now;
          for (uint32_t i = 0; i < light_count_; ++i) {
-@@ -984,18 +1014,108 @@ void SceneRenderer::BuildShadowViews(const SceneLighting& lighting, const glm::v
+@@ -984,18 +1028,108 @@ void SceneRenderer::BuildShadowViews(const SceneLighting& lighting, const glm::v
          }
          return false;
      };
@@ -944,7 +1043,48 @@ index 40d339d..8200592 100644
          const float tile_uv = static_cast<float>(shadow_tile) / static_cast<float>(shadow_size);
          const glm::vec3 pos = glm::vec3(g.position);
          if (spot) {
-@@ -1232,14 +1352,99 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -1134,6 +1268,40 @@ void SceneRenderer::PushConstants(VkCommandBuffer cmd, const void* data, uint32_
+     vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0, size, data);
+ }
+ 
++// The view's depth into the headset's depth image beside its picture (SetVrDepthOut), as distances.
++void SceneRenderer::RecordVrDepth(VkCommandBuffer cmd) {
++    RenderTarget out = vr_depth_out_;
++    vr_depth_out_ = RenderTarget{};  // (once: the next view sets its own)
++    if (VrrActive() || !depth_.Valid() || out.Extent().width == 0 || out.Extent().height == 0) {
++        return;
++    }
++    if (!vr_depth_pipeline_ && !vr_depth_failed_) {
++        PipelineDesc desc;
++        desc.layout = layout_;
++        desc.fragment = "xr_depth.frag";
++        desc.colors = {VK_FORMAT_R32_SFLOAT};
++        vr_depth_pipeline_ = CreateGraphicsPipeline(device_, desc);
++        if (!vr_depth_pipeline_) {
++            vr_depth_failed_ = true;
++            LogWarn("vr: no depth for the compositor (xr_depth pipeline)");
++        }
++    }
++    if (!vr_depth_pipeline_) {
++        return;
++    }
++    BeginLabel(cmd, "depth out");
++    BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
++    UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}, {&out, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
++    BeginPass(cmd, out.Extent(), {{&out, true, {}}});
++    gpu::PassPush push;
++    push.ids = glm::uvec4(0, 0, 0, main_view_.index);
++    push.f0 = glm::vec4(static_cast<float>(extent_.width), static_cast<float>(extent_.height), 0.0f, 0.0f);
++    Fullscreen(cmd, vr_depth_pipeline_, push);
++    vkCmdEndRendering(cmd);
++    UseTargets(cmd, {{&out, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    EndLabel(cmd);
++}
++
+ void SceneRenderer::Fullscreen(VkCommandBuffer cmd, VkPipeline pipeline, const gpu::PassPush& push) {
+     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+     PushConstants(cmd, &push, sizeof(push));
+@@ -1232,14 +1400,99 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
      if (shadow_views_.empty()) {
          return;
      }
@@ -1050,7 +1190,7 @@ index 40d339d..8200592 100644
          SetViewport(cmd, sv.rect);
          vkCmdSetDepthBias(cmd, sv.bias_constant, 0.0f, sv.bias_slope);
          const uint8_t casters = sv.casters;
-@@ -1264,8 +1469,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -1264,8 +1517,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
              }
              DrawMesh(cmd, d, sv.view, 0, false, false, nullptr, sv.cull, true);
          }
@@ -1060,7 +1200,7 @@ index 40d339d..8200592 100644
      UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
  }
  
-@@ -1282,6 +1487,7 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1282,6 +1535,7 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
          debug_flags = 3;
      }
      const glm::vec4 aux[2] = {glm::vec4(0.0f), glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(reflection_cube_))};
@@ -1068,7 +1208,7 @@ index 40d339d..8200592 100644
      for (int pass = 0; pass < 2; ++pass) {
          vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 0 ? gbuffer_ : decal_);
          if (pass == 1) {
-@@ -1293,9 +1499,13 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1293,9 +1547,13 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
                  continue;
              }
              DrawMesh(cmd, d, view.index, debug_flags, view.mirrored, false, aux);
@@ -1082,11 +1222,14 @@ index 40d339d..8200592 100644
  }
  
  void SceneRenderer::RecordOcclusion(VkCommandBuffer cmd, const ViewSetup& view) {
-@@ -1402,7 +1612,13 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1401,8 +1659,15 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+         return v && std::string_view(v) == "legacy";
      }();
      const bool ao = rt_ao_ready_ && view.index == main_view_.index;
-     const bool shrink = !up_.enabled && !ao && !legacy_resolve;
+-    const bool shrink = !up_.enabled && !ao && !legacy_resolve;
 -    const VkExtent2D acc_area{shrink ? (area.width + 1) / 2 : area.width, shrink ? (area.height + 1) / 2 : area.height};
++    // (A headset view keeps the half-size probes with the temporal upscaler: full size cost 4-5 ms.)
++    const bool shrink = (!up_.enabled || VrView()) && !ao && !legacy_resolve;
 +    // With variable rasterization rate the probes are drawn at half the logical picture's size,
 +    // plainly (no rate map: not the whole physical size), and resolved through the tables.
 +    const bool vrr_view = VrrActive() && view.index == main_view_.index;  // (not the mirror's view)
@@ -1097,7 +1240,7 @@ index 40d339d..8200592 100644
      auto draw_probes = [&](uint32_t shrink_flag) {
          if (ao) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, probe_ao_);
-@@ -1422,16 +1638,20 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1422,16 +1687,20 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          }
      };
      if (probes) {
@@ -1118,7 +1261,7 @@ index 40d339d..8200592 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1447,7 +1667,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1447,7 +1716,33 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          vkCmdDraw(cmd, 3, 1, 0, 0);
      }
      const bool contact = rt_contact_active_ && view.index == main_view_.index;
@@ -1153,7 +1296,7 @@ index 40d339d..8200592 100644
          if (rt_active_ || contact) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rt_active_ ? light_rt_ : light_contact_);
              const VkDescriptorSet rt_set = rt_->Set(renderer_->FrameIndex());
-@@ -1455,8 +1701,61 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1455,8 +1750,61 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          } else {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, light_);
          }
@@ -1216,7 +1359,7 @@ index 40d339d..8200592 100644
              const SceneLight& l = *light_sources_[i];
              if (const char* only = std::getenv("PT_LIGHT_DRAW_ONLY"); only && l.name.find(only) == std::string::npos) {
                  continue;
-@@ -1464,15 +1763,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1464,15 +1812,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              if ((l.hidden_views & view.view_bit) != 0) {
                  continue;
              }
@@ -1248,7 +1391,7 @@ index 40d339d..8200592 100644
              gpu::PassPush push;
              const uint32_t mirror_light = mirror_shadow_lights_[i];
              const bool has_shadow = view.view_bit == 2 ? mirror_light != gpu::kInvalid : (light_shadow_views_[i] & view.view_bit) != 0;
-@@ -1486,10 +1794,48 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1486,10 +1843,48 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              push.m = volume;
              PushConstants(cmd, &push, sizeof(push));
              vkCmdDraw(cmd, 36, 1, 0, 0);
@@ -1297,7 +1440,7 @@ index 40d339d..8200592 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +2128,82 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +2177,82 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -1381,7 +1524,7 @@ index 40d339d..8200592 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +2215,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +2264,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -1389,7 +1532,7 @@ index 40d339d..8200592 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +2226,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +2275,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -1429,7 +1572,7 @@ index 40d339d..8200592 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +2251,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2300,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -1437,7 +1580,26 @@ index 40d339d..8200592 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2507,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -1908,7 +2365,8 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
+     push.f2 = glm::vec4(1.0f / static_cast<float>(refmap_.Extent().width), 1.0f / static_cast<float>(refmap_.Extent().height), 0.0f, 0.0f);
+     static const bool march_fixed = std::getenv("PT_REFLECT_MARCH_FIXED") != nullptr;
+     static const bool temporal_off_march = std::getenv("PT_REFLECT_TEMPORAL_OFF") != nullptr;
+-    if (up_.enabled && !temporal_off_march && !march_fixed && reflect_layer_.Valid() && reflect_temporal_pipeline_ && reflect_layer_pipeline_) {
++    // (The temporal reflections keep one history per target set: on a headset both eyes would share it.)
++    if (up_.enabled && !VrView() && !temporal_off_march && !march_fixed && reflect_layer_.Valid() && reflect_temporal_pipeline_ && reflect_layer_pipeline_) {
+         push.f2.z = 1.0f;
+         push.f2.w = static_cast<float>(frame_counter_ % 64u);
+     }
+@@ -1956,7 +2414,7 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
+     push.f1 = glm::vec4(1.0f, 1.0f, screen.reflect_scale, screen.reflect_bias);
+     push.f2 = glm::vec4(horizontal, screen.reflect_edge ? 1.0f : 0.0f);
+     static const bool temporal_off = std::getenv("PT_REFLECT_TEMPORAL_OFF") != nullptr;
+-    if (up_.enabled && !temporal_off && reflect_layer_.Valid() && reflect_temporal_pipeline_ &&
++    if (up_.enabled && !VrView() && !temporal_off && reflect_layer_.Valid() && reflect_temporal_pipeline_ &&
+         (rt_reflections_ ? reflect_layer_rt_ : reflect_layer_pipeline_)) {
+         RecordReflectionTemporal(cmd, view, push);
+         return;
+@@ -2099,9 +2557,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -1452,7 +1614,7 @@ index 40d339d..8200592 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2520,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2570,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -1461,7 +1623,7 @@ index 40d339d..8200592 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2545,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2595,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -1478,7 +1640,7 @@ index 40d339d..8200592 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2562,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2612,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -1486,7 +1648,7 @@ index 40d339d..8200592 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2597,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2647,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -1494,7 +1656,7 @@ index 40d339d..8200592 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2655,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2705,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -1507,7 +1669,7 @@ index 40d339d..8200592 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2672,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2722,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -1523,7 +1685,7 @@ index 40d339d..8200592 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2260,6 +2692,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2260,6 +2742,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          return;
      }
      FrameSlot& slot = slots_[renderer_->FrameIndex()];
@@ -1535,7 +1697,7 @@ index 40d339d..8200592 100644
      textures_->FlushMaterials();
      textures_->ReportCounts("scene");
      if (has_last_eye_ && glm::distance(camera.position, last_eye_) > kCameraCutDistance) {
-@@ -2325,15 +2762,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2325,15 +2812,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          SettleExposure(lighting_->exposure);
      }
      VkCommandBuffer cmd = renderer_->Cmd();
@@ -1614,9 +1776,13 @@ index 40d339d..8200592 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2954,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2454,15 +3003,25 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+         RecordDebug(cmd);
          EndLabel(cmd);
      }
++    if (vr_depth_out_.Valid()) {
++        RecordVrDepth(cmd);
++    }
      Stamp(cmd, 6);
 +    if (label_slot_ == &slot) {
 +        g_label_hook = nullptr;
@@ -1639,7 +1805,7 @@ index 40d339d..8200592 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
-index 19dd1a8..7af5170 100644
+index 19dd1a8..eb32220 100644
 --- a/src/engine/render/scene_post.cpp
 +++ b/src/engine/render/scene_post.cpp
 @@ -5,6 +5,7 @@
@@ -1650,7 +1816,7 @@ index 19dd1a8..7af5170 100644
  #include "engine/render/scene_renderer.h"
  
  namespace pt {
-@@ -88,7 +89,15 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -88,7 +89,21 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      }
  
      const bool bloom = toggles.bloom && lighting.valid && std::abs(exposure.bloom_size) >= 1.0e-5f;
@@ -1661,13 +1827,19 @@ index 19dd1a8..7af5170 100644
 +    // scene seen from the same eye: the inset samples the part of it under its field
 +    // (`vr_share_place_`), which also makes its glow spread as wide as the
 +    // view around it.
-+    const bool reuse = bloom && InsetShares(shared_bloom_frame_);
++    bool reuse = bloom && InsetShares(shared_bloom_frame_);
++    glm::vec4 bloom_place = SharePlace(reuse);
++    // One bloom a frame: the left wide view's, read by the right wide view and both insets.
++    if (bloom && vr_bloom_one_ && (vr_eye_ == 1 || vr_eye_ == 2 || vr_eye_ == 3) && shared_bloom_frame_[0] == ShareStamp()) {
++        reuse = true;
++        bloom_place = vr_bloom_place_[vr_eye_ == 1 ? 2 : vr_eye_ - 2];
++    }
 +    if (bloom && !reuse) {
 +        BeginLabel(cmd, "bloom");
          UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[0], false, {}}});
          push.f0 = BloomPolynomial(exposure.bloom_extraction);
-@@ -111,6 +120,11 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -111,6 +126,11 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
              blur(1, 2, gaussian_, glm::vec4(0.0f, 1.0f, 0.0f, 0.0f), false);
          } else {
              const int passes = std::clamp(static_cast<int>(std::floor(size * 10.0f)), 1, 64);
@@ -1679,7 +1851,7 @@ index 19dd1a8..7af5170 100644
              static const bool separate_add = std::getenv("PT_BLOOM_SEPARATE_ADD") != nullptr;
              const glm::vec4 saved_f1 = push.f1;
              for (int i = 0; i < passes; ++i) {
-@@ -134,19 +148,30 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -134,19 +154,30 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
              push.f1 = saved_f1;
          }
          UseTargets(cmd, {{&bloom_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -1716,12 +1888,12 @@ index 19dd1a8..7af5170 100644
      UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&ldr_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
      BeginPass(cmd, output_extent_, {{&ldr_[0], false, {}}});
      push.ids.x = 0;
-@@ -158,12 +183,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -158,12 +189,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          push.f0.y = 0.0f;
          push.f0.w = 0.0f;
      }
-+    // The shared bloom read under the inset's field (0: the view's own, all of it).
-+    push.f2 = SharePlace(reuse);
++    // The shared bloom read under the view's field (0: the view's own, all of it).
++    push.f2 = bloom_place;
      Fullscreen(cmd, tonemap_, push);
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&ldr_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
@@ -1735,7 +1907,7 @@ index 19dd1a8..7af5170 100644
          RenderTarget& dst = ldr_[1 - current];
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, output_extent_, {{&dst, false, {}}});
-@@ -171,11 +201,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -171,11 +207,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
          current = 1 - current;
@@ -1749,7 +1921,7 @@ index 19dd1a8..7af5170 100644
      }
      if (toggles.depth_of_field && screen.depth_of_field && lighting.valid) {
          RecordDepthOfField(cmd, screen, current);
-@@ -187,7 +218,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -187,7 +224,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          gpu::PassPush lut;
          lut.ids = glm::uvec4(ldr_index(current), 1, 0, post_view_);
          lut.f0 = glm::vec4(0.0f, lut_blend, 1.0f, 1.0f);
@@ -1758,7 +1930,7 @@ index 19dd1a8..7af5170 100644
      }
  
      const bool blur = toggles.full_screen_blur && screen.full_screen_blur && lighting.valid;
-@@ -203,7 +234,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -203,7 +240,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          const float share = std::clamp(dt * 30.0f, 0.05f, 2.0f);
          const float rate = std::pow(std::clamp(screen.blur_blend_rate, 0.0f, 0.999f), share);
          push.f0 = glm::vec4(screen.blur_fetch_band * std::sqrt(share), rate, 0.0f, 0.0f);
@@ -1767,7 +1939,7 @@ index 19dd1a8..7af5170 100644
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
          CopyToHistory(cmd, ldr_[current]);
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
-@@ -214,9 +245,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -214,9 +251,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      if (screen.colour_banding_canceller && lighting.valid) {
          UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
          push.ids = glm::uvec4(ldr_index(current), 0, 0, main_view_.index);
@@ -1779,7 +1951,7 @@ index 19dd1a8..7af5170 100644
      RenderTarget output;
      output.image = renderer_->SceneColor();
      output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-@@ -225,7 +257,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -225,7 +263,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      push.ids = glm::uvec4(ldr_index(current), 0, 0, post_view_);
      const bool grain = toggles.film_grain && screen.film_grain && lighting.valid;
      const bool distortion = toggles.distortion && screen.screen_distortion && lighting.valid;
@@ -1791,7 +1963,7 @@ index 19dd1a8..7af5170 100644
      push.f1 = glm::vec4(graphics.clarity, 0.0f, 0.0f, 0.0f);
      Fullscreen(cmd, screen_fx_, push);
      renderer_->grain[0] = grain ? 1.0f : 0.0f;
-@@ -240,6 +275,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -240,6 +281,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      }
      vkCmdEndRendering(cmd);
@@ -1799,7 +1971,27 @@ index 19dd1a8..7af5170 100644
      (void)dt;
  }
  
-@@ -368,7 +404,10 @@ void SceneRenderer::UpdateMotion(const Camera& camera, float dt) {
+@@ -359,6 +401,19 @@ void SceneRenderer::UpdateMotion(const Camera& camera, float dt) {
+         previous = last_camera_;
+     }
+     motion_reference_set_ = false;
++    if (VrView()) {
++        // Each headset view against its own previous picture (not the view drawn just before it).
++        previous = vr_has_last_camera_[vr_eye_] ? vr_last_camera_[vr_eye_] : camera;
++        interval = dt > 0.0f ? dt : interval;
++        motion_history_valid_ = vr_has_last_camera_[vr_eye_];
++        // (A cut resets only this view's history; the shared flag below is the monitor's.)
++        if (!vr_has_last_camera_[vr_eye_] || glm::distance(previous.position, camera.position) > kCameraCutDistance ||
++            glm::dot(previous.Forward(), camera.Forward()) < 0.7071f) {
++            vr_reset_[vr_eye_] = true;
++        }
++        vr_last_camera_[vr_eye_] = camera;
++        vr_has_last_camera_[vr_eye_] = true;
++    }
+     last_camera_ = camera;
+     has_last_camera_ = true;
+     if (glm::distance(previous.position, camera.position) > kCameraCutDistance || glm::dot(previous.Forward(), camera.Forward()) < 0.7071f) {
+@@ -368,7 +423,10 @@ void SceneRenderer::UpdateMotion(const Camera& camera, float dt) {
      if (!motion_history_valid_) {
          up_.reset = true;
      }
@@ -1812,7 +2004,7 @@ index 19dd1a8..7af5170 100644
      const float step = std::clamp(interval, 1.0e-4f, 1.0f);
      frame_time_ = reference ? static_cast<double>(step) : static_cast<double>(step * 0.016666668f) + frame_time_ * 0.9833333333333333;
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..5284700 100644
+index 1f96981..d61b691 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
 @@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
@@ -1862,7 +2054,18 @@ index 1f96981..5284700 100644
                           &reflect_colour_, &kawase_, &bloom_add_, &kawase_sum_, &gaussian_, &tonemap_, &fxaa_, &dof_ratio_, &dof_down_, &dof_blur_, &dof_blend_,
                           &mb_velocity_, &mb_tile_pipeline_, &mb_bake_pipeline_, &mb_mcguire_, &mb_composite_, &velocity_pipeline_, &fsblur_,
                           &banding_, &screen_fx_, &debug_, &occlusion_, &occlusion_blur_, &reflect_make_, &reflect_blend_, &vfx_composite_,
-@@ -539,13 +554,14 @@ void SceneRenderer::Shutdown() {
+@@ -454,6 +469,10 @@ void SceneRenderer::DestroyPipelines() {
+             *p = VK_NULL_HANDLE;
+         }
+     }
++    if (vr_depth_pipeline_) {
++        vkDestroyPipeline(device_, vr_depth_pipeline_, nullptr);
++        vr_depth_pipeline_ = VK_NULL_HANDLE;
++    }
+     DestroyUpscalePipelines();
+ }
+ 
+@@ -539,13 +558,14 @@ void SceneRenderer::Shutdown() {
          }
      }
      DestroyPipelines();
@@ -1878,7 +2081,7 @@ index 1f96981..5284700 100644
      for (vk::Image* image : images) {
          ctx.DestroyImage(*image);
      }
-@@ -555,6 +571,7 @@ void SceneRenderer::Shutdown() {
+@@ -555,6 +575,7 @@ void SceneRenderer::Shutdown() {
          ctx.DestroyBuffer(slot.luminance);
          vkDestroyQueryPool(device_, slot.queries, nullptr);
          vkDestroyQueryPool(device_, slot.upscale_queries, nullptr);
@@ -1886,7 +2089,7 @@ index 1f96981..5284700 100644
      }
      vkDestroyPipelineLayout(device_, layout_, nullptr);
      vkDestroyDescriptorPool(device_, pool_, nullptr);
-@@ -573,10 +590,16 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
+@@ -573,10 +594,16 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
      return renderer_->Context().CreateImage(target.image, format, {std::max(extent.width, 1u), std::max(extent.height, 1u), 1}, usage, 1, 1, aspect);
  }
  
@@ -1906,7 +2109,7 @@ index 1f96981..5284700 100644
                                 &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_,
                                 &mb_tile_[0], &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_,
                                 &mb_blur_[0], &mb_blur_[1], &mirror_history_, &mirror_temporal_, &reflect_layer_, &reflect_offset_,
-@@ -587,12 +610,15 @@ void SceneRenderer::DestroyTargets() {
+@@ -587,12 +614,15 @@ void SceneRenderer::DestroyTargets() {
      }
      ctx.DestroyImage(refmap_color_.image);
      refmap_color_ = RenderTarget{};
@@ -1927,7 +2130,7 @@ index 1f96981..5284700 100644
      mirror_history_valid_ = false;
      mirror_history_size_ = 0;
      reflect_history_valid_ = false;
-@@ -610,13 +636,33 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -610,13 +640,33 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
          return true;
      }
      vkDeviceWaitIdle(device_);
@@ -1962,7 +2165,7 @@ index 1f96981..5284700 100644
      bool ok = CreateTarget(albedo_, kAlbedoFormat, extent, dumped, c) && CreateTarget(normal_, kNormalFormat, extent, dumped, c) &&
                CreateTarget(material_, kMaterialFormat, extent, dumped, c) &&
                CreateTarget(depth_, kDepthFormat, extent,
-@@ -626,11 +672,12 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -626,11 +676,12 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
                CreateTarget(probe_acc_, kLightFormat, extent, dumped, c) &&
                CreateTarget(hdr_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(hdr_copy_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
@@ -1978,7 +2181,7 @@ index 1f96981..5284700 100644
                CreateTarget(ldr_[0], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(ldr_[1], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(history_, kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
-@@ -657,14 +704,14 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -657,14 +708,14 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
                   CreateTarget(reflect_history_[0], kHdrFormat, extent, color, c) &&
                   CreateTarget(reflect_history_[1], kHdrFormat, extent, color, c)));
      ok = ok && (!rt_ || CreateTarget(refmap_color_, kRefMapFormat, extent, color, c));
@@ -1995,7 +2198,7 @@ index 1f96981..5284700 100644
                                    &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_, &mb_tile_[0],
                                    &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_, &mb_blur_[0],
                                    &mb_blur_[1]};
-@@ -708,7 +755,92 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -708,7 +759,92 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
      return true;
  }
  
@@ -2089,7 +2292,7 @@ index 1f96981..5284700 100644
      VkDescriptorImageInfo images[gpu::kImageSlots];
      for (VkDescriptorImageInfo& info : images) {
          info = {VK_NULL_HANDLE, white_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-@@ -773,6 +905,7 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -773,6 +909,7 @@ void SceneRenderer::WriteImageDescriptors() {
      set_image(gpu::kResLut1, lut1_);
      set_image(gpu::kResMaterial, material_tex_);
      set_image(gpu::kResDither, dither_);
@@ -2097,7 +2300,7 @@ index 1f96981..5284700 100644
      set_image(gpu::kResColorLut, color_lut_);
      set_image(gpu::kResColorLutPrev, color_lut_prev_);
      set_image(gpu::kResNoise, noise_);
-@@ -789,7 +922,9 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -789,7 +926,9 @@ void SceneRenderer::WriteImageDescriptors() {
      std::copy(std::begin(images), std::end(images), std::begin(post_images));
      WriteUpscaleDescriptors(post_images, true);
      for (int set_index = 0; set_index < 2 * static_cast<int>(Renderer::kFramesInFlight); ++set_index) {
@@ -2107,7 +2310,7 @@ index 1f96981..5284700 100644
          const bool post = (set_index & 1) != 0;
          VkDescriptorBufferInfo frame_info{slot.frame_data.buffer, 0, VK_WHOLE_SIZE};
          VkDescriptorBufferInfo skin_info{slot.skin.buffer, 0, VK_WHOLE_SIZE};
-@@ -824,6 +959,19 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -824,6 +963,19 @@ void SceneRenderer::WriteImageDescriptors() {
      }
  }
  
@@ -2127,7 +2330,7 @@ index 1f96981..5284700 100644
  bool SceneRenderer::UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size) {
      vk::Context& ctx = renderer_->Context();
      if (!image.image || image.format != format || image.extent.width != extent.width || image.extent.height != extent.height ||
-@@ -1083,7 +1231,13 @@ void SceneRenderer::UpdateColorLut(const ScreenSettings& screen) {
+@@ -1083,7 +1235,13 @@ void SceneRenderer::UpdateColorLut(const ScreenSettings& screen) {
      color_lut_prev_key_ = color_lut_key_;
      color_lut_key_ = key;
      if (extent_.width > 0) {
@@ -2142,7 +2345,7 @@ index 1f96981..5284700 100644
      }
  }
  
-@@ -1174,10 +1328,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+@@ -1174,10 +1332,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
      stats_.gpu_ms = span(0, 6);
  }
  
@@ -2228,7 +2431,7 @@ index 1f96981..5284700 100644
      if (slot.reflection_sampled) {
          vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
          const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
-@@ -1189,7 +1418,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -1189,7 +1422,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -2240,13 +2443,22 @@ index 1f96981..5284700 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..ce6b015 100644
+index 6c9b165..2fffd15 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,49 @@ public:
+@@ -206,6 +206,69 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
++    // (Headset) Where this view's depth goes for the compositor (xr_depth.frag): an R32 float
++    // image and its view, written at the end of the next Render. Null: none.
++    void SetVrDepthOut(VkImage image, VkImageView view, VkExtent2D extent) {
++        vr_depth_out_.image.image = image;
++        vr_depth_out_.image.view = view;
++        vr_depth_out_.image.format = VK_FORMAT_R32_SFLOAT;
++        vr_depth_out_.image.extent = {extent.width, extent.height, 1};
++        vr_depth_out_.layout = VK_IMAGE_LAYOUT_UNDEFINED;  // (its old content is not needed)
++    }
 +    // A view drawn wide at low density under an inset (visionOS foveation): no screen-space AO,
 +    // reflections or subsurface scattering in it.
 +    void SetVrLowDetail(bool low) { vr_low_detail_ = low; }
@@ -2280,6 +2492,16 @@ index 6c9b165..ce6b015 100644
 +    }
 +    // The rate maps' tables (common.glsl VrrTable): `rows` rows of `width` floats.
 +    bool SetVrrTables(const float* data, uint32_t width, uint32_t rows);
++    // One bloom a stereo frame (with the insets): the left wide view works it out, the right wide
++    // view and both insets read it at these places (VrPlay::Stereo::bloom_place). After
++    // SetVrInsetShare; PT_BLOOM_PER_EYE=1 keeps one per eye.
++    void SetVrBloomShare(const glm::vec4* place) {
++        static const bool per_eye = std::getenv("PT_BLOOM_PER_EYE") != nullptr;
++        vr_bloom_one_ = place && vr_share_scale_ > 0.0f && !per_eye;
++        if (vr_bloom_one_) {
++            for (int i = 0; i < 3; ++i) vr_bloom_place_[i] = place[i];
++        }
++    }
 +    void SetVrInsetShare(const glm::vec4* place) {
 +        vr_share_scale_ = place ? 1.0f : 0.0f;
 +        if (place) {
@@ -2288,12 +2510,13 @@ index 6c9b165..ce6b015 100644
 +        }
 +        // A new stereo frame (or its end): nothing is shared yet.
 +        shared_bloom_frame_[0] = shared_bloom_frame_[1] = ~0u;
++        vr_bloom_one_ = false;
 +        shared_particles_frame_[0] = shared_particles_frame_[1] = ~0u;
 +    }
  
  private:
      struct FrameSlot {
-@@ -214,6 +257,7 @@ private:
+@@ -214,6 +277,7 @@ private:
          vk::Buffer luminance;
          VkDescriptorSet set = VK_NULL_HANDLE;
          VkDescriptorSet post_set = VK_NULL_HANDLE;
@@ -2301,7 +2524,7 @@ index 6c9b165..ce6b015 100644
          VkQueryPool queries = VK_NULL_HANDLE;
          VkQueryPool upscale_queries = VK_NULL_HANDLE;
          bool upscale_timed = false;
-@@ -222,7 +266,30 @@ private:
+@@ -222,7 +286,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -2332,7 +2555,7 @@ index 6c9b165..ce6b015 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -274,8 +341,10 @@ private:
+@@ -274,8 +361,10 @@ private:
      void DestroyPipelines();
      bool CreateDescriptors();
      bool EnsureTargets(VkExtent2D extent, VkExtent2D output, bool upscaling);
@@ -2345,7 +2568,7 @@ index 6c9b165..ce6b015 100644
      bool CreateTarget(RenderTarget& target, VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, VkImageAspectFlags aspect);
      bool UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size);
      bool UploadImageMips(vk::Image& image, VkFormat format, VkExtent3D extent, const std::vector<std::vector<uint8_t>>& mips);
-@@ -301,6 +370,7 @@ private:
+@@ -301,6 +390,7 @@ private:
      bool EnsureShadowTarget();
      void RecordRtAmbientOcclusion(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordLighting(VkCommandBuffer cmd, const ViewSetup& view);
@@ -2353,7 +2576,7 @@ index 6c9b165..ce6b015 100644
      void RecordLuminance(VkCommandBuffer cmd);
      void RecordForward(VkCommandBuffer cmd, const ViewSetup& view, RenderTarget& output);
      void RecordPost(VkCommandBuffer cmd, const SceneLighting& lighting, float dt);
-@@ -342,6 +412,8 @@ private:
+@@ -342,6 +432,8 @@ private:
      void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
      void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
      void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
@@ -2362,7 +2585,7 @@ index 6c9b165..ce6b015 100644
      void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordUpscale(VkCommandBuffer cmd, float dt);
      void ReadUpscaleTimestamps(FrameSlot& slot);
-@@ -377,6 +449,32 @@ private:
+@@ -377,6 +469,34 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
@@ -2375,6 +2598,8 @@ index 6c9b165..ce6b015 100644
 +    // The pass constants that read a wide view's image in an inset (zero: its own image).
 +    glm::vec4 SharePlace(bool reuse) const { return reuse ? vr_share_place_[vr_eye_ - 2] : glm::vec4(0.0f); }
 +    uint32_t shared_bloom_frame_[2] = {~0u, ~0u};
++    bool vr_bloom_one_ = false;
++    glm::vec4 vr_bloom_place_[3]{};
 +    uint32_t shared_particles_frame_[2] = {~0u, ~0u};
 +    bool shared_particles_drawn_[2] = {false, false};  // the wide view drew any (its composite ran)
 +    // This frame's number as the views after view 0 see it (view 0 advances frame_counter_ at its end).
@@ -2395,7 +2620,7 @@ index 6c9b165..ce6b015 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -395,6 +493,24 @@ private:
+@@ -395,6 +515,24 @@ private:
      RenderTarget reflect_offset_;
      RenderTarget reflect_history_[2];
      RenderTarget shadow_;
@@ -2420,7 +2645,7 @@ index 6c9b165..ce6b015 100644
      RenderTarget ao_[2];
      RenderTarget refmap_;
      RenderTarget hdr_copy_;
-@@ -418,6 +534,17 @@ private:
+@@ -418,6 +556,17 @@ private:
      vk::Buffer dump_mirror_;
      VkExtent2D output_extent_{0, 0};
      bool targets_upscaled_ = false;
@@ -2438,7 +2663,7 @@ index 6c9b165..ce6b015 100644
      bool history_valid_ = false;
  
      vk::Image lut1_;
-@@ -441,6 +568,8 @@ private:
+@@ -441,6 +590,8 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -2447,7 +2672,7 @@ index 6c9b165..ce6b015 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -554,6 +683,35 @@ private:
+@@ -554,6 +705,35 @@ private:
          uint32_t size = 0;
      };
      MirrorStale mirror_stale_;
@@ -2483,11 +2708,28 @@ index 6c9b165..ce6b015 100644
      bool mirror_stale_active_ = false;
      const SceneLighting* lighting_ = nullptr;
      SceneLighting fallback_;
-@@ -636,6 +794,26 @@ private:
+@@ -636,6 +816,43 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
 +    bool vr_low_detail_ = false;
++    RenderTarget vr_depth_out_;
++    VkPipeline vr_depth_pipeline_ = VK_NULL_HANDLE;
++    bool vr_depth_failed_ = false;
++    void RecordVrDepth(VkCommandBuffer cmd);
++    // A headset's views each keep their own temporal history (the upscaler's jitter and the
++    // camera the motion vectors go back to): otherwise each view's "previous frame" would be the
++    // view drawn just before it, the other eye. The objects' previous transforms move on once a
++    // stereo frame (at view 0), so all four views measure motion against the same game frame.
++    Camera vr_last_camera_[4];
++    bool vr_has_last_camera_[4] = {};
++    int32_t vr_jitter_index_[4] = {};
++    bool vr_reset_[4] = {true, true, true, true};  // each history's own "start again"
++    bool vr_motion_pending_ = false;
++    // The temporal upscaler only on a headset's sharp views (the insets, or the eyes without
++    // them), never on the wide, low-density views of the game's foveation.
++    bool VrSkipsUpscale() const { return vr_eye_ >= 0 && vr_low_detail_; }
++    bool VrView() const { return vr_eye_ >= 0 && vr_eye_ < 4; }
 +    bool vr_cull_valid_ = false;
 +    Camera vr_cull_camera_;
 +    // The left eye's shadow views of this frame: when the right eye's are the same (the lights'
@@ -2510,6 +2752,161 @@ index 6c9b165..ce6b015 100644
  };
  
  }
+diff --git a/src/engine/render/upscale/scene_upscale.cpp b/src/engine/render/upscale/scene_upscale.cpp
+index 1feade3..eb56d5f 100644
+--- a/src/engine/render/upscale/scene_upscale.cpp
++++ b/src/engine/render/upscale/scene_upscale.cpp
+@@ -146,8 +146,11 @@ bool SceneRenderer::CreateUpscaleTargets(VkExtent2D render, VkExtent2D output) {
+                     CreateTarget(opaque_, kHdrTargetFormat, render, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
+                     CreateTarget(handy_factor_, kHandyFactorFormat, render, color, c) &&
+                     CreateTarget(exposure_image_, kExposureFormat, {1, 1}, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
++                    // (A colour attachment as well: MetalFX may want its output to be a render target.)
+                     CreateTarget(upscaled_, kUpscaleColorFormat, output,
+-                                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
++                                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
++                                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
++                                 c) &&
+                     CreateTarget(post_hdr_, kUpscaleColorFormat, output, color, c) && CreateTarget(post_depth_, kPostDepthFormat, output, color, c) &&
+                     CreateTarget(post_object_velocity_, kUpscaleColorFormat, output, color, c);
+     if (!ok) {
+@@ -229,6 +232,13 @@ bool SceneRenderer::SetupUpscaler(VkExtent2D output) {
+     up_.enabled = false;
+     upscale_stats_.active = false;
+     upscale_stats_.kind = upscale.kind;
++#if PT_VISIONOS
++    // On the headset only its views use it (not the virtual screen), and of those only the sharp
++    // ones; the wide views just skip it, the backend and its histories stay.
++    if (upscale.kind != UpscalerKind::Off && (vr_eye_ < 0 || VrSkipsUpscale())) {
++        return false;
++    }
++#endif
+     const bool lit = debug_view == DebugView::Lit || debug_view == DebugView::Ambient;
+     const UpscalerKind kind = upscale.kind;
+     if (kind == UpscalerKind::Off || !lit || output.width == 0 || output.height == 0) {
+@@ -310,8 +320,10 @@ bool SceneRenderer::SetupUpscaler(VkExtent2D output) {
+     up_.warp_test = kind == UpscalerKind::Spatial && render.width == output.width && render.height == output.height &&
+                     std::getenv("PT_UPSCALE_WARP") != nullptr;
+     up_.phase_count = std::max(1, JitterPhaseCount(render.width, output.width));
+-    up_.jitter_pixels = JitterOffset(up_.jitter_index, up_.phase_count);
+-    up_.jitter_index = (up_.jitter_index + 1) % up_.phase_count;
++    // (Each headset view walks its own jitter sequence.)
++    int32_t& jitter_index = VrView() ? vr_jitter_index_[vr_eye_] : up_.jitter_index;
++    up_.jitter_pixels = JitterOffset(jitter_index, up_.phase_count);
++    jitter_index = (jitter_index + 1) % up_.phase_count;
+     if (up_.warp_test) {
+         up_.jitter_pixels = glm::vec2(0.0f);
+     }
+@@ -349,6 +361,9 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
+     gpu::PassPush push;
+     push.ids = glm::uvec4(0, 0, 0, view.index);
+     push.m = previous_view_projection_;
++    // The view's off-centre shift (a headset eye's own field, an inset's lift): the previous
++    // projection holds it, so the current position must too (PixelNdc takes it away).
++    push.f0 = glm::vec4(camera_.offset, 0.0f, 0.0f);
+     Fullscreen(cmd, up_motion_, push);
+     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, up_object_motion_);
+     for (const Draw& d : draws_) {
+@@ -473,8 +488,9 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+         d.frame_ms = std::clamp(dt, 1.0e-4f, 0.25f) * 1000.0f;
+         d.near_plane = camera_.near_plane;
+         d.fov_y = camera_.fov_y;
+-        d.reset = up_.reset;
++        d.reset = VrView() ? vr_reset_[vr_eye_] : up_.reset;
+         d.frame_index = frame_counter_;
++        d.history = VrView() ? static_cast<uint32_t>(vr_eye_) : 0u;
+         if (streamline::Active()) {
+             const float aspect = static_cast<float>(output_extent_.width) / static_cast<float>(std::max(1u, output_extent_.height));
+             streamline::FrameConstants k;
+@@ -519,6 +535,7 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+         }
+     }
+     up_.reset = false;
++    if (VrView()) vr_reset_[vr_eye_] = false;
+     UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
+                      {&object_velocity_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+diff --git a/src/engine/render/upscale/upscale.cpp b/src/engine/render/upscale/upscale.cpp
+index 101ab0d..68d420d 100644
+--- a/src/engine/render/upscale/upscale.cpp
++++ b/src/engine/render/upscale/upscale.cpp
+@@ -24,7 +24,8 @@ struct KindInfo {
+ };
+ 
+ constexpr KindInfo kKinds[] = {{"Off", "off"},           {"AMD FSR 3", "fsr3"},          {"NVIDIA DLSS", "dlss"},
+-                               {"Intel XeSS", "xess"},    {"Spatial (test)", "spatial"}, {"AMD FSR 4", "fsr4"}};
++                               {"Intel XeSS", "xess"},    {"Spatial (test)", "spatial"}, {"AMD FSR 4", "fsr4"},
++                               {"Apple MetalFX", "metalfx"}};
+ 
+ constexpr const char* kDlssModels[] = {"auto", "k", "l", "m"};
+ constexpr const char* kFrameGens[] = {"off", "fsr3", "dlss"};
+@@ -44,6 +45,8 @@ std::string Lower(std::string text) {
+     return text;
+ }
+ 
++PlatformUpscalerFactory g_platform_upscalers[static_cast<int>(UpscalerKind::Count)] = {};
++
+ float Halton(int32_t index, int32_t base) {
+     float f = 1.0f;
+     float result = 0.0f;
+@@ -57,6 +60,13 @@ float Halton(int32_t index, int32_t base) {
+ 
+ }
+ 
++void SetPlatformUpscaler(UpscalerKind kind, PlatformUpscalerFactory factory) {
++    const int i = static_cast<int>(kind);
++    if (i > 0 && i < static_cast<int>(UpscalerKind::Count)) {
++        g_platform_upscalers[i] = factory;
++    }
++}
++
+ const char* UpscalerName(UpscalerKind kind) {
+     const int i = static_cast<int>(kind);
+     return i >= 0 && i < static_cast<int>(UpscalerKind::Count) ? kKinds[i].name : "?";
+@@ -707,7 +717,11 @@ bool UpscaleHost::Available(UpscalerKind kind, std::string& reason, bool probe)
+         case UpscalerKind::Fsr4: backends_[i] = CreateFsrBackend(*ctx_, 4); break;
+         case UpscalerKind::Dlss: backends_[i] = streamline::Active() ? CreateStreamlineDlssBackend(*ctx_) : CreateDlssBackend(*ctx_); break;
+         case UpscalerKind::Xess: backends_[i] = CreateXessBackend(*ctx_); break;
+-        default: break;
++        default:
++            if (g_platform_upscalers[i]) {
++                backends_[i] = g_platform_upscalers[i](*ctx_);
++            }
++            break;
+         }
+         if (!backends_[i]) {
+             probed_[i] = true;
+diff --git a/src/engine/render/upscale/upscale.h b/src/engine/render/upscale/upscale.h
+index 8511811..6594797 100644
+--- a/src/engine/render/upscale/upscale.h
++++ b/src/engine/render/upscale/upscale.h
+@@ -15,7 +15,7 @@ namespace pt {
+ 
+ class FrameGeneration;
+ 
+-enum class UpscalerKind : int { Off = 0, Fsr = 1, Dlss = 2, Xess = 3, Spatial = 4, Fsr4 = 5, Count = 6 };
++enum class UpscalerKind : int { Off = 0, Fsr = 1, Dlss = 2, Xess = 3, Spatial = 4, Fsr4 = 5, MetalFx = 6, Count = 7 };
+ enum class DlssModel : int { Auto = 0, K = 1, L = 2, M = 3, Count = 4 };
+ enum class FrameGenKind : int { Off = 0, Fsr = 1, Dlss = 2, Count = 3 };
+ enum class UpscaleQuality : int { NativeAA = 0, Quality = 1, Balanced = 2, Performance = 3, UltraPerformance = 4, Custom = 5, Count = 6 };
+@@ -87,6 +87,8 @@ struct UpscaleDispatch {
+     float fov_y = 1.0f;
+     bool reset = false;
+     uint32_t frame_index = 0;
++    // Which picture this is, for a backend that keeps one history per picture (a headset's views: 0-3).
++    uint32_t history = 0;
+ };
+ 
+ struct DeviceFeatureSet {
+@@ -179,6 +181,9 @@ private:
+ };
+ 
+ std::unique_ptr<UpscaleBackend> CreateFsrBackend(vk::Context& ctx, int generation);
++// A backend the platform layer provides (Apple MetalFX, from the visionOS host): set before the device exists.
++using PlatformUpscalerFactory = std::unique_ptr<UpscaleBackend> (*)(vk::Context& ctx);
++void SetPlatformUpscaler(UpscalerKind kind, PlatformUpscalerFactory factory);
+ std::unique_ptr<UpscaleBackend> CreateDlssBackend(vk::Context& ctx);
+ std::unique_ptr<UpscaleBackend> CreateStreamlineDlssBackend(vk::Context& ctx);
+ uint32_t DlssPresetHint(DlssModel model);
 diff --git a/src/engine/render/vfx_pass.cpp b/src/engine/render/vfx_pass.cpp
 index 1c8c44e..971aafc 100644
 --- a/src/engine/render/vfx_pass.cpp
@@ -2617,7 +3014,7 @@ index 5e7cee1..ff8142b 100644
  
  }
 diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
-index b5bf253..74fdbf0 100644
+index b5bf253..c1d987a 100644
 --- a/src/engine/xr/xr_host.h
 +++ b/src/engine/xr/xr_host.h
 @@ -37,6 +37,18 @@ struct ControllerState {
@@ -2639,7 +3036,18 @@ index b5bf253..74fdbf0 100644
  };
  
  struct Swapchain {
-@@ -60,6 +72,10 @@ struct FrameLayers {
+@@ -45,6 +57,10 @@ struct Swapchain {
+     VkExtent2D extent{};
+     std::vector<VkImage> images;
+     std::vector<VkImageView> views;
++    // (visionOS) An R32 float image beside each colour image, for the view's depth (the distance
++    // along its axis, metres): the compositor reprojects the picture with it. Empty: none.
++    std::vector<VkImage> depth_images;
++    std::vector<VkImageView> depth_views;
+     uint32_t index = 0;
+     bool acquired = false;
+ };
+@@ -60,6 +76,10 @@ struct FrameLayers {
      glm::quat screen_orientation{1.0f, 0.0f, 0.0f, 0.0f};
      glm::vec3 screen_position{0.0f};
      glm::vec2 screen_size{3.2f, 1.8f};
@@ -2650,7 +3058,7 @@ index b5bf253..74fdbf0 100644
  };
  
  class Host final : public vk::ContextCreator {
-@@ -100,16 +116,50 @@ public:
+@@ -100,16 +120,50 @@ public:
      const ViewPose& Head() const { return head_; }
      bool ViewsValid() const { return views_valid_; }
      const ControllerState& Controllers() const { return controllers_; }
@@ -2702,7 +3110,7 @@ index b5bf253..74fdbf0 100644
  
      struct Impl;
  
-@@ -124,6 +174,8 @@ private:
+@@ -124,6 +178,8 @@ private:
      Swapchain eye_swapchains_[2];
      Swapchain hud_swapchain_;
      Swapchain screen_swapchain_;
@@ -2807,10 +3215,10 @@ index 1daa3d8..34f7117 100644
          pitch = target_pitch = ClampPitch(value);
          vr_script_pitch_ = pitch;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..8f9db26 100644
+index 42d8b01..7a58d99 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -16,6 +16,62 @@ struct Entry {
+@@ -16,6 +16,74 @@ struct Entry {
  };
  
  constexpr Entry kTexts[] = {
@@ -2830,18 +3238,30 @@ index 42d8b01..8f9db26 100644
 +    {"pc_vp_custom", {"Custom", "", "", "Personalizado", "", "", ""}},
 +    {"pc_note_vp_preset", {"Settings tuned for each headset. Changing one of them makes the preset Custom. Foveation applies at the next start.", "", "", "Ajustes pensados para cada visor. Al cambiar uno, el preajuste pasa a Personalizado. El foveado se aplica al volver a empezar.", "", "", ""}},
 +    {"pc_vp_fps", {"Frame rate", "", "", "Imágenes por segundo", "", "", ""}},
-+    {"pc_note_vp_fps", {"90: a new image every refresh. 45: every other refresh; the headset fills in the rest from your head movement.", "", "", "90: una imagen nueva en cada refresco. 45: una de cada dos; el visor rellena el resto con el movimiento de tu cabeza.", "", "", ""}},
++    {"pc_note_vp_fps", {"90: the game draws a new image every refresh (needs about twice the GPU). 45 to 90: the game draws one every other refresh and the headset makes the one in between from the last one and your head's movement; with \"Depth for reprojection\" on, near and far things shift correctly when you move your head. Walking with the stick and animations stay at 45. Applies right away.", "", "", "90: el juego dibuja una imagen nueva en cada refresco (necesita casi el doble de GPU). 45 a 90: el juego dibuja una de cada dos y el visor crea la intermedia a partir de la última y del movimiento de tu cabeza; con \"Profundidad para la reproyección\" activada, lo cercano y lo lejano se desplazan bien al mover la cabeza. Caminar con el stick y las animaciones siguen a 45. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_fps_90", {"90 real", "", "", "90 reales", "", "", ""}},
++    {"pc_vp_fps_45", {"45 reprojected to 90", "", "", "45 reproyectados a 90", "", "", ""}},
++    {"pc_vp_depth", {"Depth for reprojection", "", "", "Profundidad para la reproyección", "", "", ""}},
++    {"pc_note_vp_depth", {"The game gives the headset the distance of every point it drew, so the images the headset makes in between (45 to 90) and its corrections for the latest head position move near things more than far ones, as they really move. Off: everything moves as if it were far away (near things wobble). Costs almost nothing. Applies right away.", "", "", "El juego le da al visor la distancia de cada punto dibujado, para que las imágenes que el visor crea entre medias (45 a 90) y sus correcciones a la última posición de la cabeza muevan lo cercano más que lo lejano, como de verdad se mueve. Desactivada: todo se mueve como si estuviera lejos (lo cercano baila). Casi no cuesta nada. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_section_foveation", {"Foveation and sharpness", "", "", "Foveado y nitidez", "", "", ""}},
++    {"pc_vp_aa", {"Sharp zone antialiasing", "", "", "Antialiasing de la zona nítida", "", "", ""}},
++    {"pc_vp_aa_fxaa", {"FXAA (basic)", "", "", "FXAA (básico)", "", "", ""}},
++    {"pc_vp_aa_native", {"MetalFX 100%", "", "", "MetalFX 100 %", "", "", ""}},
++    {"pc_vp_aa_85", {"MetalFX 85%", "", "", "MetalFX 85 %", "", "", ""}},
++    {"pc_vp_aa_75", {"MetalFX 75%", "", "", "MetalFX 75 %", "", "", ""}},
++    {"pc_vp_aa_67", {"MetalFX 67%", "", "", "MetalFX 67 %", "", "", ""}},
++    {"pc_note_vp_aa", {"Smooths the jagged edges of the sharp zone. MetalFX combines several frames (temporal antialiasing): much cleaner edges and less shimmer than FXAA. 100%: same resolution, antialiasing only. 85/75/67%: the zone is drawn at that size and MetalFX rebuilds the full size from the past frames: more frames per second. Applies right away.", "", "", "Suaviza los dientes de sierra de la zona nítida. MetalFX combina varios fotogramas (antialiasing temporal): bordes mucho más limpios y menos parpadeo que FXAA. 100 %: misma resolución, solo antialiasing. 85/75/67 %: la zona se dibuja a ese tamaño y MetalFX reconstruye el tamaño completo con los fotogramas anteriores: más fps. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_scale", {"Image size (base resolution)", "", "", "Tamaño de imagen (resolución base)", "", "", ""}},
-+    {"pc_note_vp_restart", {"Base resolution of each eye, relative to what the headset recommends. The foveation percentages below are of this size. Applies right away.", "", "", "Resolución base de cada ojo, respecto a la que recomienda el visor. Los porcentajes del foveado de abajo son sobre este tamaño. Se aplica al momento.", "", "", ""}},
++    {"pc_note_vp_restart", {"Base resolution of each eye, relative to what the headset recommends. The foveation percentages (VR page) are of this size. Applies right away.", "", "", "Resolución base de cada ojo, respecto a la que recomienda el visor. Los porcentajes del foveado (página VR) son sobre este tamaño. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_foveation", {"Headset foveation (Apple)", "", "", "Foveado del visor (Apple)", "", "", ""}},
 +    {"pc_note_vp_foveation", {"Done by the headset itself when it puts the final picture together; it does not change what the game draws. Applies at the next start.", "", "", "Lo hace el propio visor al componer la imagen final; no cambia lo que dibuja el juego. Se aplica al volver a empezar.", "", "", ""}},
-+    {"pc_note_vp_vr", {"Flashlight and turning.", "", "", "Linterna y giro.", "", "", ""}},
++    {"pc_note_vp_vr", {"Flashlight, turning, foveation and sharpness.", "", "", "Linterna, giro, foveado y nitidez.", "", "", ""}},
 +    {"pc_vp_fov", {"Drawn field of view", "", "", "Campo de visión dibujado", "", "", ""}},
 +    {"pc_note_vp_fov", {"Cuts the edges of the view with black (100% draws all of it). Nothing to do with foveation. Applies right away.", "", "", "Recorta los bordes de la vista con negro (100 % lo dibuja todo). No tiene nada que ver con el foveado. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_metalfx", {"MetalFX upscaling", "", "", "Escalado MetalFX", "", "", ""}},
 +    {"pc_note_vp_metalfx", {"Each eye is drawn at the image size and MetalFX enlarges it, sharper than plain stretching. Applies right away.", "", "", "Cada ojo se dibuja al tamaño de imagen y MetalFX lo amplía, con más nitidez que estirarlo. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_gamefov", {"Game foveation", "", "", "Foveado del juego", "", "", ""}},
-+    {"pc_note_vp_gamefov", {"Only a zone in the middle of the view is drawn sharp; everything outside it at a low resolution. The biggest performance gain. Its three settings follow. Applies right away.", "", "", "Solo una zona en el centro de la vista se dibuja nítida; todo lo de fuera, a baja resolución. Es lo que más rendimiento da. Sus tres ajustes van a continuación. Se aplica al momento.", "", "", ""}},
++    {"pc_note_vp_gamefov", {"Only a zone in the middle of the view is drawn sharp; everything outside it at a low resolution. The biggest performance gain. Its settings follow. Applies right away.", "", "", "Solo una zona en el centro de la vista se dibuja nítida; todo lo de fuera, a baja resolución. Es lo que más rendimiento da. Sus ajustes van a continuación. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_periphery", {"Periphery resolution", "", "", "Nitidez de la periferia", "", "", ""}},
 +    {"pc_note_vp_periphery", {"Resolution of everything outside the sharp zone, relative to the image size. Lower gives more performance; the sharp zone does not change.", "", "", "Resolución de todo lo que queda fuera de la zona nítida, respecto al tamaño de imagen. Más baja da más rendimiento; la zona nítida no cambia.", "", "", ""}},
 +    {"pc_vp_center_up", {"Sharp zone height", "", "", "Altura de la zona nítida", "", "", ""}},
@@ -2874,7 +3294,7 @@ index 42d8b01..8f9db26 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..110d8ae 100644
+index e8e4ae7..abcccd3 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -2975,7 +3395,7 @@ index e8e4ae7..110d8ae 100644
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
      state.raw_held |= raw;
-@@ -150,17 +197,119 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -150,17 +197,121 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          return false;
      }
      const glm::vec4 tangents[2] = {host_.Eye(0).tangents, host_.Eye(1).tangents};
@@ -3022,13 +3442,13 @@ index e8e4ae7..110d8ae 100644
 +    auto finish_vrr = [](Stereo& s) { s.logical = {}; };
 +#endif
 +#if PT_VISIONOS
-     for (int i = 0; i < 2; ++i) {
--        frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
++    for (int i = 0; i < 2; ++i) {
 +        frusta_[i] = xr::OwnFrustumFor(tangents[i], draw);
 +    }
 +    head_frustum_ = xr::FrustumFor(tangents[0], draw, tangents);
 +#else
-+    for (int i = 0; i < 2; ++i) {
+     for (int i = 0; i < 2; ++i) {
+-        frusta_[i] = xr::FrustumFor(tangents[i], render_size_, tangents);
 +        frusta_[i] = xr::FrustumFor(tangents[i], draw, tangents);
 +    }
 +    head_frustum_ = frusta_[0];
@@ -3075,6 +3495,8 @@ index e8e4ae7..110d8ae 100644
 +            if (!host_.Acquire(sc)) return false;
 +            t.image = sc.images[sc.index];
 +            t.view = sc.views[sc.index];
++            t.depth = sc.index < sc.depth_images.size() ? sc.depth_images[sc.index] : VK_NULL_HANDLE;
++            t.depth_view = sc.index < sc.depth_views.size() ? sc.depth_views[sc.index] : VK_NULL_HANDLE;
 +            t.format = sc.format;
 +            t.extent = sc.extent;
 +            t.rect = rect;
@@ -3099,7 +3521,7 @@ index e8e4ae7..110d8ae 100644
      const glm::vec3 feet = player.Feet();
      const glm::vec3 eye = player.Eye();
      const float height = eye.y - feet.y;
-@@ -185,14 +334,14 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -185,18 +336,20 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
      const glm::vec3 correction = kept - offset;
      last_anchor_ = anchor;
      last_correction_ = correction;
@@ -3117,15 +3539,21 @@ index e8e4ae7..110d8ae 100644
      auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
          if (!host_.Acquire(sc)) return false;
          t.image = sc.images[sc.index];
-@@ -207,19 +356,169 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+         t.view = sc.views[sc.index];
++        t.depth = sc.index < sc.depth_images.size() ? sc.depth_images[sc.index] : VK_NULL_HANDLE;
++        t.depth_view = sc.index < sc.depth_views.size() ? sc.depth_views[sc.index] : VK_NULL_HANDLE;
+         t.format = sc.format;
+         t.extent = sc.extent;
+         t.rect = rect;
+@@ -207,19 +360,179 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
          return false;
      }
 +    finish_vrr(out);
 +    out.inset = PrepareInsets(out);
-+    return true;
-+}
-+
+     return true;
+ }
+ 
 +bool VrPlay::PrepareInsets(Stereo& out) {
 +    float center = 0.0f;
 +    float density = 1.0f;
@@ -3184,6 +3612,14 @@ index e8e4ae7..110d8ae 100644
 +        const xr::EyeFrustum& f = frusta_[i];
 +        out.inset_share[i] = glm::vec4(tan_x / f.tan_x, tan_y / f.tan_y, -f.center.x / (2.0f * f.tan_x), (f.center.y - lift_y) / (2.0f * f.tan_y));
 +    }
++    {
++        const xr::EyeFrustum& l = frusta_[0];
++        const xr::EyeFrustum& r = frusta_[1];
++        out.bloom_place[0] = out.inset_share[0];
++        out.bloom_place[1] = glm::vec4(tan_x / l.tan_x, tan_y / l.tan_y, -l.center.x / (2.0f * l.tan_x), (l.center.y - lift_y) / (2.0f * l.tan_y));
++        out.bloom_place[2] = glm::vec4(r.tan_x / l.tan_x, r.tan_y / l.tan_y, (r.center.x - l.center.x) / (2.0f * l.tan_x),
++                                       (l.center.y - r.center.y) / (2.0f * l.tan_y));
++    }
 +    for (int i = 0; i < 2; ++i) {
 +        out.insets[i] = out.eyes[i];
 +        out.insets[i].fov_y = 2.0f * std::atan(tan_y);
@@ -3197,13 +3633,15 @@ index e8e4ae7..110d8ae 100644
 +        XrTarget& t = out.inset_targets[i];
 +        t.image = sc.images[sc.index];
 +        t.view = sc.views[sc.index];
++        t.depth = sc.index < sc.depth_images.size() ? sc.depth_images[sc.index] : VK_NULL_HANDLE;
++        t.depth_view = sc.index < sc.depth_views.size() ? sc.depth_views[sc.index] : VK_NULL_HANDLE;
 +        t.format = sc.format;
 +        t.extent = sc.extent;
 +        t.rect = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
 +    }
-     return true;
- }
- 
++    return true;
++}
++
 +glm::uvec2 VrPlay::DrawSize() const {
 +    if (dyn_scale_ >= 0.999f) return render_size_;
 +    auto scaled = [&](uint32_t v) { return std::max(16u, 2u * static_cast<uint32_t>(std::lround(static_cast<float>(v) * dyn_scale_ * 0.5f))); };
@@ -3288,7 +3726,7 @@ index e8e4ae7..110d8ae 100644
      layers.hud_position = hud_position_;
      layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
      host_.EndFrame(layers);
-@@ -268,16 +567,48 @@ void VrPlay::EndEmpty() {
+@@ -268,16 +581,48 @@ void VrPlay::EndEmpty() {
  }
  
  void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
@@ -3340,7 +3778,7 @@ index e8e4ae7..110d8ae 100644
      if (!hud_placed_ || (menu_open && !menu_was_open_)) {
          hud_yaw_ = head_yaw_local;
          hud_placed_ = true;
-@@ -289,7 +620,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
+@@ -289,7 +634,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
          }
      }
      menu_was_open_ = menu_open;
@@ -3351,7 +3789,7 @@ index e8e4ae7..110d8ae 100644
  
  }
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index d1485b2..fc703fc 100644
+index d1485b2..2bcbcd6 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
 @@ -1,5 +1,7 @@
@@ -3362,7 +3800,7 @@ index d1485b2..fc703fc 100644
  #include <glm/glm.hpp>
  #include <glm/gtc/quaternion.hpp>
  
-@@ -34,6 +36,20 @@ public:
+@@ -34,6 +36,26 @@ public:
          XrTarget hud;
          VkExtent2D render{};
          xr::ViewPose poses[2];
@@ -3377,13 +3815,19 @@ index d1485b2..fc703fc 100644
 +        // Where each inset sits in its eye's wide-view image: wide uv = 0.5 + (inset uv - 0.5) *
 +        // xy + zw (zw zero for a wide view centred on the eye's axis).
 +        glm::vec4 inset_share[2]{};
++        // One bloom a frame (worked out in the left wide view): where the left inset, the right
++        // inset and the right wide view lie in the left wide view's image (as inset_share). The
++        // eyes look the same way (their fields differ, not their direction), so a direction is the
++        // same tangent in both; only the right eye's outermost strip, beyond the left eye's field,
++        // reads the left image's edge.
++        glm::vec4 bloom_place[3]{};
 +        // Variable rasterization rate (visionOS): the eyes' picture size (`render` is then the
 +        // physical size of the eye images); zero without it.
 +        VkExtent2D logical{};
      };
      bool PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_open, Stereo& out);
      void FinishStereo(const Stereo& stereo);
-@@ -43,9 +59,20 @@ public:
+@@ -43,9 +65,20 @@ public:
  
      void Rumble(uint8_t large_motor, uint8_t small_motor);
      VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
@@ -3405,7 +3849,7 @@ index d1485b2..fc703fc 100644
  
      xr::Host& host_;
      const AppSettings::Vr& settings_;
-@@ -53,18 +80,40 @@ private:
+@@ -53,18 +86,40 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -3447,7 +3891,7 @@ index d1485b2..fc703fc 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..886ed9d 100644
+index d629ab3..ce1aca9 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -3478,7 +3922,7 @@ index d629ab3..886ed9d 100644
              if (app_.options.release_locks) {
                  auto lock = Row(kLoopLock, "pc_loop_lock", {"pc_extras_start"}, 0, "pc_note_loop_lock");
                  lock.action = true;
-@@ -1611,9 +1615,28 @@ public:
+@@ -1611,9 +1615,55 @@ public:
          if (page_ == kVrPage) {
              const pt::AppSettings::Vr& v = app_.settings.vr;
              pt::game::PcSettingSection vr{"pc_vr", 0, {}};
@@ -3499,6 +3943,33 @@ index d629ab3..886ed9d 100644
 +            auto recenter = Row(kVpRecenter, "pc_vp_recenter", {"pc_vp_recenter_value"}, 0, "pc_note_vp_recenter");
 +            recenter.action = true;
 +            vr.rows.push_back(std::move(recenter));
++            // Foveation (the headset's and the game's) and the sharp zone's antialiasing, together.
++            const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
++            pt::game::PcSettingSection foveation{"pc_vp_section_foveation", 1, {}};
++            foveation.rows.push_back(Row(kVpFoveation, "pc_vp_foveation", OffOn(), h.foveation ? 1 : 0, "pc_note_vp_foveation"));
++            foveation.rows.push_back(Row(kVpGameFoveation, "pc_vp_gamefov", OffOn(), h.game_foveation ? 1 : 0, "pc_note_vp_gamefov"));
++            // The game's foveation, in the order it is understood: how wide the sharp zone is, how
++            // sharp it is, how sharp the rest is, and a frame to see where it ends.
++            pt::game::PcSettingRow center = Row(kVpCenter, "pc_vp_center", {}, std::clamp((h.center_deg - 20 + 2) / 5, 0, 10), "pc_note_vp_center");
++            for (int i = 0; i <= 10; ++i) center.values.push_back(std::format("{}°", 20 + 5 * i));
++            center.wrap = false;
++            foveation.rows.push_back(std::move(center));
++            pt::game::PcSettingRow center_up = Row(kVpCenterUp, "pc_vp_center_up", {}, std::clamp((h.center_up + 20 + 1) / 2, 0, 15), "pc_note_vp_center_up");
++            for (int i = 0; i <= 15; ++i) center_up.values.push_back(std::format("{:+}°", -20 + 2 * i));
++            center_up.wrap = false;
++            foveation.rows.push_back(std::move(center_up));
++            pt::game::PcSettingRow center_res = Row(kVpCenterRes, "pc_vp_center_res", {}, std::clamp((h.center_res - 50 + 2) / 5, 0, 10), "pc_note_vp_center_res");
++            for (int i = 0; i <= 10; ++i) center_res.values.push_back(std::format("{}%", 50 + 5 * i));
++            center_res.wrap = false;
++            foveation.rows.push_back(std::move(center_res));
++            pt::game::PcSettingRow periphery = Row(kVpPeriphery, "pc_vp_periphery", {}, std::clamp((h.periphery - 10 + 2) / 5, 0, 8), "pc_note_vp_periphery");
++            for (int i = 0; i <= 8; ++i) periphery.values.push_back(std::format("{}%", 10 + 5 * i));
++            periphery.wrap = false;
++            foveation.rows.push_back(std::move(periphery));
++            foveation.rows.push_back(Row(kVpBorder, "pc_vp_border", OffOn(), h.show_border ? 1 : 0, "pc_note_vp_border"));
++            foveation.rows.push_back(Row(kVpAa, "pc_vp_aa", {"pc_vp_aa_fxaa", "pc_vp_aa_native", "pc_vp_aa_85", "pc_vp_aa_75", "pc_vp_aa_67"},
++                                         std::clamp(h.aa, 0, 4), "pc_note_vp_aa"));
++            return {std::move(vr), std::move(foveation)};
 +#else
              vr.rows.push_back(Row(kVrMode, "pc_vr_mode", OffOn(), v.enabled ? 1 : 0, "pc_note_vr_mode"));
              vr.rows.push_back(Row(kVrFlashlight, "pc_vr_flashlight", {"pc_vr_head", "pc_vr_controller"}, v.flashlight, "pc_note_vr_flashlight"));
@@ -3507,7 +3978,7 @@ index d629ab3..886ed9d 100644
              return {std::move(vr)};
          }
          if (page_ == kGraphicsPage) return GraphicsSections();
-@@ -1629,6 +1652,9 @@ public:
+@@ -1629,6 +1679,9 @@ public:
              test.rows.push_back(Row(kMicMonitor, "pc_mic_monitor", OffOn(), app_.microphone_monitor ? 1 : 0, "pc_mic_monitor_note"));
              return {std::move(test)};
          }
@@ -3517,7 +3988,7 @@ index d629ab3..886ed9d 100644
          const pt::AppSettings& s = app_.settings;
          std::vector<pt::game::PcSettingSection> out;
          pt::game::PcSettingSection display{"pc_section_display", 0, {}};
-@@ -1863,12 +1889,101 @@ public:
+@@ -1863,12 +1916,106 @@ public:
              s.vr.enabled = value == 1;
              pt::LogInfo("vr: {} at the next start (PC settings)", s.vr.enabled ? "on" : "off");
              break;
@@ -3551,10 +4022,15 @@ index d629ab3..886ed9d 100644
 +            pt::visionos::SettingChanged("fov", std::to_string(pt::visionos::Headset().fov));
 +            HeadsetCustom();
 +            return;
-+        case kVpMetalFx:
-+            pt::visionos::Headset().metalfx = value == 1;
-+            pt::visionos::SettingChanged("metalfx", value == 1 ? "1" : "0");
-+            HeadsetCustom();
++        case kVpMetalFx:  // (the old MetalFX spatial row: no longer offered)
++            return;
++        case kVpAa:
++            pt::visionos::Headset().aa = std::clamp(value, 0, 4);
++            pt::visionos::SettingChanged("aa", std::to_string(pt::visionos::Headset().aa));
++            return;
++        case kVpSceneDepth:
++            pt::visionos::Headset().scene_depth = value == 1;
++            pt::visionos::SettingChanged("scene_depth", value == 1 ? "1" : "0");
 +            return;
 +        case kVpGameFoveation:
 +            pt::visionos::Headset().game_foveation = value == 1;
@@ -3619,7 +4095,7 @@ index d629ab3..886ed9d 100644
          case kFrameLimit:
              if (!app_.options.fps_limit_override) s.display.fps_limit = value == 1 ? 60 : 30;
              break;
-@@ -1939,7 +2054,13 @@ public:
+@@ -1939,7 +2086,13 @@ public:
              std::string reason;
              pt::ApplyGraphicsPreset(s,static_cast<pt::GraphicsPreset>(std::clamp(value,0,4)),app_.scene.RayTracingSupported(reason));
              app_.textures.SetAnisotropy(s.graphics.anisotropy);
@@ -3633,7 +4109,7 @@ index d629ab3..886ed9d 100644
              break;
          }
          case kShadowQuality:
-@@ -1995,6 +2116,11 @@ public:
+@@ -1995,6 +2148,11 @@ public:
              return;
          }
          ApplyGraphicsSettings(app_);
@@ -3645,7 +4121,7 @@ index d629ab3..886ed9d 100644
          Save();
      }
  
-@@ -2197,6 +2323,9 @@ public:
+@@ -2197,6 +2355,9 @@ public:
          if (id == kGraphics) {
              page_ = kGraphicsPage;
          }
@@ -3655,16 +4131,16 @@ index d629ab3..886ed9d 100644
          if (id == kMicrophoneTest) {
              page_ = kMicrophonePage;
              app_.microphone_test = true;
-@@ -2285,6 +2414,8 @@ private:
+@@ -2285,6 +2446,8 @@ private:
          kArchive, kArchiveLock,
          kVr, kVrMode, kVrFlashlight, kVrTurn,
          kFrameLimit,
 +        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpMetalFx, kVpFov, kVpRecenter,
-+        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp,
++        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp, kVpAa, kVpSceneDepth,
          kLoopFirst = 1000,
          kRunSplitFirst = 3000,
          kModFirst = 2000,
-@@ -2572,6 +2703,9 @@ private:
+@@ -2572,6 +2735,9 @@ private:
      int page_ = kMainPage;
      static constexpr float kMouseSteps[] = {0.25f, 0.35f, 0.5f, 0.7f, 1.0f, 1.4f, 2.0f, 2.8f, 4.0f, 5.0f};
      static constexpr float kDeadZoneSteps[] = {0.0f, 0.05f, 26.0f / 255.0f, 0.15f, 0.2f, 0.25f, 0.3f};
@@ -3674,7 +4150,7 @@ index d629ab3..886ed9d 100644
  
      static pt::game::PcSettingRow Row(int id, std::string label, std::vector<std::string> values, int value, std::string note) {
          pt::game::PcSettingRow row;
-@@ -2642,6 +2776,106 @@ private:
+@@ -2642,6 +2808,85 @@ private:
          return Row(kEnhancedTextures,"pc_enhanced_textures",std::move(values),app_.settings.graphics.enhanced_textures?1:0,note);
      }
  
@@ -3691,7 +4167,8 @@ index d629ab3..886ed9d 100644
 +        auto preset = h.device_m5 ? Row(kVpPreset, "pc_vp_preset", {"Vision Pro M2", "Vision Pro M5", "pc_vp_custom"}, std::clamp(h.preset, 0, 2), "pc_note_vp_preset")
 +                                  : Row(kVpPreset, "pc_vp_preset", {"Vision Pro M2", "pc_vp_custom"}, h.preset == 0 ? 0 : 1, "pc_note_vp_preset");
 +        headset.rows.push_back(std::move(preset));
-+        headset.rows.push_back(Row(kVpFps, "pc_vp_fps", {"90 FPS", "45 FPS"}, h.target_fps == 45 ? 1 : 0, "pc_note_vp_fps"));
++        headset.rows.push_back(Row(kVpFps, "pc_vp_fps", {"pc_vp_fps_90", "pc_vp_fps_45"}, h.target_fps == 45 ? 1 : 0, "pc_note_vp_fps"));
++        headset.rows.push_back(Row(kVpSceneDepth, "pc_vp_depth", OffOn(), h.scene_depth ? 1 : 0, "pc_note_vp_depth"));
 +        pt::game::PcSettingRow scale = Row(kVpScale, "pc_vp_scale", {}, 0, "pc_note_vp_restart");
 +        for (int i = 0; i < kScaleSteps; ++i) scale.values.push_back(std::format("{}%", 50 + 5 * i));
 +        scale.value = std::clamp(static_cast<int>(std::lround((h.resolution_scale - 0.5f) / 0.05f)), 0, kScaleSteps - 1);
@@ -3701,28 +4178,6 @@ index d629ab3..886ed9d 100644
 +                                         std::clamp((h.fov - 70 + 2) / 5, 0, 6), "pc_note_vp_fov");
 +        fov.wrap = false;
 +        headset.rows.push_back(std::move(fov));
-+        headset.rows.push_back(Row(kVpFoveation, "pc_vp_foveation", OffOn(), h.foveation ? 1 : 0, "pc_note_vp_foveation"));
-+        headset.rows.push_back(Row(kVpMetalFx, "pc_vp_metalfx", OffOn(), h.metalfx ? 1 : 0, "pc_note_vp_metalfx"));
-+        headset.rows.push_back(Row(kVpGameFoveation, "pc_vp_gamefov", OffOn(), h.game_foveation ? 1 : 0, "pc_note_vp_gamefov"));
-+        // The game's foveation, in the order it is understood: how wide the sharp zone is, how
-+        // sharp it is, how sharp the rest is, and a frame to see where it ends.
-+        pt::game::PcSettingRow center = Row(kVpCenter, "pc_vp_center", {}, std::clamp((h.center_deg - 20 + 2) / 5, 0, 10), "pc_note_vp_center");
-+        for (int i = 0; i <= 10; ++i) center.values.push_back(std::format("{}°", 20 + 5 * i));
-+        center.wrap = false;
-+        headset.rows.push_back(std::move(center));
-+        pt::game::PcSettingRow center_up = Row(kVpCenterUp, "pc_vp_center_up", {}, std::clamp((h.center_up + 20 + 1) / 2, 0, 15), "pc_note_vp_center_up");
-+        for (int i = 0; i <= 15; ++i) center_up.values.push_back(std::format("{:+}°", -20 + 2 * i));
-+        center_up.wrap = false;
-+        headset.rows.push_back(std::move(center_up));
-+        pt::game::PcSettingRow center_res = Row(kVpCenterRes, "pc_vp_center_res", {}, std::clamp((h.center_res - 50 + 2) / 5, 0, 10), "pc_note_vp_center_res");
-+        for (int i = 0; i <= 10; ++i) center_res.values.push_back(std::format("{}%", 50 + 5 * i));
-+        center_res.wrap = false;
-+        headset.rows.push_back(std::move(center_res));
-+        pt::game::PcSettingRow periphery = Row(kVpPeriphery, "pc_vp_periphery", {}, std::clamp((h.periphery - 10 + 2) / 5, 0, 8), "pc_note_vp_periphery");
-+        for (int i = 0; i <= 8; ++i) periphery.values.push_back(std::format("{}%", 10 + 5 * i));
-+        periphery.wrap = false;
-+        headset.rows.push_back(std::move(periphery));
-+        headset.rows.push_back(Row(kVpBorder, "pc_vp_border", OffOn(), h.show_border ? 1 : 0, "pc_note_vp_border"));
 +        headset.rows.push_back(Row(kVpDynamicRes, "pc_vp_dynres", OffOn(), h.dynamic_resolution ? 1 : 0, "pc_note_vp_dynres"));
 +        headset.rows.push_back(Row(kVpHdr, "pc_vp_hdr", {"pc_off", "pc_vp_hdr_soft", "pc_vp_hdr_medium", "pc_vp_hdr_max"},
 +                                   h.hdr >= 200 ? 3 : h.hdr >= 170 ? 2 : h.hdr >= 140 ? 1 : 0, "pc_note_vp_hdr"));
@@ -3781,7 +4236,7 @@ index d629ab3..886ed9d 100644
      std::vector<pt::game::PcSettingSection> GraphicsSections() const {
          const auto& s=app_.settings;
          std::string reason;
-@@ -2690,7 +2924,9 @@ private:
+@@ -2690,7 +2935,9 @@ private:
      std::vector<pt::game::PcSettingSection> TextureSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection textures{"pc_section_textures",0,{}};
@@ -3791,7 +4246,7 @@ index d629ab3..886ed9d 100644
          auto anisotropy=Row(kAnisotropy,"pc_anisotropy",{"pc_off","2x","4x","8x","16x"},g.anisotropy>=16?4:g.anisotropy>=8?3:g.anisotropy>=4?2:g.anisotropy>=2?1:0,"pc_note_anisotropy");
          anisotropy.wrap=false;textures.rows.push_back(std::move(anisotropy));
          textures.rows.push_back(Row(kTextureDetail,"pc_texture_detail",{"pc_detail_reduced","pc_preset_original","pc_detail_fine"},g.texture_detail,"pc_note_texture_detail"));
-@@ -2724,6 +2960,14 @@ private:
+@@ -2724,6 +2971,14 @@ private:
      std::vector<pt::game::PcSettingSection> EffectSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection effects{"pc_graphics_effects",0,{}};
@@ -3806,7 +4261,7 @@ index d629ab3..886ed9d 100644
          effects.rows.push_back(Row(kDepthOfField,"pc_dof",OffOn(),g.depth_of_field?1:0,"pc_note_dof"));
          effects.rows.push_back(Row(kMotionBlur,"pc_motion_blur",OffOn(),g.motion_blur?1:0,"pc_note_motion_blur"));
          effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
-@@ -3095,7 +3339,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3095,7 +3350,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
      game.SetThirdPerson(app.settings.camera.third_person || options.third_person);
      pt::game::GameSound sound(game);
      std::vector<float> captured;
@@ -3816,7 +4271,7 @@ index d629ab3..886ed9d 100644
          sound.System().SetMasterVolume(app.settings.audio.volume);
          if (options.seed) {
              sound.System().SetRandomSeed(options.seed);
-@@ -3139,14 +3384,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3139,14 +3395,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
      const bool pads = app.window || options.virtual_pads;
      if (pads) {
          input.Init();
@@ -3833,7 +4288,7 @@ index d629ab3..886ed9d 100644
      script.SetPads(options.virtual_pads ? &virtual_pads : nullptr, &input);
      std::vector<float> offline_audio;
      double audio_device_time = 0.0;
-@@ -3207,7 +3452,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3207,7 +3463,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
      float accumulator = 0.0f;
      pt::Camera tick_camera_from = game.ViewCamera();
      pt::Camera motion_camera_from = tick_camera_from;
@@ -3844,7 +4299,7 @@ index d629ab3..886ed9d 100644
      TickState tick_state;
      std::vector<glm::mat4> blended_skins;
      static const bool render_trace = std::getenv("PT_RENDER_TRACE") != nullptr;
-@@ -3434,8 +3681,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3434,8 +3692,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  visible = false;
                  SDL_Delay(10);
              }
@@ -3864,7 +4319,7 @@ index d629ab3..886ed9d 100644
          const std::optional<bool> forced_focus = script.ForcedFocus(frame);
          if (app.window || forced_focus || vr) {
              const bool focused = forced_focus ? *forced_focus
-@@ -3487,6 +3744,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3487,6 +3755,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
          float dt = options.display_rate > 0.0f ? 1.0f / options.display_rate : 1.0f / options.tick_rate;
@@ -3878,7 +4333,7 @@ index d629ab3..886ed9d 100644
          if (app.window) {
              const uint64_t now = SDL_GetTicksNS();
              dt = std::clamp(static_cast<float>(now - last_ticks) * 1e-9f, 0.0001f, 0.1f);
-@@ -3554,7 +3818,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3554,7 +3829,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (polled.pointer_valid) {
              pending_input.pointer = polled.pointer;
              pending_input.pointer_valid = true;
@@ -3887,7 +4342,7 @@ index d629ab3..886ed9d 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
-@@ -3876,8 +4140,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3876,8 +4151,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
              previous_microphone_test = app.microphone_test;
          }
          const bool voice_file = !voice_input.empty();
@@ -3904,7 +4359,7 @@ index d629ab3..886ed9d 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4123,23 +4393,109 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4123,23 +4404,132 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.SetRenderExtent(stereo.render);
                  scene_builder.Build(game, stereo.head, scene_dt, lighting, light_blend);
                  last_scene_time = game.Time();
@@ -3928,6 +4383,8 @@ index d629ab3..886ed9d 100644
 +                // Each inset takes its eye's wide-view bloom and particles, left in the renderer by the
 +                // view drawn just before it (the order below).
 +                app.scene.SetVrInsetShare(stereo.inset ? stereo.inset_share : nullptr);
++                // ...and one bloom a frame, the left wide view's, for all four.
++                app.scene.SetVrBloomShare(stereo.inset ? stereo.bloom_place : nullptr);
 +                // Native HDR: the scene's light above white goes to the headset (its EDR).
 +                {
 +                    const float peak = static_cast<float>(pt::visionos::Headset().hdr) / 100.0f;
@@ -3941,6 +4398,19 @@ index d629ab3..886ed9d 100644
 +                    if (vrr.active && vrr.generation != uploaded && app.scene.SetVrrTables(vrr.tables.data(), vrr.table_width, 8)) {
 +                        uploaded = vrr.generation;
 +                    }
++                }
++#endif
++#if PT_VISIONOS
++                // Antialiasing of the sharp views: MetalFX temporal (one history per view, the wide
++                // views skip it: SceneRenderer::SetupUpscaler) or FXAA.
++                {
++                    const int aa = pt::visionos::Headset().aa;
++                    pt::UpscaleSettings& u = app.scene.upscale;
++                    u.kind = aa > 0 ? pt::UpscalerKind::MetalFx : pt::UpscalerKind::Off;
++                    u.quality = aa > 1 ? pt::UpscaleQuality::Custom : pt::UpscaleQuality::NativeAA;
++                    u.scale = pt::visionos::AaScale(aa);
++                    u.sharpness = 0.0f;
++                    u.frame_generation = pt::FrameGenKind::Off;
 +                }
 +#endif
 +                // With insets: left wide, left inset, right wide, right inset (views 0, 2, 1, 3).
@@ -3983,8 +4453,16 @@ index d629ab3..886ed9d 100644
 +                        app.scene.SetVrVrr(nullptr, {}, {}, 0);
 +                    }
 +#endif
++#if PT_VISIONOS
++                    {
++                        // Its depth beside its picture, for the compositor's reprojection.
++                        const pt::XrTarget& out = inset ? stereo.inset_targets[eye - 2] : stereo.targets[eye];
++                        if (pt::visionos::Headset().scene_depth) app.scene.SetVrDepthOut(out.depth, out.depth_view, out.extent);
++                    }
++#endif
 +                    app.scene.Render(inset ? stereo.insets[eye - 2] : stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
++                    app.scene.SetVrDepthOut(VK_NULL_HANDLE, VK_NULL_HANDLE, {});  // (not left for another render)
 +                    // The frame slots alternate over the views: the times read now are those of the view
 +                    // drawn two renders ago (with insets, the other eye's view of the same kind).
 +                    pt::visionos::ReportEye(views == 4 ? kInsetOrder[(k + 2) % 4] : eye, views, app.scene.Stats().gpu_ms, app.scene.Stats().pass_ms,
@@ -4020,7 +4498,7 @@ index d629ab3..886ed9d 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4924,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4958,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -4037,7 +4515,7 @@ index d629ab3..886ed9d 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4970,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +5004,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }
