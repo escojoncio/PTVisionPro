@@ -177,7 +177,8 @@ final class GameRunner: @unchecked Sendable {
         case "fov": s.fov = Int(value) ?? s.fov
         case "game_foveation": s.gameFoveation = flag
         case "periphery": s.periphery = Int(value) ?? s.periphery
-        case "center": s.center = Int(value) ?? s.center
+        case "center_deg": s.center = Int(value) ?? s.center
+        case "show_border": return  // a test frame, not kept
         case "center_res": s.centerResolution = Int(value) ?? s.centerResolution
         case "shadows": s.shadows = value
         case "ssao": s.ssao = flag

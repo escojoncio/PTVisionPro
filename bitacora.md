@@ -167,6 +167,25 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   píxeles que la ancha (`PrepareInsets`), así que su densidad era periferia/centro × tamaño de imagen: bajar la periferia
   bajaba también el centro (30 → centro 810x650, imagen mala); subirla pagaba centro y lados en alta (45 → 4 vistas 1214x974,
   4,7 MP, 40–47 ms, térmico serious). Coste medido ≈ 7,5 ms/MP + ~6 ms fijos por frame.
+- **Prueba build 36 (log pt (23)):** el usuario no entendía las opciones y veía nítidas las esquinas. Causas:
+  (1) `SetupEyes` acotaba `eye_factor` a ≥0,2 y `EyeFactor` permitía 0,15 → con periferia 15 las imágenes de ojo se rehacían
+  cada ~0,45 s (582 veces; tirones, 16–31 fps). (2) "Tamaño del centro" era % de la TANGENTE media del campo: 60–80 % cubría
+  casi toda la vista (centro 1620x1302–1892x1520 por ojo, ~10x los píxeles de la periferia 540x434; inset ~11 de 15 ms/ojo).
+- **Build 37 (pendiente de run):**
+  - .mm: `SetupEyes` acota `eye_factor` a 0,1–1; `EyeFactor` 0,10–0,50. `CenterTangent(h)` = tan(`center_deg`/2);
+    `Host::InsetWanted` devuelve esa semianchura (tangente). `VrrCenterFraction()` = tan/1,2 en 0,2–0,8 (VRR apagado).
+    Marco de prueba: `Uniforms.color` en el dibujo del inset si `show_border`; `inset_fragment` pinta un aro rojo opaco a mitad
+    del fundido (`0.5 * pad.y` desde el borde).
+  - `HeadsetSettings`: `center` → `center_deg` (20–70°, def. 40, `PT_VP_CENTER_DEG`), periferia 10–50 (def. 20), `show_border`.
+  - vr_play `PrepareInsets`: `tan_y = center / aspect` (alto en proporción), resto igual. Log
+    `vr: sharp zone AxB degrees drawn at WxH (Dx the periphery's density), periphery WxH for the whole view`.
+  - main.cpp menú: orden Foveado del juego → Ancho de la zona nítida (20–70°) → Nitidez de la zona nítida (50–100 %) →
+    Nitidez de la periferia (10–50 %) → Mostrar borde (`kVpBorder`, no se guarda). pc_settings.cpp: textos nuevos y renombrados
+    ("Tamaño de imagen (resolución base)", "Foveado del visor (Apple)", "Campo de visión dibujado").
+  - Launcher: sección propia `foveationSection`; `center` con clave `sharpZoneDegrees` (no arrastra el % antiguo), periferia
+    10–50 acotada al leer; `center_deg`/`show_border` desde el juego.
+  - Revisión adversarial (Sonnet): sin fallos graves; aplicados acotado de periferia guardada y marco a mitad del fundido.
+  - Esperado (40°, 100 %, periferia 20 %): zona nítida ~722x580 por ojo + periferia 540x434 → ~1,3 MP/frame.
 - **Prueba build 35 (log pt (22)): no arranca** (`shader .../light_all.frag.spv not found` → `pipeline creation failed`, exit 1).
   Causa: el parche se regeneró con `git diff` sin `git add -N`, y `shaders/light_all.frag` (fichero NUEVO del parche) se perdió.
   Arreglo (build 36, run 40: OK → `releases/download/build-40/PTVisionPro-40.ipa`, 130 .spv incluido `light_all.frag.spv`): bloque `new file` de `light_all.frag` restaurado tal cual en `patches/0001-visionos-menus.patch`; aviso en el
