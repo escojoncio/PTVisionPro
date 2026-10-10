@@ -167,7 +167,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   píxeles que la ancha (`PrepareInsets`), así que su densidad era periferia/centro × tamaño de imagen: bajar la periferia
   bajaba también el centro (30 → centro 810x650, imagen mala); subirla pagaba centro y lados en alta (45 → 4 vistas 1214x974,
   4,7 MP, 40–47 ms, térmico serious). Coste medido ≈ 7,5 ms/MP + ~6 ms fijos por frame.
-- **Build 35 (pendiente de run): centro con densidad propia (quad views de verdad).**
+- **Build 35 (run 39): OK** → `releases/download/build-39/PTVisionPro-39.ipa` (sin probar). **Centro con densidad propia (quad views de verdad).**
   - `Renderer` (renderer.h/.cpp): dos juegos de objetivos (`scene_color_`, `final_`, `output_`, `composite_set_`, `final_set_`,
     `output_ready_`, `final_ready_`) intercambiados con `UseTargetSet(int)` (`TargetStash`, `SwapTargetStash`); pool de
     composición a 4 sets; `ReleaseTargetSet()`; `SetGrainNoise` escribe los dos; `Shutdown` libera ambos.
