@@ -54,10 +54,13 @@ struct PTSettings: Codable, Equatable {
     var metalFX = false
     /// The game's own foveation: a wide low-density view of each eye and its centre on top.
     var gameFoveation = true
-    /// Density of the wide view, percent of the image size (30 to 70).
-    var periphery = 45
-    /// Size of the sharp centre, percent of the eye's field of view across (30 to 60).
+    /// Density of the wide view around the centre, percent of the image size (15 to 60).
+    var periphery = 25
+    /// Size of the sharp centre, percent of the eye's field of view across (30 to 80).
     var center = 45
+    /// Density of the sharp centre, percent of the image size (50 to 100), on its own: the
+    /// periphery no longer changes it.
+    var centerResolution = 100
     /// Sharpening of the picture on its way to the headset, 0 to 1.
     var sharpen: Double = 0.3
 
@@ -237,7 +240,10 @@ struct PTSettings: Codable, Equatable {
         case ssao, bloom, reflections, anisotropy, foveation
         // A new key: the old one held the earlier, SDR-stretching HDR's choice.
         case hdr = "nativeHdr"
-        case compositorQuality, metalFX, sharpen, gameFoveation, periphery, center
+        // A new key for the periphery: it used to set the centre's sharpness too (now
+        // centerResolution), so the earlier choice does not carry over.
+        case periphery = "peripheryDensity"
+        case compositorQuality, metalFX, sharpen, gameFoveation, center, centerResolution
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -265,6 +271,7 @@ struct PTSettings: Codable, Equatable {
         gameFoveation = (try? c.decodeIfPresent(Bool.self, forKey: .gameFoveation)) ?? base.gameFoveation
         periphery = (try? c.decodeIfPresent(Int.self, forKey: .periphery)) ?? base.periphery
         center = (try? c.decodeIfPresent(Int.self, forKey: .center)) ?? base.center
+        centerResolution = (try? c.decodeIfPresent(Int.self, forKey: .centerResolution)) ?? base.centerResolution
         sharpen = (try? c.decodeIfPresent(Double.self, forKey: .sharpen)) ?? base.sharpen
         turnMode = (try? c.decodeIfPresent(Int.self, forKey: .turnMode)) ?? base.turnMode
         snapDegrees = (try? c.decodeIfPresent(Int.self, forKey: .snapDegrees)) ?? base.snapDegrees
@@ -314,6 +321,7 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_GAME_FOVEATION=\(flag(gameFoveation))",
             "PT_VP_PERIPHERY=\(periphery)",
             "PT_VP_CENTER=\(center)",
+            "PT_VP_CENTER_RES=\(centerResolution)",
             "PT_VP_SHARPEN=\(String(format: "%.1f", sharpen))",
             "PT_VP_TURN=\(turnMode)",
             "PT_VP_SNAP_DEGREES=\(snapDegrees)",
