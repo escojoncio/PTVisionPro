@@ -178,6 +178,7 @@ final class GameRunner: @unchecked Sendable {
         case "game_foveation": s.gameFoveation = flag
         case "periphery": s.periphery = Int(value) ?? s.periphery
         case "center": s.center = Int(value) ?? s.center
+        case "center_res": s.centerResolution = Int(value) ?? s.centerResolution
         case "shadows": s.shadows = value
         case "ssao": s.ssao = flag
         case "bloom": s.bloom = flag

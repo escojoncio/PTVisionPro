@@ -158,18 +158,22 @@ struct SettingsView: View {
             Toggle(L("Escalado MetalFX", "MetalFX upscaling"), isOn: bool(\.metalFX))
             Toggle(L("Foveado del juego", "Game foveation"), isOn: bool(\.gameFoveation))
             LabeledContent(L("Calidad de la periferia", "Periphery quality")) {
-                Stepper("\(model.settings.periphery) %", value: int(\.periphery), in: 30...70, step: 5)
+                Stepper("\(model.settings.periphery) %", value: int(\.periphery), in: 15...60, step: 5)
             }
             .disabled(!model.settings.gameFoveation)
-            LabeledContent(L("Centro nítido", "Sharp centre")) {
+            LabeledContent(L("Resolución del centro", "Centre resolution")) {
+                Stepper("\(model.settings.centerResolution) %", value: int(\.centerResolution), in: 50...100, step: 5)
+            }
+            .disabled(!model.settings.gameFoveation)
+            LabeledContent(L("Tamaño del centro nítido", "Sharp centre size")) {
                 Stepper("\(model.settings.center) %", value: int(\.center), in: 30...80, step: 5)
             }
             .disabled(!model.settings.gameFoveation)
         } header: {
             Text(L("Visor", "Headset"))
         } footer: {
-            Text(L("Foveado: máxima nitidez donde miras y menos detalle alrededor. Calidad del visor (con foveado): la resolución de las imágenes que compone el visor; más alta es más nítida pero usa más memoria, y el juego dibuja a partir de ella (la escala de resolución es relativa a esta). MetalFX: cada ojo se dibuja al tamaño de imagen y se amplía con nitidez a la resolución del visor (útil por debajo del 100 %). Foveado del juego: cada ojo se dibuja entero a baja resolución (calidad de la periferia) y su centro otra vez con detalle (centro nítido); muchos menos píxeles con la misma nitidez donde miras.",
-                   "Foveation: sharpest where you look, less detail around it. Headset render quality (with foveation): the resolution of the pictures the headset composes; higher is sharper but uses more memory, and the game draws from it (the resolution scale is relative to it). MetalFX: each eye is drawn at the image size and enlarged sharply to the headset's resolution (useful below 100 %). Game foveation: each eye is drawn whole at a low resolution (periphery quality) and its centre again in detail (sharp centre); far fewer pixels, as sharp where you look."))
+            Text(L("Foveado: máxima nitidez donde miras y menos detalle alrededor. Calidad del visor (con foveado): la resolución de las imágenes que compone el visor; más alta es más nítida pero usa más memoria, y el juego dibuja a partir de ella (la escala de resolución es relativa a esta). MetalFX: cada ojo se dibuja al tamaño de imagen y se amplía con nitidez a la resolución del visor (útil por debajo del 100 %). Foveado del juego: cada ojo se dibuja entero a baja resolución (calidad de la periferia) y su centro otra vez con detalle; la resolución del centro y la de la periferia son independientes, y el tamaño del centro decide cuánto de la vista es nítido (más grande cuesta más).",
+                   "Foveation: sharpest where you look, less detail around it. Headset render quality (with foveation): the resolution of the pictures the headset composes; higher is sharper but uses more memory, and the game draws from it (the resolution scale is relative to it). MetalFX: each eye is drawn at the image size and enlarged sharply to the headset's resolution (useful below 100 %). Game foveation: each eye is drawn whole at a low resolution (periphery quality) and its centre again in detail; the centre's and the periphery's resolutions are independent, and the centre's size decides how much of the view is sharp (larger costs more)."))
         }
     }
 

@@ -71,73 +71,6 @@ index 669c207..1395df9 100644
 +    // The alpha carries a headset's HDR gain (screen_fx.frag; 1 = none): a fade takes it to none.
 +    out_color = vec4(mix(color, params.fade.rgb, params.fade.a), mix(texture(scene_color, in_uv).a, 1.0, params.fade.a));
  }
-diff --git a/shaders/light_all.frag b/shaders/light_all.frag
-new file mode 100644
-index 0000000..b23d12b
---- /dev/null
-+++ b/shaders/light_all.frag
-@@ -0,0 +1,61 @@
-+#version 460
-+// All of a view's lights in one full-screen pass (the deferred lights without their volumes):
-+// the G-buffer is read once per pixel instead of once per light, and the light targets are
-+// written once. Each light is the same EvaluateLight as light.frag's; a light whose volume would
-+// not have covered the pixel gives nothing there (out of range, outside its area box), so the sum
-+// is the one the volumes add up.
-+#include "common.glsl"
-+#include "lighting.glsl"
-+
-+layout(push_constant) uniform PassPush {
-+    uvec4 ids;  // view, light count (up to 32), lights drawn in this view (bit per light), shadowed ones
-+    vec4 f0;
-+    vec4 f1;
-+    vec4 f2;
-+    mat4 m;
-+} pass;
-+
-+layout(location = 0) out vec4 out_diffuse;
-+layout(location = 1) out vec4 out_specular;
-+
-+void main() {
-+    View v = frame.views[pass.ids.x];
-+    ivec2 pixel = ivec2(gl_FragCoord.xy);
-+    float depth = ImgFetch(IMG_DEPTH, pixel).x;
-+    if (depth <= 0.0) {
-+        discard;
-+    }
-+    Surface s;
-+    s.P = ViewPosition(v, PixelNdc(v, gl_FragCoord.xy), depth);
-+    s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
-+    vec4 g_normal = ImgFetch(IMG_NORMAL, pixel);
-+    vec4 g_material = ImgFetch(IMG_MATERIAL, pixel);
-+    s.N = DecodeNormal(g_normal.xyz);
-+    s.roughness = g_material.x;
-+    s.specular = g_material.y;
-+    s.material_u = g_material.z;
-+    s.translucency = g_material.w;
-+    vec3 diffuse_sum = vec3(0.0);
-+    vec3 specular_sum = vec3(0.0);
-+    float lit = 0.0;
-+    uint count = min(pass.ids.y, 32u);
-+    for (uint i = 0u; i < count; ++i) {
-+        uint bit = 1u << i;
-+        if ((pass.ids.z & bit) == 0u) {
-+            continue;
-+        }
-+        vec3 diffuse;
-+        vec3 specular;
-+        if (EvaluateLight(frame.lights[i], v, s, (pass.ids.w & bit) != 0u, gl_FragCoord.xy, diffuse, specular)) {
-+            diffuse_sum += diffuse;
-+            specular_sum += specular;
-+            lit += 1.0;
-+        }
-+    }
-+    if (lit == 0.0) {
-+        discard;
-+    }
-+    // (The additive blend leaves the targets' alpha as it was.)
-+    out_diffuse = vec4(diffuse_sum, 1.0);
-+    out_specular = vec4(specular_sum, 1.0);
-+}
 diff --git a/shaders/light_main.glsl b/shaders/light_main.glsl
 index 66d5d0c..0207546 100644
 --- a/shaders/light_main.glsl
@@ -577,10 +510,94 @@ index 7486360..618420f 100644
  void EndLabel(VkCommandBuffer cmd);
  
 diff --git a/src/engine/render/renderer.cpp b/src/engine/render/renderer.cpp
-index 01f4500..afeb35e 100644
+index 01f4500..33cccaf 100644
 --- a/src/engine/render/renderer.cpp
 +++ b/src/engine/render/renderer.cpp
-@@ -752,7 +752,9 @@ void Renderer::CopyToXr(VkCommandBuffer cmd, VkDescriptorSet set, const XrTarget
+@@ -168,7 +168,7 @@ bool Renderer::CreateTargets(uint32_t width, uint32_t height) {
+ }
+ 
+ void Renderer::WriteCompositeSets() {
+-    if (!composite_set_ || !final_set_) {
++    if (!composite_set_ || !final_set_ || !scene_color_.view || !final_.view) {
+         return;
+     }
+     const VkImageView noise = grain_noise_ ? grain_noise_ : scene_color_.view;
+@@ -195,6 +195,36 @@ void Renderer::SetGrainNoise(VkImageView view) {
+     vkDeviceWaitIdle(ctx_.device);
+     grain_noise_ = view;
+     WriteCompositeSets();
++    // (And the other target set's sets, when it has targets.)
++    SwapTargetStash();
++    WriteCompositeSets();
++    SwapTargetStash();
++}
++
++void Renderer::SwapTargetStash() {
++    std::swap(scene_color_, stash_.scene_color);
++    std::swap(final_, stash_.final_image);
++    std::swap(output_, stash_.output);
++    std::swap(composite_set_, stash_.composite_set);
++    std::swap(final_set_, stash_.final_set);
++    std::swap(output_ready_, stash_.output_ready);
++    std::swap(final_ready_, stash_.final_ready);
++}
++
++void Renderer::UseTargetSet(int set) {
++    set = set != 0 ? 1 : 0;
++    if (set == active_set_ || !stash_.composite_set) return;
++    SwapTargetStash();
++    active_set_ = set;
++}
++
++void Renderer::ReleaseTargetSet() {
++    UseTargetSet(0);
++    if (!stash_.scene_color.image && !stash_.final_image.image) return;
++    vkDeviceWaitIdle(ctx_.device);
++    SwapTargetStash();
++    DestroyTargets();
++    SwapTargetStash();
+ }
+ 
+ void Renderer::DestroyTargets() {
+@@ -210,21 +240,24 @@ bool Renderer::CreateCompositePipeline(VkFormat output_format) {
+     set_info.bindingCount = 2;
+     set_info.pBindings = bindings;
+     vkCreateDescriptorSetLayout(ctx_.device, &set_info, nullptr, &composite_set_layout_);
+-    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4};
++    // Two sets per target set (UseTargetSet).
++    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8};
+     VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+-    pool_info.maxSets = 2;
++    pool_info.maxSets = 4;
+     pool_info.poolSizeCount = 1;
+     pool_info.pPoolSizes = &pool_size;
+     vkCreateDescriptorPool(ctx_.device, &pool_info, nullptr, &composite_pool_);
+-    const VkDescriptorSetLayout layouts[2] = {composite_set_layout_, composite_set_layout_};
+-    VkDescriptorSet sets[2] = {};
++    const VkDescriptorSetLayout layouts[4] = {composite_set_layout_, composite_set_layout_, composite_set_layout_, composite_set_layout_};
++    VkDescriptorSet sets[4] = {};
+     VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+     alloc.descriptorPool = composite_pool_;
+-    alloc.descriptorSetCount = 2;
++    alloc.descriptorSetCount = 4;
+     alloc.pSetLayouts = layouts;
+     vkAllocateDescriptorSets(ctx_.device, &alloc, sets);
+     composite_set_ = sets[0];
+     final_set_ = sets[1];
++    stash_.composite_set = sets[2];
++    stash_.final_set = sets[3];
+     WriteCompositeSets();
+ 
+     VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64};
+@@ -308,6 +341,7 @@ void Renderer::Shutdown() {
+     vkDestroyDescriptorSetLayout(ctx_.device, composite_set_layout_, nullptr);
+     vkDestroySampler(ctx_.device, linear_sampler_, nullptr);
+     vkDestroySampler(ctx_.device, wrap_sampler_, nullptr);
++    ReleaseTargetSet();
+     DestroyTargets();
+     for (Frame& frame : frames_) {
+         vkDestroyFence(ctx_.device, frame.in_flight, nullptr);
+@@ -752,7 +786,9 @@ void Renderer::CopyToXr(VkCommandBuffer cmd, VkDescriptorSet set, const XrTarget
                               ? (static_cast<float>(target.extent.width) / static_cast<float>(target.extent.height)) / (16.0f / 9.0f)
                               : 1.0f;
      const float push[16] = {target.rect.x, target.rect.y, target.rect.z, target.rect.w,
@@ -592,7 +609,7 @@ index 01f4500..afeb35e 100644
                              grain_offset[0], grain_offset[1], across, 0.0f};
      vkCmdPushConstants(cmd, xr_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
 diff --git a/src/engine/render/renderer.h b/src/engine/render/renderer.h
-index 9bb3b5d..c4444bd 100644
+index 9bb3b5d..bf6d173 100644
 --- a/src/engine/render/renderer.h
 +++ b/src/engine/render/renderer.h
 @@ -56,6 +56,8 @@ public:
@@ -604,8 +621,38 @@ index 9bb3b5d..c4444bd 100644
      float fade[4] = {0.0f, 0.0f, 0.0f, 0.0f};
      float grain[4] = {0.0f, 0.0f, 0.0f, 0.0f};
      float grain_offset[2] = {0.0f, 0.0f};
+@@ -65,6 +67,10 @@ public:
+     void SetGrainNoise(VkImageView view);
+ 
+     void SetRenderExtent(VkExtent2D extent) { render_extent_ = extent; }
++    // Two sets of frame targets, each at its own render extent (a headset's wide views and their
++    // insets, SceneRenderer::UseTargetSet): chosen before BeginFrame. Set 0 is the usual one.
++    void UseTargetSet(int set);
++    void ReleaseTargetSet();
+     void SetXrFrame(const XrFrame& frame) { xr_frame_ = frame; xr_pending_ = true; }
+     static constexpr VkExtent2D kHudExtent{1920, 1080};
+ 
+@@ -114,6 +120,18 @@ private:
+     VkPipeline composite_pipeline_ = VK_NULL_HANDLE;
+ 
+     VkExtent2D render_extent_{0, 0};
++    struct TargetStash {
++        vk::Image scene_color;
++        vk::Image final_image;
++        vk::Image output;
++        VkDescriptorSet composite_set = VK_NULL_HANDLE;
++        VkDescriptorSet final_set = VK_NULL_HANDLE;
++        bool output_ready = false;
++        bool final_ready = false;
++    };
++    TargetStash stash_;
++    int active_set_ = 0;
++    void SwapTargetStash();
+     bool presenting_ = false;
+     XrFrame xr_frame_;
+     bool xr_pending_ = false;
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..cea7933 100644
+index 40d339d..8200592 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -306,7 +306,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -1183,7 +1230,7 @@ index 40d339d..cea7933 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +2128,67 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +2128,82 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -1192,7 +1239,10 @@ index 40d339d..cea7933 100644
 +    // them again: smoke, dust and mist at the wide view's density, which is what drawing them at
 +    // half resolution (the usual way) would give. They are kept in particles_kept_ in between
 +    // (the inset's forward pass draws its transparent surfaces into particles_).
-+    const bool reuse = InsetShares(shared_particles_frame_) && particles_kept_.Valid();
++    // (The wide view's particles_kept_ is in the other target set when the insets have their own:
++    // UseTargetSet. Then it has the wide view's size and is scaled into this one.)
++    RenderTarget& kept = active_set_ == 0 && stash_.particles_kept.Valid() ? stash_.particles_kept : particles_kept_;
++    const bool reuse = InsetShares(shared_particles_frame_) && kept.Valid();
 +    uint32_t recorded = 0;
 +    VkImageCopy copy{};
 +    copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -1202,10 +1252,22 @@ index 40d339d..cea7933 100644
 +        recorded = shared_particles_drawn_[vr_eye_ - 2] ? 1u : 0u;
 +        if (recorded > 0) {
 +            BeginLabel(cmd, "particles shared");
-+            UseTargets(cmd, {{&particles_kept_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&particles_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
-+            vkCmdCopyImage(cmd, particles_kept_.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, particles_.image.image,
-+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-+            UseTargets(cmd, {{&particles_kept_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&particles_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++            UseTargets(cmd, {{&kept, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&particles_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
++            const VkExtent2D from = kept.Extent();
++            if (from.width == extent_.width && from.height == extent_.height) {
++                vkCmdCopyImage(cmd, kept.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, particles_.image.image,
++                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
++            } else {
++                // The whole image onto the whole image: the composite reads it by uv (SharePlace).
++                VkImageBlit blit{};
++                blit.srcSubresource = copy.srcSubresource;
++                blit.dstSubresource = copy.dstSubresource;
++                blit.srcOffsets[1] = {static_cast<int32_t>(from.width), static_cast<int32_t>(from.height), 1};
++                blit.dstOffsets[1] = {static_cast<int32_t>(extent_.width), static_cast<int32_t>(extent_.height), 1};
++                vkCmdBlitImage(cmd, kept.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, particles_.image.image,
++                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
++            }
++            UseTargets(cmd, {{&kept, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&particles_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
 +            EndLabel(cmd);
 +        }
 +    } else {
@@ -1252,7 +1314,7 @@ index 40d339d..cea7933 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +2200,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +2215,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -1260,7 +1322,7 @@ index 40d339d..cea7933 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +2211,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +2226,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -1300,7 +1362,7 @@ index 40d339d..cea7933 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +2236,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2251,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -1308,7 +1370,7 @@ index 40d339d..cea7933 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -2099,9 +2492,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2507,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -1323,7 +1385,7 @@ index 40d339d..cea7933 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2505,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2520,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -1332,7 +1394,7 @@ index 40d339d..cea7933 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2530,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2545,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -1349,7 +1411,7 @@ index 40d339d..cea7933 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,6 +2547,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,6 +2562,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -1357,7 +1419,7 @@ index 40d339d..cea7933 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      if (main_view && up_.enabled) {
          RecordOpaqueSnapshot(cmd, output);
-@@ -2181,6 +2582,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2597,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -1365,7 +1427,7 @@ index 40d339d..cea7933 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2640,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2655,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -1378,7 +1440,7 @@ index 40d339d..cea7933 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2657,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2672,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -1394,7 +1456,19 @@ index 40d339d..cea7933 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2325,15 +2742,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2260,6 +2692,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+         return;
+     }
+     FrameSlot& slot = slots_[renderer_->FrameIndex()];
++    // Its descriptors at this target set's images (UseTargetSet); the slot's fence has passed, so
++    // nothing in flight reads them.
++    if (slot.bound_set != active_set_) {
++        WriteImageDescriptors(static_cast<int>(renderer_->FrameIndex()));
++    }
+     textures_->FlushMaterials();
+     textures_->ReportCounts("scene");
+     if (has_last_eye_ && glm::distance(camera.position, last_eye_) > kCameraCutDistance) {
+@@ -2325,15 +2762,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          SettleExposure(lighting_->exposure);
      }
      VkCommandBuffer cmd = renderer_->Cmd();
@@ -1473,7 +1547,7 @@ index 40d339d..cea7933 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2455,14 +2934,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2455,14 +2954,21 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          EndLabel(cmd);
      }
      Stamp(cmd, 6);
@@ -1671,7 +1745,7 @@ index 19dd1a8..7af5170 100644
      const float step = std::clamp(interval, 1.0e-4f, 1.0f);
      frame_time_ = reference ? static_cast<double>(step) : static_cast<double>(step * 0.016666668f) + frame_time_ * 0.9833333333333333;
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..35cf177 100644
+index 1f96981..5284700 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
 @@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
@@ -1721,7 +1795,14 @@ index 1f96981..35cf177 100644
                           &reflect_colour_, &kawase_, &bloom_add_, &kawase_sum_, &gaussian_, &tonemap_, &fxaa_, &dof_ratio_, &dof_down_, &dof_blur_, &dof_blend_,
                           &mb_velocity_, &mb_tile_pipeline_, &mb_bake_pipeline_, &mb_mcguire_, &mb_composite_, &velocity_pipeline_, &fsblur_,
                           &banding_, &screen_fx_, &debug_, &occlusion_, &occlusion_blur_, &reflect_make_, &reflect_blend_, &vfx_composite_,
-@@ -545,7 +560,7 @@ void SceneRenderer::Shutdown() {
+@@ -539,13 +554,14 @@ void SceneRenderer::Shutdown() {
+         }
+     }
+     DestroyPipelines();
++    ReleaseTargetSet();
+     DestroyTargets();
+     ctx.DestroyBuffer(dump_compose_);
+     ctx.DestroyBuffer(dump_forward_);
      ctx.DestroyBuffer(dump_scene_);
      ctx.DestroyBuffer(dump_mirror_);
      ctx.DestroyImage(shadow_.image);
@@ -1730,7 +1811,7 @@ index 1f96981..35cf177 100644
      for (vk::Image* image : images) {
          ctx.DestroyImage(*image);
      }
-@@ -555,6 +570,7 @@ void SceneRenderer::Shutdown() {
+@@ -555,6 +571,7 @@ void SceneRenderer::Shutdown() {
          ctx.DestroyBuffer(slot.luminance);
          vkDestroyQueryPool(device_, slot.queries, nullptr);
          vkDestroyQueryPool(device_, slot.upscale_queries, nullptr);
@@ -1738,18 +1819,55 @@ index 1f96981..35cf177 100644
      }
      vkDestroyPipelineLayout(device_, layout_, nullptr);
      vkDestroyDescriptorPool(device_, pool_, nullptr);
-@@ -576,7 +592,7 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
- void SceneRenderer::DestroyTargets() {
+@@ -573,10 +590,16 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
+     return renderer_->Context().CreateImage(target.image, format, {std::max(extent.width, 1u), std::max(extent.height, 1u), 1}, usage, 1, 1, aspect);
+ }
+ 
+-void SceneRenderer::DestroyTargets() {
++void SceneRenderer::DestroyTargets(bool shared) {
      vk::Context& ctx = renderer_->Context();
-     RenderTarget* targets[] = {&albedo_, &normal_, &material_, &depth_, &diffuse_, &specular_, &probe_acc_, &hdr_, &bloom_[0], &bloom_[1], &bloom_[2],
+-    RenderTarget* targets[] = {&albedo_, &normal_, &material_, &depth_, &diffuse_, &specular_, &probe_acc_, &hdr_, &bloom_[0], &bloom_[1], &bloom_[2],
 -                               &flare_, &ldr_[0], &ldr_[1], &history_, &mirror_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
++    if (shared) {
++        for (RenderTarget& t : bloom_) {
++            ctx.DestroyImage(t.image);
++            t = RenderTarget{};
++        }
++    }
++    RenderTarget* targets[] = {&albedo_, &normal_, &material_, &depth_, &diffuse_, &specular_, &probe_acc_, &hdr_,
 +                               &flare_, &particles_kept_, &ldr_[0], &ldr_[1], &history_, &mirror_, &ao_[0], &ao_[1], &refmap_, &hdr_copy_, &particles_, &dof_half_,
                                 &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_,
                                 &mb_tile_[0], &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_,
                                 &mb_blur_[0], &mb_blur_[1], &mirror_history_, &mirror_temporal_, &reflect_layer_, &reflect_offset_,
-@@ -612,6 +628,9 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -587,12 +610,15 @@ void SceneRenderer::DestroyTargets() {
+     }
+     ctx.DestroyImage(refmap_color_.image);
+     refmap_color_ = RenderTarget{};
+-    sss_.DestroyTargets();
+-    for (RenderTarget& t : rt_ao_images_) {
+-        ctx.DestroyImage(t.image);
+-        t = RenderTarget{};
++    // The SSS and ray-traced AO targets are set 0's (UseTargetSet): set 1 is the low-detail wide views.
++    if (active_set_ == 0) {
++        sss_.DestroyTargets();
++        for (RenderTarget& t : rt_ao_images_) {
++            ctx.DestroyImage(t.image);
++            t = RenderTarget{};
++        }
++        rt_ao_history_ = false;
+     }
+-    rt_ao_history_ = false;
+     mirror_history_valid_ = false;
+     mirror_history_size_ = 0;
+     reflect_history_valid_ = false;
+@@ -610,13 +636,33 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+         return true;
+     }
      vkDeviceWaitIdle(device_);
-     DestroyTargets();
+-    DestroyTargets();
++    // (The shared bloom stays when it already has the size this set wants: both sets have the same
++    // proportions, so it is made once.)
++    DestroyTargets(false);
      mirror_stale_.valid = false;
 +    flare_clean_ = false;
 +    shared_bloom_frame_[0] = shared_bloom_frame_[1] = ~0u;
@@ -1757,7 +1875,27 @@ index 1f96981..35cf177 100644
      const VkImageUsageFlags color = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
      const VkImageUsageFlags dumped = color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      const uint32_t bloom_width = std::max(1u, static_cast<uint32_t>(std::lround(270.0 * output.width / std::max(output.height, 1u))));
-@@ -626,11 +645,13 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+     const VkExtent2D quarter{bloom_width, 270u};
+     const VkImageAspectFlags c = VK_IMAGE_ASPECT_COLOR_BIT;
++    auto ensure_bloom = [&] {
++        bool same = true;
++        for (const RenderTarget& t : bloom_) {
++            // (A pixel or two of difference in width between the sets' proportions keeps it.)
++            const int dw = static_cast<int>(t.Extent().width) - static_cast<int>(quarter.width);
++            same = same && t.Valid() && dw >= -2 && dw <= 2 && t.Extent().height == quarter.height;
++        }
++        if (same) return true;
++        for (RenderTarget& t : bloom_) {
++            renderer_->Context().DestroyImage(t.image);
++            t = RenderTarget{};
++        }
++        return CreateTarget(bloom_[0], kBloomFormat, quarter, color, c) && CreateTarget(bloom_[1], kBloomFormat, quarter, color, c) &&
++               CreateTarget(bloom_[2], kBloomFormat, quarter, color, c);
++    };
+     bool ok = CreateTarget(albedo_, kAlbedoFormat, extent, dumped, c) && CreateTarget(normal_, kNormalFormat, extent, dumped, c) &&
+               CreateTarget(material_, kMaterialFormat, extent, dumped, c) &&
+               CreateTarget(depth_, kDepthFormat, extent,
+@@ -626,11 +672,12 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
                CreateTarget(probe_acc_, kLightFormat, extent, dumped, c) &&
                CreateTarget(hdr_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(hdr_copy_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
@@ -1766,14 +1904,22 @@ index 1f96981..35cf177 100644
 +              CreateTarget(particles_kept_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
                CreateTarget(refmap_, kRefMapFormat, extent, color, c) &&
                CreateTarget(mirror_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
-               CreateTarget(bloom_[0], kBloomFormat, quarter, color, c) && CreateTarget(bloom_[1], kBloomFormat, quarter, color, c) &&
+-              CreateTarget(bloom_[0], kBloomFormat, quarter, color, c) && CreateTarget(bloom_[1], kBloomFormat, quarter, color, c) &&
 -              CreateTarget(bloom_[2], kBloomFormat, quarter, color, c) && CreateTarget(flare_, kPostFormat, output, color, c) &&
-+              CreateTarget(bloom_[2], kBloomFormat, quarter, color, c) &&
++              ensure_bloom() &&
 +              CreateTarget(flare_, kPostFormat, output, color, c) &&
                CreateTarget(ldr_[0], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(ldr_[1], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(history_, kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
-@@ -664,7 +685,7 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -657,14 +704,14 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+                  CreateTarget(reflect_history_[0], kHdrFormat, extent, color, c) &&
+                  CreateTarget(reflect_history_[1], kHdrFormat, extent, color, c)));
+     ok = ok && (!rt_ || CreateTarget(refmap_color_, kRefMapFormat, extent, color, c));
+-    ok = ok && (!sss_ready_ || sss_.CreateTargets(extent));
++    ok = ok && (!sss_ready_ || active_set_ != 0 || sss_.CreateTargets(extent));
+     if (!ok) {
+         LogError("scene renderer: cannot create render targets {}x{}", extent.width, extent.height);
+         return false;
      }
      renderer_->Context().Submit([&](VkCommandBuffer cmd) {
          RenderTarget* colors[] = {&albedo_, &normal_, &material_, &diffuse_, &specular_, &probe_acc_, &hdr_, &mirror_, &bloom_[0], &bloom_[1], &bloom_[2],
@@ -1782,7 +1928,101 @@ index 1f96981..35cf177 100644
                                    &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_, &mb_tile_[0],
                                    &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_, &mb_blur_[0],
                                    &mb_blur_[1]};
-@@ -773,6 +794,7 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -708,7 +755,92 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+     return true;
+ }
+ 
+-void SceneRenderer::WriteImageDescriptors() {
++void SceneRenderer::SwapTargetStash() {
++    TargetStash& s = stash_;
++    std::swap(extent_, s.extent);
++    std::swap(output_extent_, s.output_extent);
++    std::swap(targets_upscaled_, s.targets_upscaled);
++    std::swap(albedo_, s.albedo);
++    std::swap(normal_, s.normal);
++    std::swap(material_, s.material);
++    std::swap(depth_, s.depth);
++    std::swap(diffuse_, s.diffuse);
++    std::swap(specular_, s.specular);
++    std::swap(probe_acc_, s.probe_acc);
++    std::swap(hdr_, s.hdr);
++    std::swap(flare_, s.flare);
++    std::swap(particles_kept_, s.particles_kept);
++    for (int i = 0; i < 2; ++i) {
++        std::swap(ldr_[i], s.ldr[i]);
++        std::swap(dof_quarter_[i], s.dof_quarter[i]);
++        std::swap(dof_eighth_[i], s.dof_eighth[i]);
++        std::swap(mb_blur_[i], s.mb_blur[i]);
++        std::swap(reflect_history_[i], s.reflect_history[i]);
++        std::swap(ao_[i], s.ao[i]);
++    }
++    for (int i = 0; i < 5; ++i) std::swap(mb_tile_[i], s.mb_tile[i]);
++    std::swap(history_, s.history);
++    std::swap(dof_half_, s.dof_half);
++    std::swap(velocity_, s.velocity);
++    std::swap(object_velocity_, s.object_velocity);
++    std::swap(mb_neighbour_, s.mb_neighbour);
++    std::swap(mb_bake_, s.mb_bake);
++    std::swap(mirror_, s.mirror);
++    std::swap(mirror_history_, s.mirror_history);
++    std::swap(mirror_temporal_, s.mirror_temporal);
++    std::swap(reflect_layer_, s.reflect_layer);
++    std::swap(reflect_offset_, s.reflect_offset);
++    std::swap(refmap_, s.refmap);
++    std::swap(hdr_copy_, s.hdr_copy);
++    std::swap(particles_, s.particles);
++    std::swap(motion_, s.motion);
++    std::swap(reactive_, s.reactive);
++    std::swap(opaque_, s.opaque);
++    std::swap(handy_factor_, s.handy_factor);
++    std::swap(exposure_image_, s.exposure_image);
++    std::swap(upscaled_, s.upscaled);
++    std::swap(post_hdr_, s.post_hdr);
++    std::swap(post_depth_, s.post_depth);
++    std::swap(post_object_velocity_, s.post_object_velocity);
++    std::swap(refmap_color_, s.refmap_color);
++    std::swap(history_valid_, s.history_valid);
++    std::swap(flare_clean_, s.flare_clean);
++    std::swap(mirror_history_valid_, s.mirror_history_valid);
++    std::swap(mirror_history_size_, s.mirror_history_size);
++    std::swap(mirror_current_view_projection_, s.mirror_current_view_projection);
++    std::swap(mirror_previous_view_projection_, s.mirror_previous_view_projection);
++    std::swap(mirror_history_origin_, s.mirror_history_origin);
++    std::swap(mirror_history_exposure_, s.mirror_history_exposure);
++    std::swap(reflect_history_valid_, s.reflect_history_valid);
++    std::swap(reflect_history_index_, s.reflect_history_index);
++    std::swap(reflect_history_frame_, s.reflect_history_frame);
++    std::swap(reflect_history_exposure_, s.reflect_history_exposure);
++    std::swap(mirror_stale_, s.mirror_stale);
++}
++
++void SceneRenderer::UseTargetSet(int set) {
++    set = set != 0 ? 1 : 0;
++    if (set == active_set_) return;
++    SwapTargetStash();
++    active_set_ = set;
++}
++
++void SceneRenderer::ReleaseTargetSet() {
++    UseTargetSet(0);
++    if (stash_.extent.width == 0 && !stash_.albedo.Valid()) return;
++    vkDeviceWaitIdle(device_);
++    SwapTargetStash();
++    active_set_ = 1;
++    DestroyTargets(false);
++    SwapTargetStash();
++    active_set_ = 0;
++    for (FrameSlot& slot : slots_) {
++        if (slot.bound_set == 1) slot.bound_set = -1;
++    }
++    LogInfo("scene renderer: the wide views' targets freed");
++}
++
++void SceneRenderer::WriteImageDescriptors(int only_slot) {
+     VkDescriptorImageInfo images[gpu::kImageSlots];
+     for (VkDescriptorImageInfo& info : images) {
+         info = {VK_NULL_HANDLE, white_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+@@ -773,6 +905,7 @@ void SceneRenderer::WriteImageDescriptors() {
      set_image(gpu::kResLut1, lut1_);
      set_image(gpu::kResMaterial, material_tex_);
      set_image(gpu::kResDither, dither_);
@@ -1790,7 +2030,17 @@ index 1f96981..35cf177 100644
      set_image(gpu::kResColorLut, color_lut_);
      set_image(gpu::kResColorLutPrev, color_lut_prev_);
      set_image(gpu::kResNoise, noise_);
-@@ -824,6 +846,19 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -789,7 +922,9 @@ void SceneRenderer::WriteImageDescriptors() {
+     std::copy(std::begin(images), std::end(images), std::begin(post_images));
+     WriteUpscaleDescriptors(post_images, true);
+     for (int set_index = 0; set_index < 2 * static_cast<int>(Renderer::kFramesInFlight); ++set_index) {
++        if (only_slot >= 0 && set_index / 2 != only_slot) continue;
+         FrameSlot& slot = slots_[set_index / 2];
++        slot.bound_set = active_set_;
+         const bool post = (set_index & 1) != 0;
+         VkDescriptorBufferInfo frame_info{slot.frame_data.buffer, 0, VK_WHOLE_SIZE};
+         VkDescriptorBufferInfo skin_info{slot.skin.buffer, 0, VK_WHOLE_SIZE};
+@@ -824,6 +959,19 @@ void SceneRenderer::WriteImageDescriptors() {
      }
  }
  
@@ -1810,7 +2060,22 @@ index 1f96981..35cf177 100644
  bool SceneRenderer::UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size) {
      vk::Context& ctx = renderer_->Context();
      if (!image.image || image.format != format || image.extent.width != extent.width || image.extent.height != extent.height ||
-@@ -1174,10 +1209,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+@@ -1083,7 +1231,13 @@ void SceneRenderer::UpdateColorLut(const ScreenSettings& screen) {
+     color_lut_prev_key_ = color_lut_key_;
+     color_lut_key_ = key;
+     if (extent_.width > 0) {
+-        WriteImageDescriptors();
++        // Only this frame's slot (its fence has passed: this runs while a view is recorded); the
++        // others are written before their next use (Render), once nothing reads them.
++        const int current = static_cast<int>(renderer_->FrameIndex());
++        WriteImageDescriptors(current);
++        for (int i = 0; i < static_cast<int>(Renderer::kFramesInFlight); ++i) {
++            if (i != current) slots_[i].bound_set = -1;
++        }
+     }
+ }
+ 
+@@ -1174,10 +1328,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
      stats_.gpu_ms = span(0, 6);
  }
  
@@ -1896,7 +2161,7 @@ index 1f96981..35cf177 100644
      if (slot.reflection_sampled) {
          vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
          const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
-@@ -1189,7 +1299,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -1189,7 +1418,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -1908,16 +2173,24 @@ index 1f96981..35cf177 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..9bd5893 100644
+index 6c9b165..ce6b015 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,41 @@ public:
+@@ -206,6 +206,49 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
 +    // A view drawn wide at low density under an inset (visionOS foveation): no screen-space AO,
 +    // reflections or subsurface scattering in it.
 +    void SetVrLowDetail(bool low) { vr_low_detail_ = low; }
++    // Stereo with the game's foveation: the wide views (set 1) and the insets (set 0, which is
++    // also every other kind of view) keep their own render targets, each at its own size, so
++    // neither makes the other's again every frame. Set before a view is drawn; Render points the
++    // frame slot's descriptors at the set in use. Bloom and SSS targets are shared (set 0's).
++    void UseTargetSet(int set);
++    // Frees set 1's targets (foveation turned off).
++    void ReleaseTargetSet();
++    int ActiveTargetSet() const { return active_set_; }
 +    // The camera lights and shadow views are chosen for (stereo views sharing one shadow atlas):
 +    // nullptr, the view's own.
 +    void SetVrCullCamera(const Camera* camera) {
@@ -1953,7 +2226,15 @@ index 6c9b165..9bd5893 100644
  
  private:
      struct FrameSlot {
-@@ -222,7 +257,30 @@ private:
+@@ -214,6 +257,7 @@ private:
+         vk::Buffer luminance;
+         VkDescriptorSet set = VK_NULL_HANDLE;
+         VkDescriptorSet post_set = VK_NULL_HANDLE;
++        int bound_set = -1;  // the target set its descriptors point at (UseTargetSet)
+         VkQueryPool queries = VK_NULL_HANDLE;
+         VkQueryPool upscale_queries = VK_NULL_HANDLE;
+         bool upscale_timed = false;
+@@ -222,7 +266,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -1984,7 +2265,20 @@ index 6c9b165..9bd5893 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -301,6 +359,7 @@ private:
+@@ -274,8 +341,10 @@ private:
+     void DestroyPipelines();
+     bool CreateDescriptors();
+     bool EnsureTargets(VkExtent2D extent, VkExtent2D output, bool upscaling);
+-    void DestroyTargets();
+-    void WriteImageDescriptors();
++    // `shared`: also the targets the target sets share (bloom; SSS with set 0).
++    void DestroyTargets(bool shared = true);
++    // `only_slot` >= 0: that frame slot's sets only (its fence passed); else all of them.
++    void WriteImageDescriptors(int only_slot = -1);
+     bool CreateTarget(RenderTarget& target, VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, VkImageAspectFlags aspect);
+     bool UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size);
+     bool UploadImageMips(vk::Image& image, VkFormat format, VkExtent3D extent, const std::vector<std::vector<uint8_t>>& mips);
+@@ -301,6 +370,7 @@ private:
      bool EnsureShadowTarget();
      void RecordRtAmbientOcclusion(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordLighting(VkCommandBuffer cmd, const ViewSetup& view);
@@ -1992,7 +2286,7 @@ index 6c9b165..9bd5893 100644
      void RecordLuminance(VkCommandBuffer cmd);
      void RecordForward(VkCommandBuffer cmd, const ViewSetup& view, RenderTarget& output);
      void RecordPost(VkCommandBuffer cmd, const SceneLighting& lighting, float dt);
-@@ -342,6 +401,8 @@ private:
+@@ -342,6 +412,8 @@ private:
      void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
      void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
      void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
@@ -2001,7 +2295,7 @@ index 6c9b165..9bd5893 100644
      void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordUpscale(VkCommandBuffer cmd, float dt);
      void ReadUpscaleTimestamps(FrameSlot& slot);
-@@ -377,6 +438,32 @@ private:
+@@ -377,6 +449,32 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
@@ -2034,7 +2328,7 @@ index 6c9b165..9bd5893 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -395,6 +482,24 @@ private:
+@@ -395,6 +493,24 @@ private:
      RenderTarget reflect_offset_;
      RenderTarget reflect_history_[2];
      RenderTarget shadow_;
@@ -2059,7 +2353,7 @@ index 6c9b165..9bd5893 100644
      RenderTarget ao_[2];
      RenderTarget refmap_;
      RenderTarget hdr_copy_;
-@@ -418,6 +523,17 @@ private:
+@@ -418,6 +534,17 @@ private:
      vk::Buffer dump_mirror_;
      VkExtent2D output_extent_{0, 0};
      bool targets_upscaled_ = false;
@@ -2077,7 +2371,7 @@ index 6c9b165..9bd5893 100644
      bool history_valid_ = false;
  
      vk::Image lut1_;
-@@ -441,6 +557,8 @@ private:
+@@ -441,6 +568,8 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -2086,7 +2380,43 @@ index 6c9b165..9bd5893 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -636,6 +754,26 @@ private:
+@@ -554,6 +683,35 @@ private:
+         uint32_t size = 0;
+     };
+     MirrorStale mirror_stale_;
++    // The render targets (and their histories) of the target set not in use (UseTargetSet).
++    struct TargetStash {
++        VkExtent2D extent{0, 0};
++        VkExtent2D output_extent{0, 0};
++        bool targets_upscaled = false;
++        RenderTarget albedo, normal, material, depth, diffuse, specular, probe_acc, hdr, flare, particles_kept;
++        RenderTarget ldr[2], history, dof_half, dof_quarter[2], dof_eighth[2], velocity, object_velocity;
++        RenderTarget mb_tile[5], mb_neighbour, mb_bake, mb_blur[2];
++        RenderTarget mirror, mirror_history, mirror_temporal, reflect_layer, reflect_offset, reflect_history[2];
++        RenderTarget ao[2], refmap, hdr_copy, particles;
++        RenderTarget motion, reactive, opaque, handy_factor, exposure_image, upscaled, post_hdr, post_depth, post_object_velocity;
++        RenderTarget refmap_color;
++        bool history_valid = false;
++        bool flare_clean = false;
++        bool mirror_history_valid = false;
++        uint32_t mirror_history_size = 0;
++        glm::mat4 mirror_current_view_projection{1.0f};
++        glm::mat4 mirror_previous_view_projection{1.0f};
++        glm::vec3 mirror_history_origin{0.0f};
++        float mirror_history_exposure = 1.0f;
++        bool reflect_history_valid = false;
++        uint32_t reflect_history_index = 0;
++        uint32_t reflect_history_frame = 0;
++        float reflect_history_exposure = 1.0f;
++        MirrorStale mirror_stale;
++    };
++    TargetStash stash_;
++    int active_set_ = 0;
++    void SwapTargetStash();
+     bool mirror_stale_active_ = false;
+     const SceneLighting* lighting_ = nullptr;
+     SceneLighting fallback_;
+@@ -636,6 +794,26 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
@@ -2171,7 +2501,7 @@ index f6a961d..de1420b 100644
                                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
          messenger_info.pfnUserCallback = DebugCallback;
 diff --git a/src/engine/xr/xr_host.cpp b/src/engine/xr/xr_host.cpp
-index 5e7cee1..6610b7f 100644
+index 5e7cee1..796eb6a 100644
 --- a/src/engine/xr/xr_host.cpp
 +++ b/src/engine/xr/xr_host.cpp
 @@ -52,7 +52,13 @@ bool Host::BeginFrame() { return false; }
@@ -2184,7 +2514,7 @@ index 5e7cee1..6610b7f 100644
 +float Host::GpuBudgetMs() const { return 0.0f; }
 +void Host::SetPointerWanted(bool) {}
 +bool Host::TakeRecenter() { return false; }
-+bool Host::InsetWanted(float&) const { return false; }
++bool Host::InsetWanted(float&, float&) const { return false; }
 +bool Host::EnsureInsetImages(VkExtent2D) { return false; }
  bool Host::Acquire(Swapchain&) { return false; }
  void Host::Release(Swapchain&) {}
@@ -2213,14 +2543,14 @@ index 5e7cee1..6610b7f 100644
 +float Host::GpuBudgetMs() const { return 0.0f; }
 +void Host::SetPointerWanted(bool) {}
 +bool Host::TakeRecenter() { return false; }
-+bool Host::InsetWanted(float&) const { return false; }
++bool Host::InsetWanted(float&, float&) const { return false; }
 +bool Host::EnsureInsetImages(VkExtent2D) { return false; }
 +
  #endif
  
  }
 diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
-index b5bf253..e457ac5 100644
+index b5bf253..91ddb5d 100644
 --- a/src/engine/xr/xr_host.h
 +++ b/src/engine/xr/xr_host.h
 @@ -37,6 +37,18 @@ struct ControllerState {
@@ -2253,7 +2583,7 @@ index b5bf253..e457ac5 100644
  };
  
  class Host final : public vk::ContextCreator {
-@@ -100,16 +116,49 @@ public:
+@@ -100,16 +116,50 @@ public:
      const ViewPose& Head() const { return head_; }
      bool ViewsValid() const { return views_valid_; }
      const ControllerState& Controllers() const { return controllers_; }
@@ -2265,9 +2595,10 @@ index b5bf253..e457ac5 100644
      Swapchain& HudSwapchain() { return hud_swapchain_; }
      Swapchain& ScreenSwapchain() { return screen_swapchain_; }
 +    Swapchain& InsetSwapchain(int i) { return inset_swapchains_[i]; }
-+    // The game's foveation: whether it is wanted now and the centre's size (a fraction of the
-+    // eye's field of view across); the eye images are then the wide, low-density views.
-+    bool InsetWanted(float& center) const;
++    // The game's foveation: whether it is wanted now, the centre's size (a fraction of the eye's
++    // field of view across) and its pixel density over the wide view's; the eye images are then
++    // the wide, low-density views.
++    bool InsetWanted(float& center, float& density) const;
 +    // The inset images at this size (made again when it changes); false: no insets.
 +    bool EnsureInsetImages(VkExtent2D extent);
      bool Acquire(Swapchain& swapchain);
@@ -2304,7 +2635,7 @@ index b5bf253..e457ac5 100644
  
      struct Impl;
  
-@@ -124,6 +173,8 @@ private:
+@@ -124,6 +174,8 @@ private:
      Swapchain eye_swapchains_[2];
      Swapchain hud_swapchain_;
      Swapchain screen_swapchain_;
@@ -2409,10 +2740,10 @@ index 1daa3d8..34f7117 100644
          pitch = target_pitch = ClampPitch(value);
          vr_script_pitch_ = pitch;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..b825960 100644
+index 42d8b01..49aa966 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -16,6 +16,56 @@ struct Entry {
+@@ -16,6 +16,58 @@ struct Entry {
  };
  
  constexpr Entry kTexts[] = {
@@ -2445,9 +2776,11 @@ index 42d8b01..b825960 100644
 +    {"pc_vp_gamefov", {"Game foveation", "", "", "Foveado del juego", "", "", ""}},
 +    {"pc_note_vp_gamefov", {"Each eye is drawn whole at a low resolution and its centre again in detail: far fewer pixels, as sharp where you look. Applies right away.", "", "", "Cada ojo se dibuja entero a baja resolución y su centro otra vez con detalle: muchos menos píxeles, igual de nítido donde miras. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_periphery", {"Periphery quality", "", "", "Calidad de la periferia", "", "", ""}},
-+    {"pc_note_vp_periphery", {"Resolution of the whole view around the centre, relative to the image size. Lower is much lighter for the GPU.", "", "", "Resolución de la vista entera alrededor del centro, respecto al tamaño de imagen. Más baja es mucho más ligera para la GPU.", "", "", ""}},
-+    {"pc_vp_center", {"Sharp centre", "", "", "Centro nítido", "", "", ""}},
-+    {"pc_note_vp_center", {"How much of the view the sharp centre covers, with the same pixels: smaller is sharper, larger covers more and hides the edge better. The frame rate does not change.", "", "", "Cuánto de la vista cubre el centro nítido, con los mismos píxeles: más pequeño es más nítido; más grande cubre más y disimula mejor el borde. No cambia los fps.", "", "", ""}},
++    {"pc_note_vp_periphery", {"Resolution of the view around the sharp centre, relative to the image size. It does not change the centre. Lower is much lighter for the GPU.", "", "", "Resolución de la vista alrededor del centro nítido, respecto al tamaño de imagen. No cambia el centro. Más baja es mucho más ligera para la GPU.", "", "", ""}},
++    {"pc_vp_center_res", {"Centre resolution", "", "", "Resolución del centro", "", "", ""}},
++    {"pc_note_vp_center_res", {"Resolution of the sharp centre, relative to the image size, whatever the periphery's. 100% is the image size's full sharpness.", "", "", "Resolución del centro nítido, respecto al tamaño de imagen, sea cual sea la de la periferia. 100 % es toda la nitidez del tamaño de imagen.", "", "", ""}},
++    {"pc_vp_center", {"Sharp centre size", "", "", "Tamaño del centro nítido", "", "", ""}},
++    {"pc_note_vp_center", {"How much of the view the sharp centre covers. Larger hides its edge better but costs more: the frame rate drops.", "", "", "Cuánto de la vista cubre el centro nítido. Más grande disimula mejor su borde pero cuesta más: bajan los fps.", "", "", ""}},
 +    {"pc_vp_dynres", {"Dynamic resolution", "", "", "Resolución dinámica", "", "", ""}},
 +    {"pc_vp_hdr", {"HDR (peak brightness)", "", "", "HDR (brillo máximo)", "", "", ""}},
 +    {"pc_vp_hdr_soft", {"1.4x", "", "", "1,4x", "", "", ""}},
@@ -2470,7 +2803,7 @@ index 42d8b01..b825960 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..f200f79 100644
+index e8e4ae7..d2af60c 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -2713,7 +3046,7 @@ index e8e4ae7..f200f79 100644
      auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
          if (!host_.Acquire(sc)) return false;
          t.image = sc.images[sc.index];
-@@ -207,19 +356,134 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -207,19 +356,157 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
          return false;
      }
@@ -2724,14 +3057,12 @@ index e8e4ae7..f200f79 100644
 +
 +bool VrPlay::PrepareInsets(Stereo& out) {
 +    float center = 0.0f;
-+    if (!host_.InsetWanted(center) || render_size_.x == 0 || render_size_.y == 0) return false;
-+    if (!host_.EnsureInsetImages({render_size_.x, render_size_.y})) return false;
-+    // The same pixel size as the wide view (the renderer keeps its targets), over `center` of
-+    // its field: as many times denser. (The inset images stay at the full size; a smaller
-+    // drawing is enlarged into them, as for the eyes.)
-+    const float aspect = static_cast<float>(out.render.width) / static_cast<float>(std::max(out.render.height, 1u));
-+    // `center` of the wide view's field across (its pixels as many times denser), around the
-+    // eye's forward axis, kept inside both eyes' wide fields.
++    float density = 1.0f;
++    if (!host_.InsetWanted(center, density) || render_size_.x == 0 || render_size_.y == 0) return false;
++    // (The proportions of the eyes' size without the dynamic resolution: the same as the drawing's.)
++    const float aspect = static_cast<float>(render_size_.x) / static_cast<float>(std::max(render_size_.y, 1u));
++    // `center` of the wide view's field across, around the eye's forward axis, kept inside both
++    // eyes' wide fields.
 +    float tan_y = std::clamp(center, 0.2f, 0.8f) * frusta_[0].tan_y;
 +    for (int i = 0; i < 2; ++i) {
 +        const glm::vec2 c = frusta_[i].center;
@@ -2739,7 +3070,32 @@ index e8e4ae7..f200f79 100644
 +        const float room_y = std::min(c.y + frusta_[i].tan_y, frusta_[i].tan_y - c.y);
 +        tan_y = std::min({tan_y, 0.98f * room_y, 0.98f * room_x / aspect});
 +    }
-+    const float tan_x = tan_y * aspect;
++    // Its own size: the wide view's pixels over the share of its field it covers, at `density`
++    // times the wide view's density (the centre-resolution setting over the periphery's), with
++    // the wide view's proportions; at the size without the dynamic resolution (a smaller drawing
++    // is enlarged into the images, as for the eyes). Kept while it moves by less than 3 %
++    // (tangents that wobble must not make the images and the targets again).
++    const float share = tan_y / std::max(frusta_[0].tan_y, 1.0e-4f);
++    const float wanted_h = static_cast<float>(render_size_.y) * share * density;
++    glm::uvec2 images;
++    images.y = std::max(16u, 2u * static_cast<uint32_t>(std::lround(wanted_h * 0.5f)));
++    images.x = std::max(16u, 2u * static_cast<uint32_t>(std::lround(static_cast<float>(images.y) * aspect * 0.5f)));
++    if (inset_images_.y > 0 && std::fabs(static_cast<float>(images.y) / static_cast<float>(inset_images_.y) - 1.0f) < 0.03f &&
++        std::fabs(static_cast<float>(images.x) / static_cast<float>(inset_images_.x) - 1.0f) < 0.03f) {
++        images = inset_images_;
++    }
++    if (!host_.EnsureInsetImages({images.x, images.y})) return false;
++    inset_images_ = images;
++    const float drawn_scale = render_size_.y > 0 ? static_cast<float>(out.render.height) / static_cast<float>(render_size_.y) : 1.0f;
++    auto scaled = [&](uint32_t v) { return std::clamp(2u * static_cast<uint32_t>(std::lround(static_cast<float>(v) * drawn_scale * 0.5f)), 16u, v); };
++    out.inset_render = {scaled(images.x), scaled(images.y)};
++    // The field across from the images' own proportions (no stretching).
++    const float tan_x = tan_y * static_cast<float>(images.x) / static_cast<float>(images.y);
++    if (inset_logged_ != images) {
++        inset_logged_ = images;
++        LogInfo("vr: centre drawn at {}x{} over {:.0f} % of the eye's field ({:.2f}x the periphery's density), periphery {}x{}", images.x, images.y,
++                share * 100.0f, density, render_size_.x, render_size_.y);
++    }
 +    out.inset_tangents = glm::vec4(-tan_x, tan_x, tan_y, -tan_y);
 +    for (int i = 0; i < 2; ++i) {
 +        // The inset's field in its wide view's image (its centre is tangent 0; image y is down).
@@ -2849,7 +3205,7 @@ index e8e4ae7..f200f79 100644
      layers.hud_position = hud_position_;
      layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
      host_.EndFrame(layers);
-@@ -268,16 +532,48 @@ void VrPlay::EndEmpty() {
+@@ -268,16 +555,48 @@ void VrPlay::EndEmpty() {
  }
  
  void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
@@ -2901,7 +3257,7 @@ index e8e4ae7..f200f79 100644
      if (!hud_placed_ || (menu_open && !menu_was_open_)) {
          hud_yaw_ = head_yaw_local;
          hud_placed_ = true;
-@@ -289,7 +585,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
+@@ -289,7 +608,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
          }
      }
      menu_was_open_ = menu_open;
@@ -2912,7 +3268,7 @@ index e8e4ae7..f200f79 100644
  
  }
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index d1485b2..2a3364a 100644
+index d1485b2..72fbde8 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
 @@ -1,5 +1,7 @@
@@ -2923,13 +3279,15 @@ index d1485b2..2a3364a 100644
  #include <glm/glm.hpp>
  #include <glm/gtc/quaternion.hpp>
  
-@@ -34,6 +36,18 @@ public:
+@@ -34,6 +36,20 @@ public:
          XrTarget hud;
          VkExtent2D render{};
          xr::ViewPose poses[2];
-+        // The game's foveation (visionOS): each eye's centre drawn again, at the same render
-+        // size, over a narrower symmetric field (`inset_tangents`: left, right, up, down).
++        // The game's foveation (visionOS): each eye's centre drawn again over a narrower symmetric
++        // field (`inset_tangents`: left, right, up, down), at its own size `inset_render` (its
++        // own density, not the wide view's: the renderers keep a target set for each).
 +        bool inset = false;
++        VkExtent2D inset_render{};
 +        Camera insets[2];
 +        XrTarget inset_targets[2];
 +        glm::vec4 inset_tangents{0.0f};
@@ -2942,7 +3300,7 @@ index d1485b2..2a3364a 100644
      };
      bool PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_open, Stereo& out);
      void FinishStereo(const Stereo& stereo);
-@@ -43,9 +57,17 @@ public:
+@@ -43,9 +59,19 @@ public:
  
      void Rumble(uint8_t large_motor, uint8_t small_motor);
      VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
@@ -2956,12 +3314,14 @@ index d1485b2..2a3364a 100644
 +    void Place(const glm::vec3& head_local, const glm::quat& head_orientation_local, bool menu_open, float dt);
 +    // The insets of `out` (its eyes already set): false when there are none this frame.
 +    bool PrepareInsets(Stereo& out);
++    glm::uvec2 inset_logged_{0u, 0u};
++    glm::uvec2 inset_images_{0u, 0u};  // the inset images' size now (PrepareInsets)
 +    // The size the eyes are drawn at this frame: render_size_ times the dynamic resolution.
 +    glm::uvec2 DrawSize() const;
  
      xr::Host& host_;
      const AppSettings::Vr& settings_;
-@@ -53,18 +75,40 @@ private:
+@@ -53,18 +79,40 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -3003,7 +3363,7 @@ index d1485b2..2a3364a 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..a9de177 100644
+index d629ab3..bbc8346 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -3073,7 +3433,7 @@ index d629ab3..a9de177 100644
          const pt::AppSettings& s = app_.settings;
          std::vector<pt::game::PcSettingSection> out;
          pt::game::PcSettingSection display{"pc_section_display", 0, {}};
-@@ -1863,12 +1889,89 @@ public:
+@@ -1863,12 +1889,93 @@ public:
              s.vr.enabled = value == 1;
              pt::LogInfo("vr: {} at the next start (PC settings)", s.vr.enabled ? "on" : "off");
              break;
@@ -3117,12 +3477,16 @@ index d629ab3..a9de177 100644
 +            pt::visionos::SettingChanged("game_foveation", value == 1 ? "1" : "0");
 +            return;
 +        case kVpPeriphery:
-+            pt::visionos::Headset().periphery = 30 + 5 * std::clamp(value, 0, 8);
++            pt::visionos::Headset().periphery = 15 + 5 * std::clamp(value, 0, 9);
 +            pt::visionos::SettingChanged("periphery", std::to_string(pt::visionos::Headset().periphery));
 +            return;
 +        case kVpCenter:
 +            pt::visionos::Headset().center = 30 + 5 * std::clamp(value, 0, 10);
 +            pt::visionos::SettingChanged("center", std::to_string(pt::visionos::Headset().center));
++            return;
++        case kVpCenterRes:
++            pt::visionos::Headset().center_res = 50 + 5 * std::clamp(value, 0, 10);
++            pt::visionos::SettingChanged("center_res", std::to_string(pt::visionos::Headset().center_res));
 +            return;
 +        case kVpHdr: {
 +            static constexpr int kHdrSteps[4] = {100, 140, 170, 200};
@@ -3163,7 +3527,7 @@ index d629ab3..a9de177 100644
          case kFrameLimit:
              if (!app_.options.fps_limit_override) s.display.fps_limit = value == 1 ? 60 : 30;
              break;
-@@ -1939,7 +2042,13 @@ public:
+@@ -1939,7 +2046,13 @@ public:
              std::string reason;
              pt::ApplyGraphicsPreset(s,static_cast<pt::GraphicsPreset>(std::clamp(value,0,4)),app_.scene.RayTracingSupported(reason));
              app_.textures.SetAnisotropy(s.graphics.anisotropy);
@@ -3177,7 +3541,7 @@ index d629ab3..a9de177 100644
              break;
          }
          case kShadowQuality:
-@@ -1995,6 +2104,11 @@ public:
+@@ -1995,6 +2108,11 @@ public:
              return;
          }
          ApplyGraphicsSettings(app_);
@@ -3189,7 +3553,7 @@ index d629ab3..a9de177 100644
          Save();
      }
  
-@@ -2197,6 +2311,9 @@ public:
+@@ -2197,6 +2315,9 @@ public:
          if (id == kGraphics) {
              page_ = kGraphicsPage;
          }
@@ -3199,16 +3563,16 @@ index d629ab3..a9de177 100644
          if (id == kMicrophoneTest) {
              page_ = kMicrophonePage;
              app_.microphone_test = true;
-@@ -2285,6 +2402,8 @@ private:
+@@ -2285,6 +2406,8 @@ private:
          kArchive, kArchiveLock,
          kVr, kVrMode, kVrFlashlight, kVrTurn,
          kFrameLimit,
 +        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpMetalFx, kVpFov, kVpRecenter,
-+        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr,
++        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes,
          kLoopFirst = 1000,
          kRunSplitFirst = 3000,
          kModFirst = 2000,
-@@ -2572,6 +2691,9 @@ private:
+@@ -2572,6 +2695,9 @@ private:
      int page_ = kMainPage;
      static constexpr float kMouseSteps[] = {0.25f, 0.35f, 0.5f, 0.7f, 1.0f, 1.4f, 2.0f, 2.8f, 4.0f, 5.0f};
      static constexpr float kDeadZoneSteps[] = {0.0f, 0.05f, 26.0f / 255.0f, 0.15f, 0.2f, 0.25f, 0.3f};
@@ -3218,7 +3582,7 @@ index d629ab3..a9de177 100644
  
      static pt::game::PcSettingRow Row(int id, std::string label, std::vector<std::string> values, int value, std::string note) {
          pt::game::PcSettingRow row;
-@@ -2642,6 +2764,95 @@ private:
+@@ -2642,6 +2768,99 @@ private:
          return Row(kEnhancedTextures,"pc_enhanced_textures",std::move(values),app_.settings.graphics.enhanced_textures?1:0,note);
      }
  
@@ -3248,8 +3612,12 @@ index d629ab3..a9de177 100644
 +        headset.rows.push_back(Row(kVpFoveation, "pc_vp_foveation", OffOn(), h.foveation ? 1 : 0, "pc_note_vp_foveation"));
 +        headset.rows.push_back(Row(kVpMetalFx, "pc_vp_metalfx", OffOn(), h.metalfx ? 1 : 0, "pc_note_vp_metalfx"));
 +        headset.rows.push_back(Row(kVpGameFoveation, "pc_vp_gamefov", OffOn(), h.game_foveation ? 1 : 0, "pc_note_vp_gamefov"));
-+        pt::game::PcSettingRow periphery = Row(kVpPeriphery, "pc_vp_periphery", {}, std::clamp((h.periphery - 30 + 2) / 5, 0, 8), "pc_note_vp_periphery");
-+        for (int i = 0; i <= 8; ++i) periphery.values.push_back(std::format("{}%", 30 + 5 * i));
++        pt::game::PcSettingRow center_res = Row(kVpCenterRes, "pc_vp_center_res", {}, std::clamp((h.center_res - 50 + 2) / 5, 0, 10), "pc_note_vp_center_res");
++        for (int i = 0; i <= 10; ++i) center_res.values.push_back(std::format("{}%", 50 + 5 * i));
++        center_res.wrap = false;
++        headset.rows.push_back(std::move(center_res));
++        pt::game::PcSettingRow periphery = Row(kVpPeriphery, "pc_vp_periphery", {}, std::clamp((h.periphery - 15 + 2) / 5, 0, 9), "pc_note_vp_periphery");
++        for (int i = 0; i <= 9; ++i) periphery.values.push_back(std::format("{}%", 15 + 5 * i));
 +        periphery.wrap = false;
 +        headset.rows.push_back(std::move(periphery));
 +        pt::game::PcSettingRow center = Row(kVpCenter, "pc_vp_center", {}, std::clamp((h.center - 30 + 2) / 5, 0, 10), "pc_note_vp_center");
@@ -3314,7 +3682,7 @@ index d629ab3..a9de177 100644
      std::vector<pt::game::PcSettingSection> GraphicsSections() const {
          const auto& s=app_.settings;
          std::string reason;
-@@ -2690,7 +2901,9 @@ private:
+@@ -2690,7 +2909,9 @@ private:
      std::vector<pt::game::PcSettingSection> TextureSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection textures{"pc_section_textures",0,{}};
@@ -3324,7 +3692,7 @@ index d629ab3..a9de177 100644
          auto anisotropy=Row(kAnisotropy,"pc_anisotropy",{"pc_off","2x","4x","8x","16x"},g.anisotropy>=16?4:g.anisotropy>=8?3:g.anisotropy>=4?2:g.anisotropy>=2?1:0,"pc_note_anisotropy");
          anisotropy.wrap=false;textures.rows.push_back(std::move(anisotropy));
          textures.rows.push_back(Row(kTextureDetail,"pc_texture_detail",{"pc_detail_reduced","pc_preset_original","pc_detail_fine"},g.texture_detail,"pc_note_texture_detail"));
-@@ -2724,6 +2937,14 @@ private:
+@@ -2724,6 +2945,14 @@ private:
      std::vector<pt::game::PcSettingSection> EffectSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection effects{"pc_graphics_effects",0,{}};
@@ -3339,7 +3707,7 @@ index d629ab3..a9de177 100644
          effects.rows.push_back(Row(kDepthOfField,"pc_dof",OffOn(),g.depth_of_field?1:0,"pc_note_dof"));
          effects.rows.push_back(Row(kMotionBlur,"pc_motion_blur",OffOn(),g.motion_blur?1:0,"pc_note_motion_blur"));
          effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
-@@ -3095,7 +3316,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3095,7 +3324,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
      game.SetThirdPerson(app.settings.camera.third_person || options.third_person);
      pt::game::GameSound sound(game);
      std::vector<float> captured;
@@ -3349,7 +3717,7 @@ index d629ab3..a9de177 100644
          sound.System().SetMasterVolume(app.settings.audio.volume);
          if (options.seed) {
              sound.System().SetRandomSeed(options.seed);
-@@ -3139,14 +3361,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3139,14 +3369,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
      const bool pads = app.window || options.virtual_pads;
      if (pads) {
          input.Init();
@@ -3366,7 +3734,7 @@ index d629ab3..a9de177 100644
      script.SetPads(options.virtual_pads ? &virtual_pads : nullptr, &input);
      std::vector<float> offline_audio;
      double audio_device_time = 0.0;
-@@ -3207,7 +3429,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3207,7 +3437,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
      float accumulator = 0.0f;
      pt::Camera tick_camera_from = game.ViewCamera();
      pt::Camera motion_camera_from = tick_camera_from;
@@ -3377,7 +3745,7 @@ index d629ab3..a9de177 100644
      TickState tick_state;
      std::vector<glm::mat4> blended_skins;
      static const bool render_trace = std::getenv("PT_RENDER_TRACE") != nullptr;
-@@ -3434,8 +3658,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3434,8 +3666,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  visible = false;
                  SDL_Delay(10);
              }
@@ -3397,7 +3765,7 @@ index d629ab3..a9de177 100644
          const std::optional<bool> forced_focus = script.ForcedFocus(frame);
          if (app.window || forced_focus || vr) {
              const bool focused = forced_focus ? *forced_focus
-@@ -3487,6 +3721,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3487,6 +3729,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
          float dt = options.display_rate > 0.0f ? 1.0f / options.display_rate : 1.0f / options.tick_rate;
@@ -3411,7 +3779,7 @@ index d629ab3..a9de177 100644
          if (app.window) {
              const uint64_t now = SDL_GetTicksNS();
              dt = std::clamp(static_cast<float>(now - last_ticks) * 1e-9f, 0.0001f, 0.1f);
-@@ -3554,7 +3795,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3554,7 +3803,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (polled.pointer_valid) {
              pending_input.pointer = polled.pointer;
              pending_input.pointer_valid = true;
@@ -3420,7 +3788,7 @@ index d629ab3..a9de177 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
-@@ -3876,8 +4117,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3876,8 +4125,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
              previous_microphone_test = app.microphone_test;
          }
          const bool voice_file = !voice_input.empty();
@@ -3437,7 +3805,7 @@ index d629ab3..a9de177 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4123,23 +4370,83 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4123,23 +4378,109 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.SetRenderExtent(stereo.render);
                  scene_builder.Build(game, stereo.head, scene_dt, lighting, light_blend);
                  last_scene_time = game.Time();
@@ -3479,12 +3847,32 @@ index d629ab3..a9de177 100644
 +                // With insets: left wide, left inset, right wide, right inset (views 0, 2, 1, 3).
 +                static constexpr int kInsetOrder[4] = {0, 2, 1, 3};
 +                float frame_gpu_ms = 0.0f;
++#if PT_VISIONOS
++                // Without insets for a while (foveation off): the wide views' target sets go.
++                static int views_without_insets = 0;
++                views_without_insets = views == 4 ? 0 : std::min(views_without_insets + 1, 1000);
++                if (views_without_insets == 90) {
++                    app.scene.ReleaseTargetSet();
++                    app.renderer.ReleaseTargetSet();
++                }
++#endif
 +                for (int k = 0; k < views; ++k) {
 +                    const int eye = views == 4 ? kInsetOrder[k] : k;
++                    const bool inset = eye >= 2;
++#if PT_VISIONOS
++                    // With insets, each kind of view has its own targets at its own size (set 1 the
++                    // wide views, set 0 the centres): the centre's density does not follow the
++                    // periphery's.
++                    if (views == 4) {
++                        const int set = inset ? 0 : 1;
++                        app.renderer.UseTargetSet(set);
++                        app.scene.UseTargetSet(set);
++                        app.renderer.SetRenderExtent(inset ? stereo.inset_render : stereo.render);
++                    }
++#endif
 +                    if (!begin(k == 0)) {
                          continue;
                      }
-+                    const bool inset = eye >= 2;
                      app.scene.SetVrEye(eye);
 -                    app.scene.Render(stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
@@ -3517,6 +3905,12 @@ index d629ab3..a9de177 100644
                  app.scene.SetVrEye(-1);
 +                vr->ReportGpu(frame_gpu_ms);
 +#if PT_VISIONOS
++                // Back to set 0 (the centres') for whatever is drawn before the next stereo frame.
++                if (views == 4) {
++                    app.renderer.UseTargetSet(0);
++                    app.scene.UseTargetSet(0);
++                    app.renderer.SetRenderExtent(stereo.inset_render);
++                }
 +                app.scene.SetVrLowDetail(false);
 +                app.scene.SetVrVrr(nullptr, {}, {}, 0);
 +                app.scene.SetVrCullCamera(nullptr);
@@ -3527,7 +3921,7 @@ index d629ab3..a9de177 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4875,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4909,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -3544,7 +3938,7 @@ index d629ab3..a9de177 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +4921,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +4955,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

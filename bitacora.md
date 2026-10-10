@@ -163,6 +163,37 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (100→200) sin fallos. Caché de sombras: 0–571 teselas reutilizadas por 10 s. Usuario: mirar a una pared solo sube a 31–33.
   Causa encontrada: volúmenes de luz por caras traseras (LESS_OR_EQUAL) → toda pared delante de una luz oculta pasa la prueba
   y sombrea; además se cargan 2 copias del pasillo (212 luces c/u).
+- **Prueba build 34 (log pt (21)):** sin cierres. Causa del "foveado que no gana": el centro se dibujaba con el MISMO tamaño en
+  píxeles que la ancha (`PrepareInsets`), así que su densidad era periferia/centro × tamaño de imagen: bajar la periferia
+  bajaba también el centro (30 → centro 810x650, imagen mala); subirla pagaba centro y lados en alta (45 → 4 vistas 1214x974,
+  4,7 MP, 40–47 ms, térmico serious). Coste medido ≈ 7,5 ms/MP + ~6 ms fijos por frame.
+- **Build 35 (pendiente de run): centro con densidad propia (quad views de verdad).**
+  - `Renderer` (renderer.h/.cpp): dos juegos de objetivos (`scene_color_`, `final_`, `output_`, `composite_set_`, `final_set_`,
+    `output_ready_`, `final_ready_`) intercambiados con `UseTargetSet(int)` (`TargetStash`, `SwapTargetStash`); pool de
+    composición a 4 sets; `ReleaseTargetSet()`; `SetGrainNoise` escribe los dos; `Shutdown` libera ambos.
+  - `SceneRenderer` (scene_renderer.h/.cpp, scene_frame.cpp): `UseTargetSet/ReleaseTargetSet/SwapTargetStash`; `TargetStash` con
+    todos los objetivos dependientes del tamaño + historias (TAA, espejo, SSR, `mirror_stale_`, `flare_clean_`). Set 1 = vistas
+    anchas, set 0 = centros y todo lo demás. Compartidos (no se intercambian): `bloom_` (`ensure_bloom` en `EnsureTargets`,
+    tolera ±2 px de ancho), `shadow_`, SSS y AO RT (solo set 0). `DestroyTargets(bool shared)`. `FrameSlot::bound_set`: en
+    `Render`, tras la valla del slot, `WriteImageDescriptors(slot)` si el slot apunta a otro set; `UpdateColorLut` escribe solo
+    el slot actual e invalida los otros. Partículas compartidas: el centro hace `vkCmdBlitImage` (lineal) del
+    `stash_.particles_kept` de la ancha (otro tamaño) a su `particles_` (copia si el tamaño coincide).
+  - main.cpp: con 4 vistas, antes de `begin()`: `UseTargetSet(inset ? 0 : 1)` en ambos renderers y
+    `SetRenderExtent(inset ? stereo.inset_render : stereo.render)`; tras el bucle vuelve a set 0 con `inset_render`. 90 frames
+    seguidos sin centros → `ReleaseTargetSet()` en ambos.
+  - vr_play: `Stereo::inset_render`. `PrepareInsets`: imágenes = alto de `render_size_` × (tan_y centro / tan_y ancha) × `density`,
+    proporciones de `render_size_`, histéresis 3 % (`inset_images_`), dibujo escalado por la resolución dinámica; tan_x con las
+    proporciones de las imágenes. Log `vr: centre drawn at WxH over N % of the eye's field (Dx the periphery's density), periphery WxH`.
+  - Host: `Host::InsetWanted(center, density)` (xr_host.h; stubs en xr_host.cpp): density = `center_res`/100 ÷ `eye_factor`.
+    `HeadsetSettings.center_res` (50–100, def. 100, `PT_VP_CENTER_RES`); periferia 15–60 (def. 25, `EyeFactor` 0,15–0,6).
+  - Menú del juego: fila `kVpCenterRes` "Resolución del centro" (50–100 %), periferia 15–60 %, textos de periferia/centro nuevos
+    (`pc_settings.cpp`). Launcher: `centerResolution` (`PT_VP_CENTER_RES`, `center_res` desde el juego), periferia guardada con
+    clave nueva `peripheryDensity` (la antigua no se arrastra → 25 %), steppers 15–60 / 50–100.
+  - Revisión adversarial (Sonnet) aplicada: tamaño de imágenes estable (histéresis, sin depender de la resolución dinámica),
+    bloom sin recrearse por 1 px. Pendiente/no aplicado: `up_` (upscaler del motor) no es por set (apagado en VR);
+    `particles_kept_` del set 0 sin usar (memoria); si la paridad de slots cambia, reescritura de descriptores por vista.
+  - Esperado (defecto 25 % / centro 45 % a 100 %): ~3,1 MP por frame frente a 4,7 MP de 45/45 con el mismo centro → ~29 ms.
+    Para 50 fps (≤20 ms) hace falta ~1,9 MP: centro ~35 % o seguir con coste por píxel.
 - **Prueba build 33 (log pt (20)):** VRR 2022x1622 en 1760x1416 (2,49 MP/ojo). GPU 2 vistas 32–37 ms (4 vistas: 31 / 35–40):
   sin ganancia. Por ojo: compose+forward 4–5,9 (partículas 1,5–3,8), lighting 3–4,9, post 2,7–2,9 (bloom 1,35), reflejos
   1,4–2,7 (ahora todo el ojo), occlusion 1,3, gbuffer 1,1–2,3, probes 0,25–1,3 (arreglado). Conclusión medida: coste ≈ 7 ms

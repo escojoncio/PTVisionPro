@@ -632,7 +632,7 @@ struct Host::Impl {
     uint32_t drawable_height = 0;
     bool metalfx_wanted = true;
     // With the game's foveation the eye images are the wide views, at `eye_factor` of the image
-    // size (the periphery setting); the insets have their own images, at the render size.
+    // size (the periphery setting); the insets have their own images, at their own size.
     float eye_factor = 1.0f;
     std::vector<VkDeviceMemory> eye_memory[2];
     std::vector<VkDeviceMemory> inset_memory[2];
@@ -960,7 +960,7 @@ static void KeepPresenting(Host& host, Host::Impl& x) {
 // The eye images' size relative to the image size: the periphery setting with the game's
 // foveation (the eye images are then the wide views), the whole of it without.
 static float EyeFactor(const pt::visionos::HeadsetSettings& h) {
-    return h.game_foveation ? std::clamp(static_cast<float>(h.periphery) / 100.0f, 0.3f, 0.7f) : 1.0f;
+    return h.game_foveation ? std::clamp(static_cast<float>(h.periphery) / 100.0f, 0.15f, 0.6f) : 1.0f;
 }
 
 // --- Variable rasterization rate (MoltenVK's VkRenderingRasterizationRateMapMVK) ----------------
@@ -2170,9 +2170,11 @@ void Host::EndFrame(const FrameLayers& layers) {
 
 void Host::SetPointerWanted(bool wanted) { impl_->pointer_wanted = wanted; }
 
-bool Host::InsetWanted(float& center) const {
+bool Host::InsetWanted(float& center, float& density) const {
     const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
     center = std::clamp(static_cast<float>(h.center) / 100.0f, 0.3f, 0.8f);
+    // The centre's density over the wide view's (the eye images as they are now).
+    density = std::clamp(static_cast<float>(h.center_res) / 100.0f, 0.5f, 1.0f) / std::max(impl_->eye_factor, 0.1f);
     // What the eye images are now (the setting takes effect with them, after its short wait).
     return impl_->running && impl_->eye_factor < 0.999f && !vrr_.active;
 }
@@ -2404,8 +2406,9 @@ void ApplySettings(AppSettings& s) {
     h.foveation = Flag("PT_VP_FOVEATION", true);
     h.metalfx = Flag("PT_VP_METALFX", false);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
-    h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 45.0f)), 30, 70);
+    h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 25.0f)), 15, 60);
     h.center = std::clamp(static_cast<int>(Number("PT_VP_CENTER", 45.0f)), 30, 80);
+    h.center_res = std::clamp(static_cast<int>(Number("PT_VP_CENTER_RES", 100.0f)), 50, 100);
     h.hdr = std::clamp(static_cast<int>(Number("PT_VP_HDR", 200.0f)), 100, 200);
     h.fov = std::clamp(static_cast<int>(Number("PT_VP_FOV", 100.0f)), 70, 100);
 
