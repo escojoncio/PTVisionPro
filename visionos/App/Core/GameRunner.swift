@@ -173,7 +173,9 @@ final class GameRunner: @unchecked Sendable {
         case "resolution_scale": s.resolutionScale = Double(value) ?? s.resolutionScale
         case "target_fps": s.targetFPS = Int(value) ?? s.targetFPS
         case "foveation": s.foveation = flag
-        case "metalfx": s.metalFX = flag
+        case "metalfx": return  // (the old spatial MetalFX: gone)
+        case "aa": s.aa = min(max(Int(value) ?? s.aa, 0), 4)
+        case "scene_depth": s.sceneDepth = flag
         case "fov": s.fov = Int(value) ?? s.fov
         case "game_foveation": s.gameFoveation = flag
         case "periphery": s.periphery = Int(value) ?? s.periphery

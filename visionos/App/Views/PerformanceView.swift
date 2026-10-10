@@ -38,13 +38,13 @@ struct PerformanceView: View {
                     LabeledContent(L("Objetivo", "Target"), value: "\(model.settings.targetFPS) fps")
                     LabeledContent(L("Campo de visión", "Field of view"), value: "\(model.settings.fov) %")
                     LabeledContent(L("Foveación", "Foveation"), value: model.settings.foveation ? L("Sí", "Yes") : L("No", "No"))
-                    LabeledContent("MetalFX", value: model.settings.metalFX ? L("Sí", "Yes") : L("No", "No"))
+                    LabeledContent(L("Antialiasing", "Antialiasing"), value: model.settings.aa == 0 ? "FXAA" : "MetalFX \([100, 100, 85, 75, 67][min(max(model.settings.aa, 0), 4)]) %")
                     LabeledContent(L("Gráficos", "Graphics"), value: "\(model.settings.graphicsPreset) · \(L("sombras", "shadows")) \(model.settings.shadows)")
                 } header: {
                     Text(L("Ajustes en uso", "Settings in use"))
                 } footer: {
-                    Text(L("Si las imágenes por segundo caen por debajo del objetivo: baja la escala de resolución (con MetalFX activado), el campo de visión o las sombras, o pasa a 45 fps. «GPU» es el tiempo de los dos ojos: para 90 fps tiene que quedar por debajo de unos 11 ms.",
-                           "If the frames per second fall below the target: lower the resolution scale (with MetalFX on), the field of view or the shadows, or switch to 45 fps. \u{201C}GPU\u{201D} is both eyes' time: for 90 fps it has to stay under about 11 ms."))
+                    Text(L("Si las imágenes por segundo caen por debajo del objetivo: baja la escala de resolución, el antialiasing de la zona nítida (MetalFX 75 o 67 %), el campo de visión o las sombras, o pasa a 45 fps. «GPU» es el tiempo de los dos ojos: para 90 fps tiene que quedar por debajo de unos 11 ms.",
+                           "If the frames per second fall below the target: lower the resolution scale, the sharp zone's antialiasing (MetalFX 75 or 67 %), the field of view or the shadows, or switch to 45 fps. \u{201C}GPU\u{201D} is both eyes' time: for 90 fps it has to stay under about 11 ms."))
                 }
             }
             .navigationTitle(L("Rendimiento", "Performance"))

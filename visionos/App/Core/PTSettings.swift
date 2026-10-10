@@ -50,8 +50,14 @@ struct PTSettings: Codable, Equatable {
     /// Compositor Services' render quality with foveation (visionOS 26): 0 leaves the system's
     /// own; 0.5 to 1 asks for that much (1: the sharpest, largest drawables the system offers).
     var compositorQuality: Float = 0
-    /// MetalFX upscaling of the game's picture to the drawable.
+    /// (Old: MetalFX spatial over the whole eye. No longer used; the core ignores it.)
     var metalFX = false
+    /// Antialiasing of the sharp zone: 0 FXAA, 1 MetalFX temporal at 100 %, 2-4 MetalFX temporal
+    /// drawing at 85, 75 or 67 % and rebuilding the full size. Not part of a preset.
+    var aa = 1
+    /// The scene's depth handed to the headset with each picture (its reprojection moves near
+    /// things correctly, 45 to 90 included).
+    var sceneDepth = true
     /// The game's own foveation: a wide low-density view of each eye and its centre on top.
     var gameFoveation = true
     /// Density of everything outside the sharp zone, percent of the image size (10 to 50).
@@ -248,6 +254,8 @@ struct PTSettings: Codable, Equatable {
         // Degrees now (it used to be a share of the field: the earlier choice does not carry over).
         case center = "sharpZoneDegrees"
         case compositorQuality, metalFX, sharpen, gameFoveation, centerResolution, centerUp
+        case aa = "sharpZoneAntialiasing"
+        case sceneDepth
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -271,7 +279,9 @@ struct PTSettings: Codable, Equatable {
         hdr = (try? c.decodeIfPresent(Int.self, forKey: .hdr)) ?? base.hdr
         foveation = (try? c.decodeIfPresent(Bool.self, forKey: .foveation)) ?? base.foveation
         compositorQuality = (try? c.decodeIfPresent(Float.self, forKey: .compositorQuality)) ?? base.compositorQuality
-        metalFX = (try? c.decodeIfPresent(Bool.self, forKey: .metalFX)) ?? base.metalFX
+        metalFX = false  // (the old spatial MetalFX is gone: a saved "on" must not keep the preset from matching)
+        aa = min(max((try? c.decodeIfPresent(Int.self, forKey: .aa)) ?? base.aa, 0), 4)
+        sceneDepth = (try? c.decodeIfPresent(Bool.self, forKey: .sceneDepth)) ?? base.sceneDepth
         gameFoveation = (try? c.decodeIfPresent(Bool.self, forKey: .gameFoveation)) ?? base.gameFoveation
         periphery = min(max((try? c.decodeIfPresent(Int.self, forKey: .periphery)) ?? base.periphery, 10), 50)
         center = (try? c.decodeIfPresent(Int.self, forKey: .center)) ?? base.center
@@ -322,7 +332,8 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_HDR=\(hdr)",
             "PT_VP_FOVEATION=\(flag(foveation))",
             "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
-            "PT_VP_METALFX=\(flag(metalFX))",
+            "PT_VP_AA=\(min(max(aa, 0), 4))",
+            "PT_VP_SCENE_DEPTH=\(flag(sceneDepth))",
             "PT_VP_GAME_FOVEATION=\(flag(gameFoveation))",
             "PT_VP_PERIPHERY=\(periphery)",
             "PT_VP_CENTER_DEG=\(center)",
