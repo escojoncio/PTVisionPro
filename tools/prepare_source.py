@@ -5,7 +5,9 @@
     python3 tools/prepare_source.py            -> build/port-src
     python3 tools/prepare_source.py --edit     -> the same, with the edits below committed and
                                                   patches/*.patch applied on top as uncommitted
-                                                  changes: edit, then `git diff > patches/<n>.patch`
+                                                  changes: edit, then `git add -N <new files>`
+                                                  (e.g. shaders/light_all.frag) and `git diff > patches/<n>.patch`:
+                                                  plain `git diff` leaves out new files
 
 Every change is an exact text replacement; a missing anchor is an error, never a silent skip,
 so an upstream bump shows up here first.

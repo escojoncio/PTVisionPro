@@ -167,6 +167,10 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   píxeles que la ancha (`PrepareInsets`), así que su densidad era periferia/centro × tamaño de imagen: bajar la periferia
   bajaba también el centro (30 → centro 810x650, imagen mala); subirla pagaba centro y lados en alta (45 → 4 vistas 1214x974,
   4,7 MP, 40–47 ms, térmico serious). Coste medido ≈ 7,5 ms/MP + ~6 ms fijos por frame.
+- **Prueba build 35 (log pt (22)): no arranca** (`shader .../light_all.frag.spv not found` → `pipeline creation failed`, exit 1).
+  Causa: el parche se regeneró con `git diff` sin `git add -N`, y `shaders/light_all.frag` (fichero NUEVO del parche) se perdió.
+  Arreglo (build 36): bloque `new file` de `light_all.frag` restaurado tal cual en `patches/0001-visionos-menus.patch`; aviso en el
+  docstring de `tools/prepare_source.py`. Al regenerar: `git add -N shaders/light_all.frag` antes de `git diff`.
 - **Build 35 (run 39): OK** → `releases/download/build-39/PTVisionPro-39.ipa` (sin probar). **Centro con densidad propia (quad views de verdad).**
   - `Renderer` (renderer.h/.cpp): dos juegos de objetivos (`scene_color_`, `final_`, `output_`, `composite_set_`, `final_set_`,
     `output_ready_`, `final_ready_`) intercambiados con `UseTargetSet(int)` (`TargetStash`, `SwapTargetStash`); pool de

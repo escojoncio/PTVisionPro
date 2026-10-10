@@ -3946,3 +3946,70 @@ index d629ab3..bbc8346 100644
  #endif
      pt::Vfs vfs;
      const std::filesystem::path game_dir = FindGameDir(options);
+diff --git a/shaders/light_all.frag b/shaders/light_all.frag
+new file mode 100644
+index 0000000..b23d12b
+--- /dev/null
++++ b/shaders/light_all.frag
+@@ -0,0 +1,61 @@
++#version 460
++// All of a view's lights in one full-screen pass (the deferred lights without their volumes):
++// the G-buffer is read once per pixel instead of once per light, and the light targets are
++// written once. Each light is the same EvaluateLight as light.frag's; a light whose volume would
++// not have covered the pixel gives nothing there (out of range, outside its area box), so the sum
++// is the one the volumes add up.
++#include "common.glsl"
++#include "lighting.glsl"
++
++layout(push_constant) uniform PassPush {
++    uvec4 ids;  // view, light count (up to 32), lights drawn in this view (bit per light), shadowed ones
++    vec4 f0;
++    vec4 f1;
++    vec4 f2;
++    mat4 m;
++} pass;
++
++layout(location = 0) out vec4 out_diffuse;
++layout(location = 1) out vec4 out_specular;
++
++void main() {
++    View v = frame.views[pass.ids.x];
++    ivec2 pixel = ivec2(gl_FragCoord.xy);
++    float depth = ImgFetch(IMG_DEPTH, pixel).x;
++    if (depth <= 0.0) {
++        discard;
++    }
++    Surface s;
++    s.P = ViewPosition(v, PixelNdc(v, gl_FragCoord.xy), depth);
++    s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
++    vec4 g_normal = ImgFetch(IMG_NORMAL, pixel);
++    vec4 g_material = ImgFetch(IMG_MATERIAL, pixel);
++    s.N = DecodeNormal(g_normal.xyz);
++    s.roughness = g_material.x;
++    s.specular = g_material.y;
++    s.material_u = g_material.z;
++    s.translucency = g_material.w;
++    vec3 diffuse_sum = vec3(0.0);
++    vec3 specular_sum = vec3(0.0);
++    float lit = 0.0;
++    uint count = min(pass.ids.y, 32u);
++    for (uint i = 0u; i < count; ++i) {
++        uint bit = 1u << i;
++        if ((pass.ids.z & bit) == 0u) {
++            continue;
++        }
++        vec3 diffuse;
++        vec3 specular;
++        if (EvaluateLight(frame.lights[i], v, s, (pass.ids.w & bit) != 0u, gl_FragCoord.xy, diffuse, specular)) {
++            diffuse_sum += diffuse;
++            specular_sum += specular;
++            lit += 1.0;
++        }
++    }
++    if (lit == 0.0) {
++        discard;
++    }
++    // (The additive blend leaves the targets' alpha as it was.)
++    out_diffuse = vec4(diffuse_sum, 1.0);
++    out_specular = vec4(specular_sum, 1.0);
++}
