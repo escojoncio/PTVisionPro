@@ -385,21 +385,22 @@ fragment float4 eye_vrr_fragment(Varyings in [[stage_in]], texture2d<float> tex 
     }
     return float4(SceneLight(float4(c, picture.a), u.grade), 1.0);
 }
-// An eye's sharp centre (the game's foveation) over its wide view: premultiplied, faded out over
-// the last pad.y of each edge so no seam shows.
+// An eye's sharp zone (the game's foveation) over its wide view: a circle inscribed in its
+// square image, premultiplied, faded out over its outer pad.y of the radius so no seam shows.
 fragment float4 inset_fragment(Varyings in [[stage_in]], texture2d<float> tex [[texture(0)]], constant Uniforms& u [[buffer(0)]]) {
+    float r = length(in.uv * 2.0 - 1.0);  // 0 at the centre, 1 at the circle's edge
+    float f = max(u.pad.y, 1.0e-3);
+    float a = 1.0 - smoothstep(1.0 - f, 1.0, r);
+    float rim = 0.0;
+    if (u.color.a > 0.0) {
+        // The sharp zone's edge shown (a test setting): an opaque red ring halfway through the
+        // fade, where the sharp picture is half blended into the periphery.
+        rim = 1.0 - smoothstep(0.006, 0.012, abs(r - (1.0 - 0.5 * f)));
+    }
+    if (a <= 0.0 && rim <= 0.0) discard_fragment();
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 c = SceneLight(tex.sample(s, in.uv), u.grade);
-    float2 edge = min(in.uv, 1.0 - in.uv);
-    float f = max(u.pad.y, 1.0e-3);
-    float a = smoothstep(0.0, f, edge.x) * smoothstep(0.0, f, edge.y);
-    if (u.color.a > 0.0) {
-        // The sharp zone's edge shown (a test setting): an opaque red frame halfway through the
-        // fade, where the sharp picture is half blended into the periphery.
-        float rim = 1.0 - smoothstep(0.003, 0.006, abs(min(edge.x, edge.y) - 0.5 * f));
-        return float4(mix(c * a, u.color.rgb, rim), max(a, rim));
-    }
-    return float4(c * a, a);
+    return float4(mix(c * a, u.color.rgb, rim), max(a, rim));
 }
 // A laser from the hand: a thin strip from p0 to p1 that faces the eye.
 vertex Varyings laser_vertex(uint id [[vertex_id]], constant Uniforms& u [[buffer(0)]]) {
@@ -2007,7 +2008,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     const glm::vec4& t = layers.inset_tangents;
                     Uniforms w = u;
                     w.p0 = simd_make_float4(m00 * t.x - m20, m11 * t.w - m21, m00 * t.y - m20, m11 * t.z - m21);
-                    w.pad[1] = 0.12f;  // the fade, as a fraction of the inset from each edge
+                    w.pad[1] = 0.15f;  // the fade, as a fraction of the circle's radius
                     // The menu's "show the sharp zone's edge": a red frame where it ends.
                     w.color = pt::visionos::Headset().show_border ? simd_make_float4(1.0f, 0.1f, 0.1f, 1.0f) : simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                     w.grade = u.grade;  // as its wide view (none with MetalFX: no seam)
@@ -2186,9 +2187,10 @@ void Host::EndFrame(const FrameLayers& layers) {
 
 void Host::SetPointerWanted(bool wanted) { impl_->pointer_wanted = wanted; }
 
-bool Host::InsetWanted(float& center, float& density) const {
+bool Host::InsetWanted(float& center, float& density, float& lift) const {
     const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
     center = CenterTangent(h);
+    lift = std::tan(std::clamp(static_cast<float>(h.center_up), -20.0f, 10.0f) * 3.14159265f / 180.0f);
     // The centre's density over the wide view's (the eye images as they are now).
     density = std::clamp(static_cast<float>(h.center_res) / 100.0f, 0.5f, 1.0f) / std::max(impl_->eye_factor, 0.1f);
     // What the eye images are now (the setting takes effect with them, after its short wait).
@@ -2424,6 +2426,7 @@ void ApplySettings(AppSettings& s) {
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 20.0f)), 10, 50);
     h.center_deg = std::clamp(static_cast<int>(Number("PT_VP_CENTER_DEG", 40.0f)), 20, 70);
+    h.center_up = std::clamp(static_cast<int>(Number("PT_VP_CENTER_UP", -8.0f)), -20, 10);
     h.center_res = std::clamp(static_cast<int>(Number("PT_VP_CENTER_RES", 100.0f)), 50, 100);
     h.hdr = std::clamp(static_cast<int>(Number("PT_VP_HDR", 200.0f)), 100, 200);
     h.fov = std::clamp(static_cast<int>(Number("PT_VP_FOV", 100.0f)), 70, 100);

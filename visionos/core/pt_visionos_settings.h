@@ -25,7 +25,8 @@ struct HeadsetSettings {
     // image size), independent of the periphery's; the composition lays it over the wide view.
     bool game_foveation = true;
     int periphery = 20;    // 10 to 50
-    int center_deg = 40;   // 20 to 70
+    int center_deg = 40;   // 20 to 70: the sharp circle's diameter
+    int center_up = -8;    // -20 to 10: its centre's degrees above the eye's forward axis (below if negative)
     int center_res = 100;  // 50 to 100
     bool show_border = false;  // a red frame where the sharp zone ends (the menu; not kept)
     // Native HDR: the scene's real light above white, up to this percent of SDR white (100: off,
