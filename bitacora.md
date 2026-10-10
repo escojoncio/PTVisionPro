@@ -171,7 +171,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   (1) `SetupEyes` acotaba `eye_factor` a ≥0,2 y `EyeFactor` permitía 0,15 → con periferia 15 las imágenes de ojo se rehacían
   cada ~0,45 s (582 veces; tirones, 16–31 fps). (2) "Tamaño del centro" era % de la TANGENTE media del campo: 60–80 % cubría
   casi toda la vista (centro 1620x1302–1892x1520 por ojo, ~10x los píxeles de la periferia 540x434; inset ~11 de 15 ms/ojo).
-- **Build 37 (pendiente de run):**
+- **Build 37 (run 41): OK** → `releases/download/build-41/PTVisionPro-41.ipa` (sin probar).
   - .mm: `SetupEyes` acota `eye_factor` a 0,1–1; `EyeFactor` 0,10–0,50. `CenterTangent(h)` = tan(`center_deg`/2);
     `Host::InsetWanted` devuelve esa semianchura (tangente). `VrrCenterFraction()` = tan/1,2 en 0,2–0,8 (VRR apagado).
     Marco de prueba: `Uniforms.color` en el dibujo del inset si `show_border`; `inset_fragment` pinta un aro rojo opaco a mitad
