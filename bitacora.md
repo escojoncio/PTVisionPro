@@ -171,7 +171,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   zona 722x580, periferia 406x326). Problema: zona nítida demasiado alta (el usuario ve ~10 % borroso arriba y ~30 % abajo); la
   quiere circular. Reparto (ms por vista): ancha post 2,5 (bloom: 41 pasadas casi de coste fijo), ancha compose+forward 2,6
   (efectos 1,4: partículas + kept + composite; forward 0,67), ancha luminance 0,53; centro lighting 0,73, gbuffer 0,4, post 0,6.
-- **Build 38 (pendiente de run): zona nítida circular y con altura.**
+- **Build 38 (run 42): OK** → `releases/download/build-42/PTVisionPro-42.ipa` (sin probar). **Zona nítida circular y con altura.**
   - vr_play `PrepareInsets`: imagen cuadrada (tan_x = tan_y = radio), centro en `lift_y` (tangente, arriba +), acotado dentro de
     los campos de ambos ojos; `insets[i].offset = (0, lift_y/tan_y)`; `inset_tangents = (-r, r, lift+r, lift-r)`;
     `inset_share.w = (f.center.y - lift_y)/(2 f.tan_y)`. Log `vr: sharp zone a circle N degrees across, M degrees from the eye's axis...`.
