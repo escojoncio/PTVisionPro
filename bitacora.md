@@ -41,7 +41,24 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
   `aa_jitter`/`aa_debug`/`AaScale`, `SetVrNoJitter`/`SetVrUpscaleBypass`. Quedan sin uso (inofensivos): `UpscalerKind::MetalFx`
   en el motor y el parche MoltenVK 0002.
 
+## Resultado build 50 (log pt (37)) y preset M2 (sin build aún)
+
+- VPKTAA funciona en el visor; sin fallos. Coste `vpktaa` 0,84 ms/inset (765² render → 956²) a 1,06 (1054²): objetivo
+  ≤0,7 no alcanzado. Periferia: `wide/upscale` 0,18 ms. El usuario eligió: centro 60°, VPKTAA 80 %, nitidez 100 %,
+  periferia sí. Con eso: pasillo (≈268 draws) GPU 23–25 ms → 35–40 fps; zonas ligeras 19–21 ms → 44–48 fps. 100 % → +4–5 ms
+  en el pasillo. Térmico fair a ~290 s, serious a ~540 s.
+- Reparto pasillo (por frame, 80 %, 60°): sombras 3,05 (vista ancha izq., compartidas), anchas ~4,5 en total, por inset:
+  gbuffer 1,65, lighting 2,5 (lights ~1,8–2,0, 16 luces/tesela de 23), compose+forward 1,1, post 2,2 (vpktaa 0,84).
+- **Preset M2 = ajustes del usuario** (`kPresets` .mm y `PTSettings.defaults`): centro 60°, `aa` 5, `taa_res` 80,
+  `taa_sharpness` 100, `taa_periphery` sí. El preset incluye ahora aa/taa_* (`MatchesPreset`, `ApplyPreset`, Swift
+  `apply`/`matches`); las filas de VPKTAA del menú llaman `HeadsetCustom()`. M5: 70°, VPKTAA 100 %, nitidez 50, periferia sí.
+
 ## Pendiente (en orden)
+
+0. Build 51 (optimización, misma calidad): (a) sombras: caché de la profundidad estática por tesela y redibujo solo de los
+   objetos que se mueven (−2 ms en el pasillo); (b) VPKTAA: profundidad 3x3 con textureGather, menos lecturas y ALU
+   (−0,3 ms/inset); (c) luces por teselas con rango de profundidad por tesela (min/max) para no recorrer luces que no tocan
+   esa profundidad (lights 1,8–2 ms/inset); (d) medir de nuevo.
 
 1. Log de la build 50: líneas `vpktaa:`, coste `vpktaa` en `gpu labels` (objetivo ≤ 0,7 ms/inset), fps con 100/90/85/80 %
    y periferia sí/no. Preguntar: nitidez, estelas (partículas, objetos), parpadeo en suelos lejanos, aspecto de la periferia.
