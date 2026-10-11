@@ -36,8 +36,11 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
    **Resultado build 47 (log pt (33)):** fantasma resuelto. «Mismo camino, sin MetalFX» quita la separación estéreo → la causa
    está en la propia salida de MetalFX (no en nuestro camino). Sin ganancia de fps. **Decisión:** MetalFX aparcado (usar FXAA);
    siguiente paso = build sonda TBDR (punto 3). Pendiente menor: poner FXAA por defecto en el preset M2 y en `PTSettings`.
-   Después de la sonda: TAA propio en el camino del resolve (ya alineado en estéreo; reutiliza jitter y vectores de
-   movimiento) en lugar de FXAA, dentro de la reestructuración del posproceso. El usuario quiere la nitidez de un AA temporal.
+   Después de la sonda, dentro de la reestructuración del posproceso (orden acordado con el usuario):
+   (1) **SMAA** en la zona nítida en lugar de FXAA (más nítido, <1 ms/inset, sin historial → sin riesgo estéreo; 1 build).
+   (2) **TAA propio** con afilado final (tipo CAS) en el camino del resolve (ya alineado en estéreo; reutiliza jitter y
+   vectores de movimiento; rechazo de historial por vecindad/profundidad, cuidado con la linterna), como opción de menú
+   «Antialiasing: FXAA / SMAA / TAA» para comparar en el visor. Prever 2–3 builds de ajuste (estelas/borrosidad).
    Con MetalFX 67 % (776→1158): 40 fps, GPU 21 ms; `inset/upscale` 2,2 ms/inset.
 2. (Incluido en la build 45 el preajuste M2 del commit 12bd8f9.)
 3. **Rendimiento: arquitectura TBDR (prioridad tras cerrar MetalFX).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
