@@ -1440,8 +1440,7 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
     x.game_call_ns.store(SteadyNs());
     x.keeper_stop.store(false);
     x.keeper = std::thread([this] { KeepPresenting(*this, *impl_); });
-    // While the keeper shows frames: G-buffer in tile memory or not, MoltenVK or Metal (a few seconds).
-    pt::visionos::RunTbdrProbe(ctx, x.mtl_device, x.mtl_queue);
+    // (The TBDR probe, tbdr_probe.mm, ran here in build 48; its answer is in, so no longer called.)
     LogInfo("vr: session created");
     return true;
 }
@@ -2539,11 +2538,12 @@ void ApplySettings(AppSettings& s) {
     // drawable's full size (6-7 ms a frame for nothing). MetalFX is now the sharp views' temporal
     // antialiasing (`aa`), inside the game's frame.
     h.metalfx = false;
-    h.aa = std::clamp(static_cast<int>(Number("PT_VP_AA", 3.0f)), 0, 4);
+    h.aa = std::clamp(static_cast<int>(Number("PT_VP_AA", 5.0f)), 0, 5);
     h.aa_jitter = std::clamp(static_cast<int>(Number("PT_VP_AA_JITTER", 0.0f)), 0, 2);
     h.subtitle_size = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_SIZE", 175.0f)), 100, 250);
     h.subtitle_height = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_HEIGHT", 20.0f)), 0, 40);
     h.scene_depth = Flag("PT_VP_SCENE_DEPTH", true);
+    h.tiled_lights = Flag("PT_VP_TILED_LIGHTS", true);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 20.0f)), 10, 50);
     h.center_deg = std::clamp(static_cast<int>(Number("PT_VP_CENTER_DEG", 40.0f)), 20, 70);
@@ -2601,7 +2601,7 @@ void ApplySettings(AppSettings& s) {
             "reflections {}, anisotropic filtering {}x",
             h.device_m5 ? "M5" : "M2", h.preset == 0 ? "M2" : h.preset == 1 ? "M5" : "custom", h.resolution_scale * 100.0f, h.target_fps,
             h.dynamic_resolution ? "on" : "off", h.foveation ? "on" : "off",
-            h.aa == 0 ? std::string("FXAA") : std::format("MetalFX temporal {:.0f} %", AaScale(h.aa) * 100.0f),
+            h.aa == 0 ? std::string("FXAA") : h.aa == 5 ? std::string("TAA") : std::format("MetalFX temporal {:.0f} %", AaScale(h.aa) * 100.0f),
             ShadowName(s.graphics.shadow_quality), s.graphics.ambient_occlusion, s.graphics.bloom, s.graphics.reflections, s.graphics.anisotropy);
 }
 

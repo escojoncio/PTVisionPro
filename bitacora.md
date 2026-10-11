@@ -5,80 +5,46 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nativo + MoltenVK
 (con `patches/moltenvk/0001-rasterization-rate-map.patch` y `0002-metal-encode-command.patch`).
 
-## Estado (última build: 48, sonda TBDR, `releases/download/build-48/PTVisionPro-48.ipa`; probada en log pt (34))
+## Estado (última build publicada: 48; build 49 lanzada: TAA propio + luces por teselas)
 
 - Juego completo jugable de principio a fin (log pt (27), build 42). Sin cierres desde la build 14.
-- Ajustes de referencia del usuario (por debajo "se ve borroso"): imagen 50 %, zona nítida 70° al 100 % (1158x1158/ojo),
-  altura -10°, periferia 10 %, sombras altas, SSAO, bloom, reflejos, anisotrópico 8x, 45 fps. Rendimiento con ellos
-  (build 42): 45 fps al inicio, 25–35 en el pasillo (GPU 30–40 ms, picos 48). Coste: inset lighting 3,2–3,6 ms/ojo,
-  inset gbuffer 1,4–2,1, inset compose 1,9, bloom ancho 1,4 (antes de compartirlo), sombras hasta 3,5–6 ms/frame.
-- **Build 44 (log pt (28)): imágenes fantasma** muy molestas. MetalFX temporal funciona (encontrado en tiempo de ejecución;
-  1044→1392, 2,7 ms/inset) y la profundidad al compositor está activa (composición 1,2 → 3,2 ms). Sin aislar cuál causa los
-  fantasmas: pedido al usuario probar en el menú "Profundidad para la reproyección" off y luego AA = FXAA.
-  Esa partida iba con M2 al 60 % (zona 1392), no comparable en fps.
-- El usuario siempre elige el preajuste M2 esperando sus ajustes → hecho en el commit 12bd8f9 (sin build aún).
+- Ajustes de referencia del usuario: imagen 50 %, zona nítida 70° al 100 %, altura -10°, periferia 10 %, sombras altas,
+  SSAO, bloom, reflejos, anisotrópico 8x, 45 fps. Coste pt (34) (habitación inicial, M2, MetalFX 100 %): GPU 28–30 ms;
+  inset/upscale 3,35 + inputs 0,46 ms ×2 insets, lighting 2,25, compose+forward 1,79, reflections 1,44, occlusion 0,68.
+- Descartados por el usuario como antialiasing: FXAA (borroso), SMAA (sin probar en el visor; lo rechazó viendo imágenes),
+  MetalFX temporal (su salida separa la estereoscopia; probado en build 47). TBDR descartado (build 48: no es el cuello).
+
+## Build 49 (sin probar en el visor)
+
+1. **TAA propio** (`HeadsetSettings::aa` = 5, por defecto; Swift `aa`, clave nueva `sharpZoneAntialiasingV2` para que todos
+   empiecen en TAA). Menú: FXAA / TAA / MetalFX 100/85/75/67 (índice ↔ valor: `VpAaToMenu`/`VpAaFromMenu` en main.cpp; 0,5,1,2,3,4).
+   - `shaders/taa.frag` (nuevo): filtro de reconstrucción 3x3 (gaussiana tipo Blackman-Harris) sobre el render con jitter,
+     movimiento del más cercano (3x3), historia Catmull-Rom 5 taps, recorte por varianza en YCoCg (1,1 σ), mezcla en
+     tonemap reversible (0,92 quieto → 0,80 a 8 px/frame), `Sane()` contra NaN/Inf, `Expand` con tope.
+   - Afilado CAS en `upscale_resolve.frag` (`Sharpen`, `f1.w`; la historia no se afila). `PT_TAA_SHARPEN` (0,5),
+     `PT_TAA_TUNING` (quieto,movimiento,σ), `PT_TAA_MIP_BIAS` (-0,5).
+   - `scene_upscale.cpp`: rama TAA en `SetupUpscaler` (jitter Halton 8 fases por ojo, sin backend, `taa_active_`), en
+     `RecordUpscale` pasada "taa resolve" → `upscaled_` → copia a la columna del ojo de `taa_history_` (2 columnas, slot 36
+     `kImgTaaHistory`, en el stash por juego de objetivos); `RecordUpscaleInputs` sin máscara reactiva ni flashlight split;
+     sin `RecordOpaqueSnapshot` (scene_frame.cpp). Historia inválida si la vista no pasó por TAA o `vr_reset_`.
+   - Sin pipeline → FXAA con aviso (main.cpp). Log: `taa: on WxH view N`, `taa: view N history starts again`.
+2. **Luces por teselas** (`tiled_lights`, def. sí; menú «Luces por teselas», launcher toggle, `PT_VP_TILED_LIGHTS`):
+   CPU proyecta la caja de cada luz a teselas (≥32 px, rejilla ≤64x64), máscaras de 64 luces en `FrameData.light_tiles`
+   (escritas en el buffer mapeado del slot), `light_all.frag` recorre solo los bits de su tesela. Cae a volúmenes con
+   >64 luces, VRR, RT, contacto o espejo. Log `cull` añade `tiled in N%: X lights, avg Y per tile`.
+3. Atajos exactos: `lighting.glsl` sale antes de sombras si NdotL ≤ 0 y no translúcido; `reflect_make.frag` corta la marcha
+   al encontrar impacto o terminar.
+4. Sonda TBDR: llamada quitada (`tbdr_probe.mm` sigue compilándose).
 
 ## Pendiente (en orden)
 
-1. **Build 45: opción «Alineación de MetalFX»** (`HeadsetSettings::aa_jitter`, menú VR → Foveado y nitidez, `kVpAaJitter`;
-   Swift `aaJitter`/`metalFXAlignment`, env `PT_VP_AA_JITTER`): 0 Apple (jitter negado al scaler, por defecto), 1 como DLSS/FSR
-   (lo de la build 44), 2 sin jitter (`SceneRenderer::SetVrNoJitter`, `scene_upscale.cpp`). Cambiar reinicia las historias
-   (`restart_` en `metalfx_upscaler.mm`). Motivo: log pt (29): con FXAA (profundidad on) no hay fantasmas → la causa es MetalFX,
-   no la profundidad; `depthReversed` ya estaba a YES. Pedido al usuario: probar 0, 1 y 2 con MetalFX y decir cuál quita la sombra.
-   Si ninguno: revisar vectores de movimiento (signo/`motion_scale`) y la colocación del inset en la composición.
-   **Resultado build 45 (log pt (30)):** los 3 modos de jitter igual de mal → no es el jitter.
-   **Build 46 (log pt (32)):** «Sin separar la linterna» quita el fantasma → causa: `handy_demod_` (factor de la linterna a
-   resolución de render remultiplicado sobre la imagen de MetalFX a tamaño completo = halos en bordes). Queda otro fallo:
-   con MetalFX (también al 100 %, sin reescalar) la estereoscopia se ve «más separada» que con FXAA.
-   **Build 47:** `handy_demod_` desactivado siempre en VR (`scene_upscale.cpp`, `!VrView()`). «Prueba de MetalFX» opción 3 ahora
-   «Mismo camino, sin MetalFX» (`SetVrUpscaleBypass`: el resolve estira el render en vez de usar la salida de MetalFX).
-   Si con ella sigue la separación → fallo en el camino del upscaler (post_view_, resolve, depth/offset); si no → en MetalFX.
-   **Resultado build 47 (log pt (33)):** fantasma resuelto. «Mismo camino, sin MetalFX» quita la separación estéreo → la causa
-   está en la propia salida de MetalFX (no en nuestro camino). Sin ganancia de fps. **Decisión:** MetalFX aparcado (usar FXAA);
-   siguiente paso = build sonda TBDR (punto 3). Pendiente menor: poner FXAA por defecto en el preset M2 y en `PTSettings`.
-   Después de la sonda, dentro de la reestructuración del posproceso (orden acordado con el usuario):
-   (1) **SMAA** en la zona nítida en lugar de FXAA (más nítido, <1 ms/inset, sin historial → sin riesgo estéreo; 1 build).
-   (2) **TAA propio** con afilado final (tipo CAS) en el camino del resolve (ya alineado en estéreo; reutiliza jitter y
-   vectores de movimiento; rechazo de historial por vecindad/profundidad, cuidado con la linterna), como opción de menú
-   «Antialiasing: FXAA / SMAA / TAA» para comparar en el visor. Prever 2–3 builds de ajuste (estelas/borrosidad).
-   Con MetalFX 67 % (776→1158): 40 fps, GPU 21 ms; `inset/upscale` 2,2 ms/inset.
-2. (Incluido en la build 45 el preajuste M2 del commit 12bd8f9.)
-3. **Build 48: sonda TBDR** (`visionos/core/tbdr_probe.mm`, nuevo; shaders `shaders/tbdr_probe*.{vert,frag,glsl}` en el parche;
-   `prepare_source.py` lo añade a `pt_visionos`; llamada `pt::visionos::RunTbdrProbe` al final de `Host::StartSession`, con el
-   keeper ya presentando; `PT_VP_TBDR_PROBE=0` la apaga). 1384², G-buffer del motor (+ profundidad R32F), 3 capas de overdraw,
-   16 luces aditivas, composición; 8 frames por command buffer, 5 rondas + calentamiento. Orden: A (Vulkan pasadas separadas),
-   M1 (Metal encoders separados), M2 (Metal un encoder + memoryless + `[[color(n)]]`) intercalados → log; después B (Vulkan
-   1 render pass, 3 subpasadas, input attachments, adjuntos TRANSIENT + LAZILY_ALLOCATED) intercalada con A' (B al final por
-   riesgo de fallo de MoltenVK). Tiempos: reloj GPU del MTLCommandBuffer (Vulkan vía `vkCmdEncodeMetalMVK` + completed handler),
-   timestamps Vulkan y wall. Log: líneas `tbdr:` (storageMode de los adjuntos de B, ms/frame, 4 píxeles por variante,
-   `verdict ...`). Leer: si B ≈ A o píxeles distintos → MoltenVK no sirve para TBDR; si M2 ≪ A → la vía es Metal nativo
-   (en PTVisionPro vía `vkCmdEncodeMetalMVK` o en el traductor de VPEngine); si M2 ≈ A → el cuello no es ancho de banda.
-   Comprobado en local: glslang (shaders), clang -fsyntax-only con Metal simulado (.mm); MSL solo revisado a mano.
-   **Resultado build 48 (log pt (34)): TBDR DESCARTADO.** Frame diferido completo a 1384²: A 1,61 ms, M1 1,45, M2 1,34
-   (−16 %, −0,27 ms), B 1,47 vs A' 1,57 (−6 %); píxeles idénticos en todas. MoltenVK deja los color transitorios en `private`
-   (solo la profundidad `memoryless`); sobrecoste MoltenVK vs Metal ≈10 %. El ancho de banda del G-buffer no es el cuello
-   (máx. ~0,5 ms/frame con 2 insets) → no reestructurar a TBDR ni justificar VPEngine por esto. Sonda: quitar en la próxima build.
-   Coste real (pt (34), M2 con AA = MetalFX 100 %): inset/upscale 3,35 + inputs 0,46 ms ×2 insets (≈7,6 ms/frame), lighting
-   2,25 (luces 2,05), compose+forward 1,79, reflections 1,44, occlusion 0,68, gbuffer 0,95; GPU 28–30 ms, 28–31 fps.
-   **Siguiente: build 49** = SMAA en la zona nítida (opción de menú «Antialiasing: FXAA / SMAA / MetalFX», `HeadsetSettings.aa`,
-   textos en `pc_settings.cpp`, presets en `kPresets` y `PTSettings.defaults` iguales), SMAA por defecto en M2; quitar la
-   llamada a `RunTbdrProbe` (o `PT_VP_TBDR_PROBE` apagado por defecto). FXAA descartado por el usuario (demasiado borroso).
-   Las cifras de pt (34) son de la habitación inicial, no del pasillo: pedir medición en el pasillo con SMAA y con MetalFX.
-   Si SMAA no basta en nitidez → TAA propio con afilado (punto 1).
-   **Plan TBDR (contexto de la sonda).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
-   → coste en pasadas de pantalla completa y ancho de banda (G-buffer escrito/leído de memoria en cada pasada, ×4 vistas).
-   Plan: (a) build sonda: microbenchmark al arrancar a 1384² con el formato del G-buffer del motor, 3 variantes con
-   timestamps GPU: pasadas separadas (actual) / una render pass Vulkan con subpasadas + input attachments + adjuntos
-   transitorios (LAZILY_ALLOCATED) / Metal nativo en un solo `MTLRenderCommandEncoder` con texturas `memoryless` y
-   programmable blending vía `vkCmdEncodeMetalMVK`. Loguear ms de cada una y `storageMode` real de los adjuntos
-   (`vkGetMTLTextureMVK`) y si MoltenVK abre un encoder por subpasada. (b) Según el resultado: G-buffer+luz+compose
-   en memoria de teselas, posproceso en una pasada (bloom corto), multiview. Estimación: −9–12 ms GPU (30–40 %).
-   Si ni Vulkan ni Metal nativo ganan, el usuario plantea pasar a VPEngine.
-4. MetalFX no da fps aún (2,7 ms/inset ≈ lo ahorrado): medir con 67 %, o TAA propio más barato.
-5. Comprobar en el visor: X como zoom (mirilla, reloj), X en la marca del cuadro, subtítulos (tamaño/altura).
-6. Rendimiento: bloom con menos pasadas (41 pasadas casi de coste fijo), sombras (3,5–6 ms/frame en el pasillo),
-   inset lighting (luces por teselas).
-7. 45→90 de verdad (spacewarp propio con vectores de movimiento) si la reproyección con profundidad convence.
+1. Leer el log de la build 49: líneas `taa:`, `gpu labels` (coste "taa resolve"), `cull ... tiled`, fps en el pasillo con
+   luces por teselas sí/no. Preguntar al usuario por nitidez, estelas (partículas/transparentes no tienen vectores de
+   movimiento: si hay estelas, máscara reactiva barata o bajar el peso de historia) y si el afilado es excesivo.
+2. Si TAA convence: exponer el afilado como opción de menú (no .txt). Si hay estelas: rechazo por profundidad previa.
+3. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos.
+4. Rendimiento: bloom con menos pasadas, sombras (3,5–6 ms/frame en el pasillo), composición (niebla por píxel).
+5. 45→90 de verdad (spacewarp propio) si la reproyección con profundidad convence.
 
 ## Funciones vigentes (dónde está cada cosa)
 
@@ -92,7 +58,7 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
   Compartido: sombras (atlas estable + caché de teselas), exposición (vista 0), partículas (ancha → inset),
   bloom (uno por frame: `SetVrBloomShare`, `Stereo::bloom_place`; `PT_BLOOM_PER_EYE=1` lo desactiva).
   Composición: `inset_fragment` (círculo con fundido 15 %, aro rojo opcional).
-- **AA de la zona nítida** (`HeadsetSettings.aa`, def. 3): 0 FXAA; 1–4 MetalFX temporal 100/85/75/67 % (`AaScale`).
+- **AA de la zona nítida** (`HeadsetSettings.aa`, def. 5 TAA): 0 FXAA; 1–4 MetalFX temporal 100/85/75/67 % (`AaScale`); 5 TAA propio.
   `metalfx_upscaler.mm`: `UpscalerKind::MetalFx`, clase por `NSClassFromString` + `objc_msgSend` (el SDK de visionOS la
   marca no disponible), un scaler por vista, encode dentro del command buffer de Vulkan con `vkCmdEncodeMetalMVK`
   (parche MoltenVK 0002). Motor: historia por vista (`vr_last_camera_[4]`, `vr_jitter_index_[4]`, `vr_reset_[4]`,
