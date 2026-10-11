@@ -34,8 +34,9 @@ struct HeadsetSettings {
     int hdr = 200;
     // Antialiasing of the sharp views (the insets, or the eyes without the game's foveation):
     // 0 FXAA; 1 MetalFX temporal at the full size (antialiasing only); 2-4 MetalFX temporal
-    // drawing at 85, 75 or 67 % and rebuilding the full size from the past frames.
-    int aa = 3;
+    // drawing at 85, 75 or 67 % and rebuilding the full size from the past frames; 5 the engine's
+    // own TAA at the full size (taa.frag). The menu shows them FXAA, TAA, MetalFX (main.cpp).
+    int aa = 5;
     // How MetalFX is told the frames' jitter: 0 Apple's sign (the opposite of DLSS/FSR), 1 as
     // DLSS/FSR, 2 no jitter at all (a test: nothing can be misaligned). Not part of a preset.
     int aa_jitter = 0;
@@ -49,6 +50,9 @@ struct HeadsetSettings {
     // The scene's depth handed to the compositor with each picture, so its reprojection (45 to
     // 90, and every picture's correction to the latest head pose) moves near things correctly.
     bool scene_depth = true;
+    // The deferred lights in one tiled full-screen pass (each pixel only the lights touching its
+    // tile) instead of one volume per light. Not part of a preset.
+    bool tiled_lights = true;
     // Dynamic resolution: the eyes drawn smaller while the GPU cannot keep the frame rate.
     bool dynamic_resolution = false;
     // The headset is an M5 (its preset is offered only then).
@@ -57,8 +61,8 @@ struct HeadsetSettings {
 
 // What each antialiasing step draws, as a fraction of the sharp view's size (HeadsetSettings::aa).
 inline float AaScale(int aa) {
-    static constexpr float kScales[5] = {1.0f, 1.0f, 0.85f, 0.75f, 0.67f};
-    return kScales[aa < 0 ? 0 : aa > 4 ? 4 : aa];
+    static constexpr float kScales[6] = {1.0f, 1.0f, 0.85f, 0.75f, 0.67f, 1.0f};
+    return kScales[aa < 0 ? 0 : aa > 5 ? 5 : aa];
 }
 
 // The launcher's settings into the game's, after pt.ini was read.

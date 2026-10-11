@@ -38,7 +38,7 @@ struct PerformanceView: View {
                     LabeledContent(L("Objetivo", "Target"), value: "\(model.settings.targetFPS) fps")
                     LabeledContent(L("Campo de visión", "Field of view"), value: "\(model.settings.fov) %")
                     LabeledContent(L("Foveación", "Foveation"), value: model.settings.foveation ? L("Sí", "Yes") : L("No", "No"))
-                    LabeledContent(L("Antialiasing", "Antialiasing"), value: model.settings.aa == 0 ? "FXAA" : "MetalFX \([100, 100, 85, 75, 67][min(max(model.settings.aa, 0), 4)]) %")
+                    LabeledContent(L("Antialiasing", "Antialiasing"), value: model.settings.aa == 0 ? "FXAA" : model.settings.aa == 5 ? "TAA" : "MetalFX \([100, 100, 85, 75, 67][min(max(model.settings.aa, 0), 4)]) %")
                     LabeledContent(L("Gráficos", "Graphics"), value: "\(model.settings.graphicsPreset) · \(L("sombras", "shadows")) \(model.settings.shadows)")
                 } header: {
                     Text(L("Ajustes en uso", "Settings in use"))

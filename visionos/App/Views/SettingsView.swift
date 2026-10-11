@@ -89,6 +89,7 @@ struct SettingsView: View {
                 Text(L("45 reproyectados a 90", "45 reprojected to 90")).tag(45)
             }
             Toggle(L("Profundidad para la reproyección", "Depth for reprojection"), isOn: bool(\.sceneDepth))
+            Toggle(L("Luces por teselas", "Tiled lights"), isOn: bool(\.tiledLights))
             Toggle(L("Resolución dinámica", "Dynamic resolution"), isOn: bool(\.dynamicResolution))
             LabeledContent(L("Campo de visión dibujado", "Drawn field of view")) {
                 Stepper("\(model.settings.fov) %", value: int(\.fov), in: 70...100, step: 5)
@@ -186,6 +187,7 @@ struct SettingsView: View {
             .disabled(!model.settings.gameFoveation)
             Picker(L("Antialiasing de la zona nítida", "Sharp zone antialiasing"), selection: int(\.aa)) {
                 Text(L("FXAA (básico)", "FXAA (basic)")).tag(0)
+                Text(L("TAA (temporal, con nitidez)", "TAA (temporal, sharpened)")).tag(5)
                 Text("MetalFX 100 %").tag(1)
                 Text("MetalFX 85 %").tag(2)
                 Text("MetalFX 75 %").tag(3)
@@ -194,8 +196,8 @@ struct SettingsView: View {
         } header: {
             Text(L("Foveado del juego", "Game foveation"))
         } footer: {
-            Text(L("Solo un círculo en el centro de la vista se dibuja nítido; todo lo de fuera, a baja resolución. Ancho: diámetro del círculo en grados (40° es más o menos lo que miras de frente; más ancho cuesta mucho más). Altura: súbelo (+) o bájalo (-) hasta que lo borroso de arriba y de abajo te parezca igual. Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un aro rojo donde acaba la zona. Antialiasing: MetalFX combina varios fotogramas (bordes limpios, menos parpadeo que FXAA); al 85/75/67 % la zona se dibuja más pequeña y MetalFX reconstruye el tamaño completo: más fps.",
-                   "Only a circle in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: the circle's diameter in degrees (40° is about what you look at straight ahead; wider costs much more). Height: move it up (+) or down (-) until the blur above and below look the same. Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red ring where the zone ends. Antialiasing: MetalFX combines several frames (clean edges, less shimmer than FXAA); at 85/75/67 % the zone is drawn smaller and MetalFX rebuilds the full size: more frames per second."))
+            Text(L("Solo un círculo en el centro de la vista se dibuja nítido; todo lo de fuera, a baja resolución. Ancho: diámetro del círculo en grados (40° es más o menos lo que miras de frente; más ancho cuesta mucho más). Altura: súbelo (+) o bájalo (-) hasta que lo borroso de arriba y de abajo te parezca igual. Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un aro rojo donde acaba la zona. Antialiasing: FXAA difumina los bordes de cada fotograma (blando). TAA combina varios fotogramas con un desplazamiento diminuto: bordes limpios y menos parpadeo a resolución completa, con afilado. MetalFX es el de Apple; al 85/75/67 % dibuja la zona más pequeña y la reconstruye: más fps, menos detalle.",
+                   "Only a circle in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: the circle's diameter in degrees (40° is about what you look at straight ahead; wider costs much more). Height: move it up (+) or down (-) until the blur above and below look the same. Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red ring where the zone ends. Antialiasing: FXAA blurs each frame's edges (soft). TAA combines several frames drawn with a tiny shift: clean edges and less shimmer at full resolution, sharpened. MetalFX is Apple's; at 85/75/67 % it draws the zone smaller and rebuilds it: more frames per second, less detail."))
         }
     }
 

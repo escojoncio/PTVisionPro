@@ -54,7 +54,7 @@ struct PTSettings: Codable, Equatable {
     var metalFX = false
     /// Antialiasing of the sharp zone: 0 FXAA, 1 MetalFX temporal at 100 %, 2-4 MetalFX temporal
     /// drawing at 85, 75 or 67 % and rebuilding the full size. Not part of a preset.
-    var aa = 3
+    var aa = 5  // 0 FXAA, 1-4 MetalFX 100/85/75/67 %, 5 TAA (the engine's own)
     /// How MetalFX is told the frames' jitter: 0 Apple's sign, 1 as DLSS/FSR, 2 none (a test).
     var aaJitter = 0
     /// Subtitles in the headset: size, percent of the original's (100 to 250).
@@ -64,6 +64,8 @@ struct PTSettings: Codable, Equatable {
     /// The scene's depth handed to the headset with each picture (its reprojection moves near
     /// things correctly, 45 to 90 included).
     var sceneDepth = true
+    /// The deferred lights in one tiled full-screen pass instead of one volume per light.
+    var tiledLights = true
     /// The game's own foveation: a wide low-density view of each eye and its centre on top.
     var gameFoveation = true
     /// Density of everything outside the sharp zone, percent of the image size (10 to 50).
@@ -278,9 +280,10 @@ struct PTSettings: Codable, Equatable {
         // Degrees now (it used to be a share of the field: the earlier choice does not carry over).
         case center = "sharpZoneDegrees"
         case compositorQuality, metalFX, sharpen, gameFoveation, centerResolution, centerUp
-        case aa = "sharpZoneAntialiasing"
+        case aa = "sharpZoneAntialiasingV2"
         case aaJitter = "metalFXAlignment"
         case sceneDepth, subtitleSize, subtitleHeight
+        case tiledLights = "tiledLights"
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -305,9 +308,10 @@ struct PTSettings: Codable, Equatable {
         foveation = (try? c.decodeIfPresent(Bool.self, forKey: .foveation)) ?? base.foveation
         compositorQuality = (try? c.decodeIfPresent(Float.self, forKey: .compositorQuality)) ?? base.compositorQuality
         metalFX = false  // (the old spatial MetalFX is gone: a saved "on" must not keep the preset from matching)
-        aa = min(max((try? c.decodeIfPresent(Int.self, forKey: .aa)) ?? base.aa, 0), 4)
+        aa = min(max((try? c.decodeIfPresent(Int.self, forKey: .aa)) ?? base.aa, 0), 5)
         aaJitter = min(max((try? c.decodeIfPresent(Int.self, forKey: .aaJitter)) ?? base.aaJitter, 0), 2)
         sceneDepth = (try? c.decodeIfPresent(Bool.self, forKey: .sceneDepth)) ?? base.sceneDepth
+        tiledLights = (try? c.decodeIfPresent(Bool.self, forKey: .tiledLights)) ?? base.tiledLights
         subtitleSize = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleSize)) ?? base.subtitleSize, 100), 250)
         subtitleHeight = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleHeight)) ?? base.subtitleHeight, 0), 40)
         gameFoveation = (try? c.decodeIfPresent(Bool.self, forKey: .gameFoveation)) ?? base.gameFoveation
@@ -360,9 +364,10 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_HDR=\(hdr)",
             "PT_VP_FOVEATION=\(flag(foveation))",
             "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
-            "PT_VP_AA=\(min(max(aa, 0), 4))",
+            "PT_VP_AA=\(min(max(aa, 0), 5))",
             "PT_VP_AA_JITTER=\(min(max(aaJitter, 0), 2))",
             "PT_VP_SCENE_DEPTH=\(flag(sceneDepth))",
+            "PT_VP_TILED_LIGHTS=\(flag(tiledLights))",
             "PT_VP_SUBTITLE_SIZE=\(subtitleSize)",
             "PT_VP_SUBTITLE_HEIGHT=\(subtitleHeight)",
             "PT_VP_GAME_FOVEATION=\(flag(gameFoveation))",
