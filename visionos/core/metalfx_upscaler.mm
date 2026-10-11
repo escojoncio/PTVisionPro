@@ -264,7 +264,7 @@ public:
         if (test != test_) {
             test_ = test;
             std::fill(std::begin(restart_), std::end(restart_), true);
-            LogInfo("upscale: MetalFX test {}", test == 1 ? "no history" : test == 2 ? "no motion vectors" : test == 3 ? "no flashlight split" : "off");
+            LogInfo("upscale: MetalFX test {}", test == 1 ? "no history" : test == 2 ? "no motion vectors" : test == 3 ? "same path, no MetalFX picture" : "off");
         }
         e.motion_x = test == 2 ? 0.0f : d.motion_scale.x;
         e.motion_y = test == 2 ? 0.0f : d.motion_scale.y;

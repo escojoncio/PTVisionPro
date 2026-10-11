@@ -40,7 +40,7 @@ struct HeadsetSettings {
     // DLSS/FSR, 2 no jitter at all (a test: nothing can be misaligned). Not part of a preset.
     int aa_jitter = 0;
     // A test of MetalFX for this session (not kept): 0 normal, 1 no history (reset every frame),
-    // 2 no motion vectors (scale 0), 3 no flashlight demodulation.
+    // 2 no motion vectors (scale 0), 3 the upscaler path without its picture.
     int aa_debug = 0;
     // Subtitles in the headset: size (percent of the original's, 100 to 250) and how far up from
     // the bottom edge (percent of the view's height, 0 to 40), where the headset is sharpest.

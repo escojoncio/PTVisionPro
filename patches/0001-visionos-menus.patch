@@ -2443,17 +2443,18 @@ index 1f96981..d61b691 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..9b8f2b9 100644
+index 6c9b165..6addbb7 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -206,6 +206,73 @@ public:
+@@ -206,6 +206,74 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
 +    // The headset views drawn without the upscaler's jitter (a diagnosis of MetalFX's alignment).
 +    void SetVrNoJitter(bool off) { vr_no_jitter_ = off; }
-+    // The headset views upscaled without the flashlight's demodulation (a diagnosis of MetalFX).
-+    void SetVrNoDemod(bool off) { vr_no_demod_ = off; }
++    // The headset views show the scene through the upscaler's path but without its picture (a
++    // diagnosis of MetalFX: the plain render, stretched).
++    void SetVrUpscaleBypass(bool on) { vr_upscale_bypass_ = on; }
 +    // (Headset) Where this view's depth goes for the compositor (xr_depth.frag): an R32 float
 +    // image and its view, written at the end of the next Render. Null: none.
 +    void SetVrDepthOut(VkImage image, VkImageView view, VkExtent2D extent) {
@@ -2520,7 +2521,7 @@ index 6c9b165..9b8f2b9 100644
  
  private:
      struct FrameSlot {
-@@ -214,6 +281,7 @@ private:
+@@ -214,6 +282,7 @@ private:
          vk::Buffer luminance;
          VkDescriptorSet set = VK_NULL_HANDLE;
          VkDescriptorSet post_set = VK_NULL_HANDLE;
@@ -2528,7 +2529,7 @@ index 6c9b165..9b8f2b9 100644
          VkQueryPool queries = VK_NULL_HANDLE;
          VkQueryPool upscale_queries = VK_NULL_HANDLE;
          bool upscale_timed = false;
-@@ -222,7 +290,30 @@ private:
+@@ -222,7 +291,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -2559,7 +2560,7 @@ index 6c9b165..9b8f2b9 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -274,8 +365,10 @@ private:
+@@ -274,8 +366,10 @@ private:
      void DestroyPipelines();
      bool CreateDescriptors();
      bool EnsureTargets(VkExtent2D extent, VkExtent2D output, bool upscaling);
@@ -2572,7 +2573,7 @@ index 6c9b165..9b8f2b9 100644
      bool CreateTarget(RenderTarget& target, VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, VkImageAspectFlags aspect);
      bool UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size);
      bool UploadImageMips(vk::Image& image, VkFormat format, VkExtent3D extent, const std::vector<std::vector<uint8_t>>& mips);
-@@ -301,6 +394,7 @@ private:
+@@ -301,6 +395,7 @@ private:
      bool EnsureShadowTarget();
      void RecordRtAmbientOcclusion(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordLighting(VkCommandBuffer cmd, const ViewSetup& view);
@@ -2580,7 +2581,7 @@ index 6c9b165..9b8f2b9 100644
      void RecordLuminance(VkCommandBuffer cmd);
      void RecordForward(VkCommandBuffer cmd, const ViewSetup& view, RenderTarget& output);
      void RecordPost(VkCommandBuffer cmd, const SceneLighting& lighting, float dt);
-@@ -342,6 +436,8 @@ private:
+@@ -342,6 +437,8 @@ private:
      void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
      void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
      void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
@@ -2589,7 +2590,7 @@ index 6c9b165..9b8f2b9 100644
      void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordUpscale(VkCommandBuffer cmd, float dt);
      void ReadUpscaleTimestamps(FrameSlot& slot);
-@@ -377,6 +473,34 @@ private:
+@@ -377,6 +474,34 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
@@ -2624,7 +2625,7 @@ index 6c9b165..9b8f2b9 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -395,6 +519,24 @@ private:
+@@ -395,6 +520,24 @@ private:
      RenderTarget reflect_offset_;
      RenderTarget reflect_history_[2];
      RenderTarget shadow_;
@@ -2649,7 +2650,7 @@ index 6c9b165..9b8f2b9 100644
      RenderTarget ao_[2];
      RenderTarget refmap_;
      RenderTarget hdr_copy_;
-@@ -418,6 +560,17 @@ private:
+@@ -418,6 +561,17 @@ private:
      vk::Buffer dump_mirror_;
      VkExtent2D output_extent_{0, 0};
      bool targets_upscaled_ = false;
@@ -2667,7 +2668,7 @@ index 6c9b165..9b8f2b9 100644
      bool history_valid_ = false;
  
      vk::Image lut1_;
-@@ -441,6 +594,8 @@ private:
+@@ -441,6 +595,8 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -2676,7 +2677,7 @@ index 6c9b165..9b8f2b9 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -554,6 +709,35 @@ private:
+@@ -554,6 +710,35 @@ private:
          uint32_t size = 0;
      };
      MirrorStale mirror_stale_;
@@ -2712,12 +2713,12 @@ index 6c9b165..9b8f2b9 100644
      bool mirror_stale_active_ = false;
      const SceneLighting* lighting_ = nullptr;
      SceneLighting fallback_;
-@@ -636,6 +820,45 @@ private:
+@@ -636,6 +821,45 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
 +    bool vr_no_jitter_ = false;
-+    bool vr_no_demod_ = false;
++    bool vr_upscale_bypass_ = false;
 +    bool vr_low_detail_ = false;
 +    RenderTarget vr_depth_out_;
 +    VkPipeline vr_depth_pipeline_ = VK_NULL_HANDLE;
@@ -2759,7 +2760,7 @@ index 6c9b165..9b8f2b9 100644
  
  }
 diff --git a/src/engine/render/upscale/scene_upscale.cpp b/src/engine/render/upscale/scene_upscale.cpp
-index 1feade3..dbd5b16 100644
+index 1feade3..362211b 100644
 --- a/src/engine/render/upscale/scene_upscale.cpp
 +++ b/src/engine/render/upscale/scene_upscale.cpp
 @@ -146,8 +146,11 @@ bool SceneRenderer::CreateUpscaleTargets(VkExtent2D render, VkExtent2D output) {
@@ -2814,16 +2815,18 @@ index 1feade3..dbd5b16 100644
      Fullscreen(cmd, up_motion_, push);
      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, up_object_motion_);
      for (const Draw& d : draws_) {
-@@ -423,7 +438,7 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
+@@ -423,7 +438,9 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
              break;
          }
      }
 -    handy_demod_ = demod_on && handy != gpu::kInvalid && handy_factor_.Valid();
-+    handy_demod_ = demod_on && !(VrView() && vr_no_demod_) && handy != gpu::kInvalid && handy_factor_.Valid();
++    // Not in the headset: the flashlight's factor, at the render's size, multiplied back onto the
++    // full-size picture leaves bright halos at edges (log pt (32)); MetalFX's reactive mask copes.
++    handy_demod_ = demod_on && !VrView() && handy != gpu::kInvalid && handy_factor_.Valid();
      if (handy_demod_) {
          UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&diffuse_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -473,8 +488,9 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+@@ -473,8 +490,9 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
          d.frame_ms = std::clamp(dt, 1.0e-4f, 0.25f) * 1000.0f;
          d.near_plane = camera_.near_plane;
          d.fov_y = camera_.fov_y;
@@ -2834,8 +2837,13 @@ index 1feade3..dbd5b16 100644
          if (streamline::Active()) {
              const float aspect = static_cast<float>(output_extent_.width) / static_cast<float>(std::max(1u, output_extent_.height));
              streamline::FrameConstants k;
-@@ -519,6 +535,7 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+@@ -517,8 +535,12 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+         if (!upscaled && upscale_stats_.error.empty()) {
+             upscale_stats_.error = "dispatch failed, see pt.log";
          }
++        if (upscaled && VrView() && vr_upscale_bypass_) {
++            upscaled = false;  // (the resolve stretches the render instead: a test)
++        }
      }
      up_.reset = false;
 +    if (VrView()) vr_reset_[vr_eye_] = false;
@@ -3339,7 +3347,7 @@ index 4bb6e4b..82f38e7 100644
      static constexpr int kPauseMenuPriority = 171;
      static constexpr int kLetterboxPriority = 170;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..976b3af 100644
+index 42d8b01..407a0e9 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
 @@ -16,6 +16,89 @@ struct Entry {
@@ -3388,8 +3396,8 @@ index 42d8b01..976b3af 100644
 +    {"pc_vp_aa_debug_normal", {"Normal", "", "", "Normal", "", "", ""}},
 +    {"pc_vp_aa_debug_history", {"No history", "", "", "Sin historial", "", "", ""}},
 +    {"pc_vp_aa_debug_motion", {"No motion vectors", "", "", "Sin vectores de movimiento", "", "", ""}},
-+    {"pc_vp_aa_debug_demod", {"No flashlight split", "", "", "Sin separar la linterna", "", "", ""}},
-+    {"pc_note_vp_aa_debug", {"Only with MetalFX, to find the doubled edges' cause. No history: each frame alone (if the doubling goes, the past frames are misplaced). No motion vectors: the past frames are not moved. No flashlight split: the flashlight's light is upscaled with the rest. Not kept between sessions. Applies right away.", "", "", "Solo con MetalFX, para encontrar la causa de los bordes dobles. Sin historial: cada fotograma solo (si desaparece lo doble, los fotogramas anteriores se colocan mal). Sin vectores de movimiento: los fotogramas anteriores no se desplazan. Sin separar la linterna: la luz de la linterna se reescala junto con el resto. No se guarda entre sesiones. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_aa_debug_bypass", {"Same path, no MetalFX", "", "", "Mismo camino, sin MetalFX", "", "", ""}},
++    {"pc_note_vp_aa_debug", {"Only with MetalFX, to find a fault's cause. No history: each frame alone. No motion vectors: the past frames are not moved. Same path, no MetalFX: the picture goes through everything MetalFX uses but MetalFX's own picture is not shown (the plain render, stretched): if the eyes still look too far apart, the fault is in that path, not in MetalFX. Not kept between sessions. Applies right away.", "", "", "Solo con MetalFX, para encontrar la causa de un fallo. Sin historial: cada fotograma solo. Sin vectores de movimiento: los fotogramas anteriores no se desplazan. Mismo camino, sin MetalFX: la imagen pasa por todo lo que usa MetalFX pero no se muestra la de MetalFX (el render tal cual, estirado): si los ojos siguen viéndose demasiado separados, el fallo está en ese camino y no en MetalFX. No se guarda entre sesiones. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_scale", {"Image size (base resolution)", "", "", "Tamaño de imagen (resolución base)", "", "", ""}},
 +    {"pc_note_vp_restart", {"Base resolution of each eye, relative to what the headset recommends. The foveation percentages (VR page) are of this size. Applies right away.", "", "", "Resolución base de cada ojo, respecto a la que recomienda el visor. Los porcentajes del foveado (página VR) son sobre este tamaño. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_foveation", {"Headset foveation (Apple)", "", "", "Foveado del visor (Apple)", "", "", ""}},
@@ -4038,7 +4046,7 @@ index d1485b2..2bcbcd6 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..c774fa2 100644
+index d629ab3..6a2446c 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -4130,7 +4138,7 @@ index d629ab3..c774fa2 100644
 +            foveation.rows.push_back(Row(kVpAaJitter, "pc_vp_aa_jitter", {"pc_vp_aa_jitter_apple", "pc_vp_aa_jitter_fsr", "pc_vp_aa_jitter_off"},
 +                                         std::clamp(h.aa_jitter, 0, 2), "pc_note_vp_aa_jitter"));
 +            foveation.rows.push_back(Row(kVpAaDebug, "pc_vp_aa_debug",
-+                                         {"pc_vp_aa_debug_normal", "pc_vp_aa_debug_history", "pc_vp_aa_debug_motion", "pc_vp_aa_debug_demod"},
++                                         {"pc_vp_aa_debug_normal", "pc_vp_aa_debug_history", "pc_vp_aa_debug_motion", "pc_vp_aa_debug_bypass"},
 +                                         std::clamp(h.aa_debug, 0, 3), "pc_note_vp_aa_debug"));
 +            return {std::move(vr), std::move(foveation)};
 +#else
@@ -4632,7 +4640,7 @@ index d629ab3..c774fa2 100644
 -                    app.scene.Render(stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
 +                    app.scene.SetVrNoJitter(pt::visionos::Headset().aa_jitter == 2);
-+                    app.scene.SetVrNoDemod(pt::visionos::Headset().aa_debug == 3);
++                    app.scene.SetVrUpscaleBypass(pt::visionos::Headset().aa_debug == 3);
 +#endif
 +#if PT_VISIONOS
 +                    app.scene.SetVrLowDetail(stereo.inset && !inset);
