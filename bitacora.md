@@ -33,6 +33,9 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
    **Build 47:** `handy_demod_` desactivado siempre en VR (`scene_upscale.cpp`, `!VrView()`). «Prueba de MetalFX» opción 3 ahora
    «Mismo camino, sin MetalFX» (`SetVrUpscaleBypass`: el resolve estira el render en vez de usar la salida de MetalFX).
    Si con ella sigue la separación → fallo en el camino del upscaler (post_view_, resolve, depth/offset); si no → en MetalFX.
+   **Resultado build 47 (log pt (33)):** fantasma resuelto. «Mismo camino, sin MetalFX» quita la separación estéreo → la causa
+   está en la propia salida de MetalFX (no en nuestro camino). Sin ganancia de fps. **Decisión:** MetalFX aparcado (usar FXAA);
+   siguiente paso = build sonda TBDR (punto 3). Pendiente menor: poner FXAA por defecto en el preset M2 y en `PTSettings`.
    Con MetalFX 67 % (776→1158): 40 fps, GPU 21 ms; `inset/upscale` 2,2 ms/inset.
 2. (Incluido en la build 45 el preajuste M2 del commit 12bd8f9.)
 3. **Rendimiento: arquitectura TBDR (prioridad tras cerrar MetalFX).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
