@@ -38,13 +38,26 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
 
 ## Pendiente (en orden)
 
-1. Leer el log de la build 49: líneas `taa:`, `gpu labels` (coste "taa resolve"), `cull ... tiled`, fps en el pasillo con
-   luces por teselas sí/no. Preguntar al usuario por nitidez, estelas (partículas/transparentes no tienen vectores de
-   movimiento: si hay estelas, máscara reactiva barata o bajar el peso de historia) y si el afilado es excesivo.
-2. Si TAA convence: exponer el afilado como opción de menú (no .txt). Si hay estelas: rechazo por profundidad previa.
-3. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos.
-4. Rendimiento: bloom con menos pasadas, sombras (3,5–6 ms/frame en el pasillo), composición (niebla por píxel).
-5. 45→90 de verdad (spacewarp propio) si la reproyección con profundidad convence.
+Resultado build 49 (logs pt (35) y pt (36)): sin fallos visibles. TAA 0,8–1,0 ms/inset ("taa resolve") + copia/resolve
+≈1,5–1,8 ms/inset (FXAA 0,07). Luces por teselas SIN ganancia (pasillo 23 luces: ~11 por tesela; lights 3,5–3,6 ms/inset
+con y sin). Centro (pt (35), M2): 100 % → 22–30 fps (GPU 32–40 ms); 80 % → 29–36 fps (GPU 28–32); térmico fair desde 287 s.
+Para 45 fps hace falta GPU < 22 ms: el centro no basta; coste fijo: sombras 2,5–3 ms (pasillo), vistas anchas ~5, composición ~2.
+
+**Build 50 (decidido con el usuario):**
+1. **Quitar MetalFX entero** (decisión del usuario): `visionos/core/metalfx_upscaler.mm`, `UpscalerKind::MetalFx` en VR,
+   opciones aa 1–4, `aa_jitter`/`aa_debug` (filas de menú, Swift `aaJitter`, textos `pc_vp_aa_jitter*`, `pc_vp_aa_debug*`),
+   `SetVrNoJitter`/`SetVrUpscaleBypass`, parche MoltenVK 0002 si nada más lo usa (`vkCmdEncodeMetalMVK`: comprobar
+   `tbdr_probe.mm`; la sonda puede borrarse también). Valores guardados 1–4 → TAA (5). Menú: FXAA / TAA.
+2. **Un solo TAA** con opción «Resolución interna del TAA: 100/90/85/80 %» (por defecto 100 % = igual que build 49);
+   <100 % = reconstrucción (TAAU): render al %, salida al tamaño del inset; filtro de reconstrucción con jitter en
+   píxeles de salida, historia a tamaño de salida.
+3. **TAA fusionado en el resolve** (`upscale_resolve.frag`): una pasada escribe post_hdr/post_depth/post_velocity + historia
+   (MRT); sin `upscaled_` ni copia; afilado CAS en el tonemap (opción de menú «Nitidez del TAA»); movimiento de cámara
+   calculado en el TAA desde la profundidad (pasada `upscale_motion` solo para objetos móviles). Objetivo ~0,7 ms/inset.
+4. Calidad sin coste: rechazo de historia por profundidad previa (disoclusión).
+5. Después: sombras (caché de mapas estáticos y redibujo solo de los objetos que se mueven, misma calidad PS4) y vistas anchas.
+6. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos.
+7. 45→90 de verdad (spacewarp propio) si la reproyección con profundidad convence.
 
 ## Funciones vigentes (dónde está cada cosa)
 
