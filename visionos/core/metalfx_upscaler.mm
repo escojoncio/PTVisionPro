@@ -25,6 +25,7 @@
 #include "engine/render/upscale/upscale.h"
 
 #include "engine/core/log.h"
+#include "pt_visionos_settings.h"
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -34,6 +35,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <string>
 
 // MoltenVK's private command (our patch): Metal work inside a Vulkan command buffer.
@@ -177,8 +179,6 @@ public:
                 return false;
             }
         }
-        static const char* sign = std::getenv("PT_METALFX_JITTER_SIGN");
-        jitter_sign_ = sign && std::atof(sign) < 0.0 ? -1.0f : 1.0f;
         return true;
     }
 
@@ -247,14 +247,24 @@ public:
         e.motion = (__bridge void*)motion;
         e.reactive = reactive_[h] ? (__bridge void*)reactive : nullptr;
         e.output = (__bridge void*)output;
-        // The jitter in the colour's pixels, in the direction the picture moved (as FSR takes it).
-        e.jitter_x = d.jitter.x * jitter_sign_;
-        e.jitter_y = d.jitter.y * jitter_sign_;
+        // The jitter in the colour's pixels. The game's is the way the picture moved (DLSS/FSR
+        // take it so); MetalFX by default the other way (aa_jitter 0). With 2 the game drew none.
+        const int mode = pt::visionos::Headset().aa_jitter;
+        if (mode != jitter_mode_) {
+            // (Every view's history was gathered the other way: each starts again.)
+            if (jitter_mode_ >= 0) std::fill(std::begin(restart_), std::end(restart_), true);
+            jitter_mode_ = mode;
+            LogInfo("upscale: MetalFX jitter {}", mode == 0 ? "with Apple's sign" : mode == 1 ? "as DLSS/FSR" : "off");
+        }
+        const float sign = mode == 0 ? -1.0f : 1.0f;
+        e.jitter_x = d.jitter.x * sign;
+        e.jitter_y = d.jitter.y * sign;
         // The game's motion vectors are in UV units (current to previous): times the input size.
         e.motion_x = d.motion_scale.x;
         e.motion_y = d.motion_scale.y;
         e.pre_exposure = 1.0f;
-        e.reset = (d.reset || fresh) ? 1u : 0u;
+        e.reset = (d.reset || fresh || restart_[h]) ? 1u : 0u;
+        restart_[h] = false;
         if (logged_ < 8) {
             ++logged_;
             LogInfo("upscale: MetalFX picture {} jitter ({:.3f} {:.3f}) px, motion scale ({:.0f} {:.0f}), reset {}", h, e.jitter_x, e.jitter_y, e.motion_x,
@@ -287,7 +297,8 @@ private:
     id scalers_[kHistories];  // MTLFXTemporalScaler (looked up at run time)
     bool reactive_[kHistories] = {};
     MTLPixelFormat formats_[kHistories][2] = {};
-    float jitter_sign_ = 1.0f;
+    int jitter_mode_ = -1;
+    bool restart_[kHistories] = {};
     int logged_ = 0;
     std::string last_failure_;
 };

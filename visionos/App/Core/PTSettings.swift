@@ -55,6 +55,8 @@ struct PTSettings: Codable, Equatable {
     /// Antialiasing of the sharp zone: 0 FXAA, 1 MetalFX temporal at 100 %, 2-4 MetalFX temporal
     /// drawing at 85, 75 or 67 % and rebuilding the full size. Not part of a preset.
     var aa = 3
+    /// How MetalFX is told the frames' jitter: 0 Apple's sign, 1 as DLSS/FSR, 2 none (a test).
+    var aaJitter = 0
     /// Subtitles in the headset: size, percent of the original's (100 to 250).
     var subtitleSize = 175
     /// ...and how far up from the bottom edge, percent of the view's height (0 to 40).
@@ -277,6 +279,7 @@ struct PTSettings: Codable, Equatable {
         case center = "sharpZoneDegrees"
         case compositorQuality, metalFX, sharpen, gameFoveation, centerResolution, centerUp
         case aa = "sharpZoneAntialiasing"
+        case aaJitter = "metalFXAlignment"
         case sceneDepth, subtitleSize, subtitleHeight
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
@@ -303,6 +306,7 @@ struct PTSettings: Codable, Equatable {
         compositorQuality = (try? c.decodeIfPresent(Float.self, forKey: .compositorQuality)) ?? base.compositorQuality
         metalFX = false  // (the old spatial MetalFX is gone: a saved "on" must not keep the preset from matching)
         aa = min(max((try? c.decodeIfPresent(Int.self, forKey: .aa)) ?? base.aa, 0), 4)
+        aaJitter = min(max((try? c.decodeIfPresent(Int.self, forKey: .aaJitter)) ?? base.aaJitter, 0), 2)
         sceneDepth = (try? c.decodeIfPresent(Bool.self, forKey: .sceneDepth)) ?? base.sceneDepth
         subtitleSize = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleSize)) ?? base.subtitleSize, 100), 250)
         subtitleHeight = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleHeight)) ?? base.subtitleHeight, 0), 40)
@@ -357,6 +361,7 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_FOVEATION=\(flag(foveation))",
             "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
             "PT_VP_AA=\(min(max(aa, 0), 4))",
+            "PT_VP_AA_JITTER=\(min(max(aaJitter, 0), 2))",
             "PT_VP_SCENE_DEPTH=\(flag(sceneDepth))",
             "PT_VP_SUBTITLE_SIZE=\(subtitleSize)",
             "PT_VP_SUBTITLE_HEIGHT=\(subtitleHeight)",
