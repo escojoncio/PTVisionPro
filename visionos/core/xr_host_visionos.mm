@@ -2341,10 +2341,15 @@ struct Preset {
     int anisotropy;  // the textures' anisotropic filtering (0 off, 2, 4, 8, 16)
     // The game's foveation: sharp zone degrees, its height, its resolution, the periphery's.
     int center_deg, center_up, center_res, periphery;
+    // Antialiasing (5 VPKTAA, 0 FXAA), VPKTAA's internal resolution and sharpness, periphery.
+    int aa, taa_res, taa_sharpness;
+    bool taa_periphery;
 };
 constexpr Preset kPresets[2] = {
-    {0.50f, 3, true, true, true, 45, 8, 70, -10, 100, 10},     // Vision Pro M2 (the tester's settings; shadows as on PS4)
-    {0.85f, 3, true, true, true, 90, 16, 70, -10, 100, 15},    // Vision Pro M5
+    // Vision Pro M2: the tester's settings (log pt (37), build 50): shadows as on PS4, a 60 degree
+    // sharp circle rebuilt by VPKTAA from 80 % at full sharpness, the periphery steadied too.
+    {0.50f, 3, true, true, true, 45, 8, 60, -10, 100, 10, 5, 80, 100, true},
+    {0.85f, 3, true, true, true, 90, 16, 70, -10, 100, 15, 5, 100, 50, true},  // Vision Pro M5
 };
 
 // The sharp zone's antialiasing as the log names it.
@@ -2369,7 +2374,8 @@ bool MatchesPreset(int preset, const AppSettings& s, const HeadsetSettings& h) {
            !h.dynamic_resolution && h.game_foveation && h.center_deg == p.center_deg && h.center_up == p.center_up &&
            h.center_res == p.center_res && h.periphery == p.periphery &&
            s.graphics.shadow_quality == p.shadow_quality && s.graphics.ambient_occlusion == p.ssao && s.graphics.bloom == p.bloom &&
-           s.graphics.reflections == p.reflections && s.graphics.anisotropy == p.anisotropy;
+           s.graphics.reflections == p.reflections && s.graphics.anisotropy == p.anisotropy && h.aa == p.aa && h.taa_res == p.taa_res &&
+           h.taa_sharpness == p.taa_sharpness && h.taa_periphery == p.taa_periphery;
 }
 
 // The filtering steps the game knows (its menu's values).
@@ -2427,6 +2433,10 @@ void ApplyPreset(int preset, AppSettings& s) {
     h.center_up = p.center_up;
     h.center_res = p.center_res;
     h.periphery = p.periphery;
+    h.aa = p.aa;
+    h.taa_res = p.taa_res;
+    h.taa_sharpness = p.taa_sharpness;
+    h.taa_periphery = p.taa_periphery;
     s.vr.resolution_scale = p.resolution_scale;
     s.graphics.shadow_quality = p.shadow_quality;
     s.graphics.ambient_occlusion = p.ssao;
@@ -2449,6 +2459,10 @@ void ApplyPreset(int preset, AppSettings& s) {
     SettingChanged("bloom", p.bloom ? "1" : "0");
     SettingChanged("reflections", p.reflections ? "1" : "0");
     SettingChanged("anisotropy", std::to_string(p.anisotropy));
+    SettingChanged("aa", std::to_string(p.aa));
+    SettingChanged("taa_res", std::to_string(p.taa_res));
+    SettingChanged("taa_sharpness", std::to_string(p.taa_sharpness));
+    SettingChanged("taa_periphery", p.taa_periphery ? "1" : "0");
 }
 
 void ApplySettings(AppSettings& s) {

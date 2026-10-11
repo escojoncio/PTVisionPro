@@ -118,10 +118,15 @@ struct PTSettings: Codable, Equatable {
             // The tester's own settings on the first headset (sharper below them is too blurry).
             settings.resolutionScale = 0.5
             settings.gameFoveation = true
-            settings.center = 70
+            settings.center = 60
             settings.centerUp = -10
             settings.centerResolution = 100
             settings.periphery = 10
+            // VPKTAA from 80 % at full sharpness, the periphery too (log pt (37), build 50).
+            settings.aa = 5
+            settings.taaRes = 80
+            settings.taaSharpness = 100
+            settings.taaPeriphery = true
             settings.dynamicResolution = false
             // A picture every other refresh (45 at 90 Hz, 50 at 100 Hz), reprojected in between.
             settings.targetFPS = 45
@@ -142,6 +147,10 @@ struct PTSettings: Codable, Equatable {
             settings.centerUp = -10
             settings.centerResolution = 100
             settings.periphery = 15
+            settings.aa = 5
+            settings.taaRes = 100
+            settings.taaSharpness = 50
+            settings.taaPeriphery = true
             settings.dynamicResolution = false
             settings.targetFPS = 90
             settings.fov = 100
@@ -210,6 +219,10 @@ struct PTSettings: Codable, Equatable {
         centerUp = base.centerUp
         centerResolution = base.centerResolution
         periphery = base.periphery
+        aa = base.aa
+        taaRes = base.taaRes
+        taaSharpness = base.taaSharpness
+        taaPeriphery = base.taaPeriphery
         self.preset = preset
     }
 
@@ -223,6 +236,8 @@ struct PTSettings: Codable, Equatable {
             && compositorQuality == base.compositorQuality && sharpen == base.sharpen
             && gameFoveation == base.gameFoveation && center == base.center && centerUp == base.centerUp
             && centerResolution == base.centerResolution && periphery == base.periphery
+            && aa == base.aa && taaRes == base.taaRes && taaSharpness == base.taaSharpness
+            && taaPeriphery == base.taaPeriphery
     }
 
     /// Changes one setting. A preset-governed setting that leaves the preset's values makes the
