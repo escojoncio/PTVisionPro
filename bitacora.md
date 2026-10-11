@@ -5,7 +5,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nativo + MoltenVK
 (con `patches/moltenvk/0001-rasterization-rate-map.patch` y `0002-metal-encode-command.patch`).
 
-## Estado (última build: 48, sonda TBDR, `releases/download/build-48/PTVisionPro-48.ipa`; pendiente el log del usuario)
+## Estado (última build: 48, sonda TBDR, `releases/download/build-48/PTVisionPro-48.ipa`; probada en log pt (34))
 
 - Juego completo jugable de principio a fin (log pt (27), build 42). Sin cierres desde la build 14.
 - Ajustes de referencia del usuario (por debajo "se ve borroso"): imagen 50 %, zona nítida 70° al 100 % (1158x1158/ojo),
@@ -54,6 +54,12 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
    `verdict ...`). Leer: si B ≈ A o píxeles distintos → MoltenVK no sirve para TBDR; si M2 ≪ A → la vía es Metal nativo
    (en PTVisionPro vía `vkCmdEncodeMetalMVK` o en el traductor de VPEngine); si M2 ≈ A → el cuello no es ancho de banda.
    Comprobado en local: glslang (shaders), clang -fsyntax-only con Metal simulado (.mm); MSL solo revisado a mano.
+   **Resultado build 48 (log pt (34)): TBDR DESCARTADO.** Frame diferido completo a 1384²: A 1,61 ms, M1 1,45, M2 1,34
+   (−16 %, −0,27 ms), B 1,47 vs A' 1,57 (−6 %); píxeles idénticos en todas. MoltenVK deja los color transitorios en `private`
+   (solo la profundidad `memoryless`); sobrecoste MoltenVK vs Metal ≈10 %. El ancho de banda del G-buffer no es el cuello
+   (máx. ~0,5 ms/frame con 2 insets) → no reestructurar a TBDR ni justificar VPEngine por esto. Sonda: quitar en la próxima build.
+   Coste real (pt (34), M2 con AA = MetalFX 100 %): inset/upscale 3,35 + inputs 0,46 ms ×2 insets (≈7,6 ms/frame), lighting
+   2,25 (luces 2,05), compose+forward 1,79, reflections 1,44, occlusion 0,68, gbuffer 0,95; GPU 28–30 ms, 28–31 fps.
    **Plan TBDR (contexto de la sonda).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
    → coste en pasadas de pantalla completa y ancho de banda (G-buffer escrito/leído de memoria en cada pasada, ×4 vistas).
    Plan: (a) build sonda: microbenchmark al arrancar a 1384² con el formato del G-buffer del motor, 3 variantes con
