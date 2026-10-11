@@ -73,6 +73,8 @@ std::atomic<unsigned> g_game_thread{0};
 // The GPU time of the last composition (our Metal pass onto the headset's drawable, MetalFX
 // included), for the log: it is GPU work besides the game's views.
 std::atomic<float> g_composite_ms{0.0f};
+// TBDR probe (tbdr_probe.mm): once per session start, results in the log.
+void RunTbdrProbe(vk::Context& ctx, id<MTLDevice> device, id<MTLCommandQueue> queue);
 inline void LoopTick() {
     g_loop_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
                     std::memory_order_relaxed);
@@ -1438,6 +1440,8 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
     x.game_call_ns.store(SteadyNs());
     x.keeper_stop.store(false);
     x.keeper = std::thread([this] { KeepPresenting(*this, *impl_); });
+    // While the keeper shows frames: G-buffer in tile memory or not, MoltenVK or Metal (a few seconds).
+    pt::visionos::RunTbdrProbe(ctx, x.mtl_device, x.mtl_queue);
     LogInfo("vr: session created");
     return true;
 }

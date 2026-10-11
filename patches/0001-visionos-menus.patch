@@ -373,6 +373,141 @@ index 35ad849..144f24f 100644
 +    }
 +    out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), alpha);
  }
+diff --git a/shaders/tbdr_probe.vert b/shaders/tbdr_probe.vert
+new file mode 100644
+index 0000000..e3d6a9d
+--- /dev/null
++++ b/shaders/tbdr_probe.vert
+@@ -0,0 +1,18 @@
++#version 450
++// TBDR probe (visionos/core/tbdr_probe.mm): mode 0 = G-buffer layers (full screen, nearer each
++// instance), 1 = light triangles (about half the screen each), 2 = full screen.
++layout(push_constant) uniform Probe { int mode; int pad; } pc;
++layout(location = 0) flat out int inst;
++void main() {
++    vec2 v = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
++    vec2 p = v * 2.0 - 1.0;
++    float z = 0.5;
++    if (pc.mode == 0) {
++        z = 0.9 - 0.2 * float(gl_InstanceIndex);
++    } else if (pc.mode == 1) {
++        float a = float(gl_InstanceIndex) * 2.399;
++        p = 0.45 * vec2(cos(a), sin(a)) + (v * 2.0 - 1.0) * 0.55;
++    }
++    gl_Position = vec4(p, z, 1.0);
++    inst = gl_InstanceIndex;
++}
+diff --git a/shaders/tbdr_probe_common.glsl b/shaders/tbdr_probe_common.glsl
+new file mode 100644
+index 0000000..c6f2bae
+--- /dev/null
++++ b/shaders/tbdr_probe_common.glsl
+@@ -0,0 +1,18 @@
++// TBDR probe: the same maths as the Metal variant in visionos/core/tbdr_probe.mm.
++float ProbeHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
++vec3 ProbeShade(vec4 a, vec4 nrm, vec4 m, float d, int inst) {
++    float ang = float(inst) * 2.399;
++    vec3 lp = vec3(0.45 * cos(ang), 0.45 * sin(ang), 0.3);
++    vec3 pos = vec3(gl_FragCoord.xy * 0.00144 - 1.0, d);
++    vec3 l = lp - pos;
++    float dist = length(l);
++    l /= max(dist, 1e-4);
++    vec3 n = normalize(nrm.xyz);
++    float ndl = max(dot(n, l), 0.0);
++    float spec = pow(max(dot(reflect(-l, n), vec3(0.0, 0.0, 1.0)), 0.0), 8.0 + m.y * 32.0);
++    return (a.rgb * ndl + spec * m.x) / (1.0 + dist * dist * 4.0) * vec3(1.0, 0.9, 0.8);
++}
++vec4 ProbeCompose(vec4 a, vec4 light) {
++    vec3 c = light.rgb + a.rgb * 0.03;
++    return vec4(c / (1.0 + c), 1.0);
++}
+diff --git a/shaders/tbdr_probe_comp_in.frag b/shaders/tbdr_probe_comp_in.frag
+new file mode 100644
+index 0000000..751a4ce
+--- /dev/null
++++ b/shaders/tbdr_probe_comp_in.frag
+@@ -0,0 +1,7 @@
++#version 450
++#include "tbdr_probe_common.glsl"
++layout(location = 0) flat in int inst;
++layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput g_albedo;
++layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput g_light;
++layout(location = 0) out vec4 colour;
++void main() { colour = ProbeCompose(subpassLoad(g_albedo), subpassLoad(g_light)); }
+diff --git a/shaders/tbdr_probe_comp_tex.frag b/shaders/tbdr_probe_comp_tex.frag
+new file mode 100644
+index 0000000..89cd863
+--- /dev/null
++++ b/shaders/tbdr_probe_comp_tex.frag
+@@ -0,0 +1,10 @@
++#version 450
++#include "tbdr_probe_common.glsl"
++layout(location = 0) flat in int inst;
++layout(set = 0, binding = 0) uniform sampler2D g_albedo;
++layout(set = 0, binding = 1) uniform sampler2D g_light;
++layout(location = 0) out vec4 colour;
++void main() {
++    ivec2 c = ivec2(gl_FragCoord.xy);
++    colour = ProbeCompose(texelFetch(g_albedo, c, 0), texelFetch(g_light, c, 0));
++}
+diff --git a/shaders/tbdr_probe_gbuf.frag b/shaders/tbdr_probe_gbuf.frag
+new file mode 100644
+index 0000000..46c5989
+--- /dev/null
++++ b/shaders/tbdr_probe_gbuf.frag
+@@ -0,0 +1,16 @@
++#version 450
++#include "tbdr_probe_common.glsl"
++layout(location = 0) flat in int inst;
++layout(location = 0) out vec4 albedo;
++layout(location = 1) out vec4 normal;
++layout(location = 2) out vec4 material;
++layout(location = 3) out float depth;
++void main() {
++    vec2 p = gl_FragCoord.xy * 0.01 + float(inst);
++    float n = 0.0;
++    for (int i = 0; i < 8; ++i) n += ProbeHash(floor(p * float(i + 1))) / float(i + 1);
++    albedo = vec4(fract(n), fract(n * 1.7), fract(n * 2.3), 1.0);
++    normal = vec4(normalize(vec3(sin(p.x), cos(p.y), 1.0)), n);
++    material = vec4(0.5, fract(n * 3.1), 0.2, 1.0);
++    depth = gl_FragCoord.z;
++}
+diff --git a/shaders/tbdr_probe_light_in.frag b/shaders/tbdr_probe_light_in.frag
+new file mode 100644
+index 0000000..b746105
+--- /dev/null
++++ b/shaders/tbdr_probe_light_in.frag
+@@ -0,0 +1,11 @@
++#version 450
++#include "tbdr_probe_common.glsl"
++layout(location = 0) flat in int inst;
++layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput g_albedo;
++layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput g_normal;
++layout(input_attachment_index = 2, set = 0, binding = 2) uniform subpassInput g_material;
++layout(input_attachment_index = 3, set = 0, binding = 3) uniform subpassInput g_depth;
++layout(location = 0) out vec4 light;
++void main() {
++    light = vec4(ProbeShade(subpassLoad(g_albedo), subpassLoad(g_normal), subpassLoad(g_material), subpassLoad(g_depth).r, inst), 1.0);
++}
+diff --git a/shaders/tbdr_probe_light_tex.frag b/shaders/tbdr_probe_light_tex.frag
+new file mode 100644
+index 0000000..c24e3c9
+--- /dev/null
++++ b/shaders/tbdr_probe_light_tex.frag
+@@ -0,0 +1,13 @@
++#version 450
++#include "tbdr_probe_common.glsl"
++layout(location = 0) flat in int inst;
++layout(set = 0, binding = 0) uniform sampler2D g_albedo;
++layout(set = 0, binding = 1) uniform sampler2D g_normal;
++layout(set = 0, binding = 2) uniform sampler2D g_material;
++layout(set = 0, binding = 3) uniform sampler2D g_depth;
++layout(location = 0) out vec4 light;
++void main() {
++    ivec2 c = ivec2(gl_FragCoord.xy);
++    light = vec4(ProbeShade(texelFetch(g_albedo, c, 0), texelFetch(g_normal, c, 0), texelFetch(g_material, c, 0),
++                            texelFetch(g_depth, c, 0).r, inst), 1.0);
++}
 diff --git a/shaders/tonemap.frag b/shaders/tonemap.frag
 index d39d6a6..4c2b603 100644
 --- a/shaders/tonemap.frag
