@@ -191,6 +191,14 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
     `PT_VP_SUBTITLE_HEIGHT`); filas `kVpSubtitleSize/kVpSubtitleHeight` en la página VR; Swift `subtitleSize/subtitleHeight`.
   - Revisión adversarial (Sonnet) aplicada: área nunca menor, ancho de línea original con escala 1, R3 no con menú, fallback no
     guardado.
+- **Prueba build 44 (log pt (28)):** MetalFX temporal encontrado en tiempo de ejecución y activo (1044→1392, 2,7 ms/inset);
+  imágenes fantasma (sin aislar: MetalFX o profundidad al compositor; composición 1,2 → 3,2 ms). ~29 fps, GPU ~30 ms.
+  El usuario elige siempre el preajuste M2 esperando que contenga sus ajustes.
+- **Sin build aún (siguiente commit con [build]):** presets con foveado: `Preset` (.mm) añade `center_deg, center_up, center_res,
+  periphery`; M2 = imagen 0,50, 70°, -10, 100 %, periferia 10 (ajustes del usuario); M5 0,85, 70°, -10, 100 %, 15.
+  `ApplyPreset`/`MatchesPreset` y Swift `defaults/apply/matches` incluidos. main.cpp: filas de foveado llaman `HeadsetCustom()`.
+  Pendiente de la respuesta del usuario: qué interruptor (profundidad / AA FXAA) quita los fantasmas → opciones de signo de
+  jitter/vectores en el menú o arreglo de profundidad.
 - **Build 39 (pendiente de run): MetalFX temporal en la zona nítida, un bloom por fotograma, profundidad al compositor, menú VR.**
   - MoltenVK `patches/moltenvk/0002-metal-encode-command.patch`: comando privado `vkCmdEncodeMetalMVK(cmd, fn, data, size)`
     (`MVKCmdEncodeMetal` en MVKCmdDebug.h/.mm, pool en MVKCommandTypePools.def, símbolo en vulkan.mm): al codificar cierra los

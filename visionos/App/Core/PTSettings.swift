@@ -108,7 +108,13 @@ struct PTSettings: Codable, Equatable {
         switch preset {
         case .m2, .custom:
             settings.preset = preset
-            settings.resolutionScale = 0.6
+            // The tester's own settings on the first headset (sharper below them is too blurry).
+            settings.resolutionScale = 0.5
+            settings.gameFoveation = true
+            settings.center = 70
+            settings.centerUp = -10
+            settings.centerResolution = 100
+            settings.periphery = 10
             settings.dynamicResolution = false
             // A picture every other refresh (45 at 90 Hz, 50 at 100 Hz), reprojected in between.
             settings.targetFPS = 45
@@ -125,6 +131,11 @@ struct PTSettings: Codable, Equatable {
         case .m5:
             settings.preset = .m5
             settings.resolutionScale = 0.85
+            settings.gameFoveation = true
+            settings.center = 70
+            settings.centerUp = -10
+            settings.centerResolution = 100
+            settings.periphery = 15
             settings.dynamicResolution = false
             settings.targetFPS = 90
             settings.fov = 100
@@ -190,6 +201,11 @@ struct PTSettings: Codable, Equatable {
         compositorQuality = base.compositorQuality
         metalFX = base.metalFX
         sharpen = base.sharpen
+        gameFoveation = base.gameFoveation
+        center = base.center
+        centerUp = base.centerUp
+        centerResolution = base.centerResolution
+        periphery = base.periphery
         self.preset = preset
     }
 
@@ -201,6 +217,8 @@ struct PTSettings: Codable, Equatable {
             && shadows == base.shadows && ssao == base.ssao && bloom == base.bloom
             && reflections == base.reflections && anisotropy == base.anisotropy && foveation == base.foveation
             && compositorQuality == base.compositorQuality && metalFX == base.metalFX && sharpen == base.sharpen
+            && gameFoveation == base.gameFoveation && center == base.center && centerUp == base.centerUp
+            && centerResolution == base.centerResolution && periphery == base.periphery
     }
 
     /// Changes one setting. A preset-governed setting that leaves the preset's values makes the
