@@ -3197,6 +3197,20 @@ index ed0632e..dcdc5a4 100644
      return c;
  }
  
+diff --git a/src/game/game.cpp b/src/game/game.cpp
+index 454ffb1..5a9c455 100644
+--- a/src/game/game.cpp
++++ b/src/game/game.cpp
+@@ -1179,6 +1179,9 @@ void Game::ClearPendingSubtitles() {
+ }
+ 
+ bool Game::InViewNdc(const glm::vec3& position, float area) const {
++#if PT_VISIONOS
++    area = std::max(area, std::min(area * 1.5f, 0.95f));
++#endif
+     const Camera camera = player_.MakeCamera();
+     const glm::mat4 projection = glm::perspectiveRH_NO(camera.fov_y, 16.0f / 9.0f, camera.near_plane, 2000.0f);
+     const glm::vec4 clip = projection * camera.View() * glm::vec4(position, 1.0f);
 diff --git a/src/game/player.h b/src/game/player.h
 index 1daa3d8..34f7117 100644
 --- a/src/game/player.h
@@ -3214,11 +3228,104 @@ index 1daa3d8..34f7117 100644
      void SetScriptPitch(float value) {
          pitch = target_pitch = ClampPitch(value);
          vr_script_pitch_ = pitch;
+diff --git a/src/game/trap_system.cpp b/src/game/trap_system.cpp
+index 4dbba70..6628eab 100644
+--- a/src/game/trap_system.cpp
++++ b/src/game/trap_system.cpp
+@@ -72,6 +72,13 @@ float TrapSystem::TrapYaw(const Context& ctx) const {
+     return FoxYawOf(glm::vec3(world[2]));
+ }
+ 
++#if PT_VISIONOS
++// In the headset the picture's mark (and every "look and press" check) takes X too.
++constexpr uint32_t kGougeButtons = kPadGouge | kPadAction;
++#else
++constexpr uint32_t kGougeButtons = kPadGouge;
++#endif
++
+ bool TrapSystem::ButtonPressed(const std::string& button) const {
+     const uint32_t pressed = game_.GetPlayer().FramePressedButtons();
+     if (button == "Zoom") {
+@@ -135,7 +142,7 @@ bool TrapSystem::Check(const Context& ctx, const TrapCallback& callback) {
+             if(exec.entity && exec.class_name == "ShTrapExecNazoCallbackDataElement" && f.GetString(*exec.entity,"checkName") == "XMark")gouge=true;
+         }
+         auto in_view = [&]() { return TargetInView(ctx, locator, area, nullptr) &&
+-            (gouge && button == "Action" ? (player.FramePressedButtons() & kPadGouge) != 0 : ButtonPressed(button)); };
++            (gouge && button == "Action" ? (player.FramePressedButtons() & kGougeButtons) != 0 : ButtonPressed(button)); };
+         if (!f.GetBool(e, "isOutOfViewAfter")) {
+             return in_view();
+         }
+diff --git a/src/game/ui/game_ui.cpp b/src/game/ui/game_ui.cpp
+index 2d6448c..2fc326b 100644
+--- a/src/game/ui/game_ui.cpp
++++ b/src/game/ui/game_ui.cpp
+@@ -476,9 +476,44 @@ void GameUi::DrawSubtitle(ui::UiBatch& batch, const UiCanvas& canvas) {
+                        UiCanvas::kHeight * 0.5f - std::max(lo_units.y, hi_units.y) * UiCanvas::kUnit);
+     const glm::vec2 hi(UiCanvas::kWidth * 0.5f + std::max(lo_units.x, hi_units.x) * UiCanvas::kUnit,
+                        UiCanvas::kHeight * 0.5f - std::min(lo_units.y, hi_units.y) * UiCanvas::kUnit);
+-    ui::TextLayout layout = ui::LayoutText(view.text, text_style, generator.auto_line_feed ? hi.x - lo.x : 0.0f);
++    // Larger subtitles wrap at a narrower width so that, scaled up, they still fit the line.
++    const float scale = std::clamp(subtitle_scale, 0.5f, 3.0f);
++    const float wrap = !generator.auto_line_feed ? 0.0f : scale != 1.0f ? std::min(hi.x - lo.x, UiCanvas::kWidth * 0.9f / scale) : hi.x - lo.x;
++    ui::TextLayout layout = ui::LayoutText(view.text, text_style, wrap);
+     const ui::TextAlign block = generator.b_align == 3 ? Align(generator.h_align) : Align(generator.b_align);
+-    ui::PlaceText(layout, lo, hi, block, Align(generator.h_align), Align(generator.v_align), true);
++    const glm::vec2 centre_x((lo.x + hi.x) * 0.5f, 0.0f);
++    glm::vec2 place_lo = lo;
++    glm::vec2 place_hi = hi;
++    if (wrap > 0.0f && wrap < hi.x - lo.x) {
++        place_lo.x = centre_x.x - wrap * 0.5f;
++        place_hi.x = centre_x.x + wrap * 0.5f;
++    }
++    ui::PlaceText(layout, place_lo, place_hi, block, Align(generator.h_align), Align(generator.v_align), true);
++    if (scale != 1.0f || subtitle_lift > 0.0f) {
++        // Scaled about the bottom of the text at the line's centre, then raised towards the
++        // middle of the picture, kept inside it.
++        float bottom = -1e30f;
++        for (const ui::TextLine& line : layout.lines) {
++            for (const ui::LaidGlyph& g : line.glyphs) bottom = std::max(bottom, g.position.y + g.size.y);
++        }
++        if (bottom > -1e29f) {
++            const glm::vec2 pivot(centre_x.x, bottom);
++            const float lift = std::clamp(subtitle_lift, 0.0f, 0.45f) * UiCanvas::kHeight;
++            float top = 1e30f;
++            for (ui::TextLine& line : layout.lines) {
++                for (ui::LaidGlyph& g : line.glyphs) {
++                    g.position = pivot + (g.position - pivot) * scale - glm::vec2(0.0f, lift);
++                    g.size *= scale;
++                    top = std::min(top, g.position.y);
++                }
++            }
++            if (top < 0.0f) {
++                for (ui::TextLine& line : layout.lines) {
++                    for (ui::LaidGlyph& g : line.glyphs) g.position.y -= top;
++                }
++            }
++        }
++    }
+     const glm::vec2 full = canvas.extent;
+     if (const float bar = LetterboxBar(full, letterbox_); bar > 0.0f && canvas.scale > 0.0f) {
+         float bottom = -1e30f;
+diff --git a/src/game/ui/game_ui.h b/src/game/ui/game_ui.h
+index 4bb6e4b..82f38e7 100644
+--- a/src/game/ui/game_ui.h
++++ b/src/game/ui/game_ui.h
+@@ -36,6 +36,10 @@ public:
+     static constexpr int kSubliminalStringPriority = 128;
+     static constexpr int kSubliminalNoisePriority = 129;
+     static constexpr int kSubtitlePriority = 151;
++    // (Headset) The subtitles' size (1: the original's) and how far up they go, as a fraction of
++    // the picture's height (0: where the original puts them, at the bottom edge).
++    static inline float subtitle_scale = 1.0f;
++    static inline float subtitle_lift = 0.0f;
+     static constexpr int kStrongSubtitlePriority = 210;
+     static constexpr int kPauseMenuPriority = 171;
+     static constexpr int kLetterboxPriority = 170;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..7a58d99 100644
+index 42d8b01..07cfd14 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -16,6 +16,74 @@ struct Entry {
+@@ -16,6 +16,78 @@ struct Entry {
  };
  
  constexpr Entry kTexts[] = {
@@ -3243,6 +3350,10 @@ index 42d8b01..7a58d99 100644
 +    {"pc_vp_fps_45", {"45 reprojected to 90", "", "", "45 reproyectados a 90", "", "", ""}},
 +    {"pc_vp_depth", {"Depth for reprojection", "", "", "Profundidad para la reproyección", "", "", ""}},
 +    {"pc_note_vp_depth", {"The game gives the headset the distance of every point it drew, so the images the headset makes in between (45 to 90) and its corrections for the latest head position move near things more than far ones, as they really move. Off: everything moves as if it were far away (near things wobble). Costs almost nothing. Applies right away.", "", "", "El juego le da al visor la distancia de cada punto dibujado, para que las imágenes que el visor crea entre medias (45 a 90) y sus correcciones a la última posición de la cabeza muevan lo cercano más que lo lejano, como de verdad se mueve. Desactivada: todo se mueve como si estuviera lejos (lo cercano baila). Casi no cuesta nada. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_subtitle_size", {"Subtitle size", "", "", "Tamaño de los subtítulos", "", "", ""}},
++    {"pc_note_vp_subtitle_size", {"Size of the subtitles in the headset, relative to the original. Applies right away.", "", "", "Tamaño de los subtítulos en el visor, respecto al original. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_subtitle_height", {"Subtitle height", "", "", "Altura de los subtítulos", "", "", ""}},
++    {"pc_note_vp_subtitle_height", {"Raises the subtitles from the bottom edge towards the middle of the view (percent of its height), where the headset shows them sharpest. Applies right away.", "", "", "Sube los subtítulos desde el borde inferior hacia el centro de la vista (porcentaje de su altura), donde el visor los muestra más nítidos. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_section_foveation", {"Foveation and sharpness", "", "", "Foveado y nitidez", "", "", ""}},
 +    {"pc_vp_aa", {"Sharp zone antialiasing", "", "", "Antialiasing de la zona nítida", "", "", ""}},
 +    {"pc_vp_aa_fxaa", {"FXAA (basic)", "", "", "FXAA (básico)", "", "", ""}},
@@ -3255,7 +3366,7 @@ index 42d8b01..7a58d99 100644
 +    {"pc_note_vp_restart", {"Base resolution of each eye, relative to what the headset recommends. The foveation percentages (VR page) are of this size. Applies right away.", "", "", "Resolución base de cada ojo, respecto a la que recomienda el visor. Los porcentajes del foveado (página VR) son sobre este tamaño. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_foveation", {"Headset foveation (Apple)", "", "", "Foveado del visor (Apple)", "", "", ""}},
 +    {"pc_note_vp_foveation", {"Done by the headset itself when it puts the final picture together; it does not change what the game draws. Applies at the next start.", "", "", "Lo hace el propio visor al componer la imagen final; no cambia lo que dibuja el juego. Se aplica al volver a empezar.", "", "", ""}},
-+    {"pc_note_vp_vr", {"Flashlight, turning, foveation and sharpness.", "", "", "Linterna, giro, foveado y nitidez.", "", "", ""}},
++    {"pc_note_vp_vr", {"Turning, subtitles, foveation and sharpness.", "", "", "Giro, subtítulos, foveado y nitidez.", "", "", ""}},
 +    {"pc_vp_fov", {"Drawn field of view", "", "", "Campo de visión dibujado", "", "", ""}},
 +    {"pc_note_vp_fov", {"Cuts the edges of the view with black (100% draws all of it). Nothing to do with foveation. Applies right away.", "", "", "Recorta los bordes de la vista con negro (100 % lo dibuja todo). No tiene nada que ver con el foveado. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_metalfx", {"MetalFX upscaling", "", "", "Escalado MetalFX", "", "", ""}},
@@ -3294,7 +3405,7 @@ index 42d8b01..7a58d99 100644
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index e8e4ae7..abcccd3 100644
+index e8e4ae7..38782fe 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
 @@ -2,6 +2,7 @@
@@ -3359,7 +3470,7 @@ index e8e4ae7..abcccd3 100644
          LogInfo("vr: centred on the head at ({:.3f} {:.3f} {:.3f}), world yaw {:.1f}", head.position.x, head.position.y, head.position.z,
                  glm::degrees(rig_.BaseYaw()));
      }
-@@ -83,6 +111,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -83,10 +111,19 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
              state.left_stick = move;
              state.left_stick_from_pad = true;
          }
@@ -3372,7 +3483,15 @@ index e8e4ae7..abcccd3 100644
          if (c.interact) raw |= kRawCross;
          if (c.back) raw |= kRawCircle;
          if (c.menu) raw |= kRawStart;
-@@ -106,8 +140,21 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+-        if (c.zoom) raw |= kRawR3;
++        // In the headset there is no camera zoom: you look with your head. Every "look at it and
++        // hold the zoom" interaction of the original (the peephole, the clock, the picture, the bag)
++        // goes on X as well: pressing X is pressing R3, holding it is holding R3.
++        if (c.zoom || (c.interact && !menu_open)) raw |= kRawR3;
+         if (c.gouge) raw |= kRawSquare;
+         if (c.triangle) raw |= kRawTriangle;
+         if (!menu_open && screen) {
+@@ -106,8 +143,21 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          if (raw != 0 || glm::length(c.move) > 0.2f || glm::length(c.turn) > 0.2f) {
              state.from_gamepad = true;
          }
@@ -3395,7 +3514,7 @@ index e8e4ae7..abcccd3 100644
      const uint32_t pressed = raw & ~raw_previous_;
      raw_previous_ = raw;
      state.raw_held |= raw;
-@@ -150,17 +197,121 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -150,17 +200,121 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          return false;
      }
      const glm::vec4 tangents[2] = {host_.Eye(0).tangents, host_.Eye(1).tangents};
@@ -3521,7 +3640,7 @@ index e8e4ae7..abcccd3 100644
      const glm::vec3 feet = player.Feet();
      const glm::vec3 eye = player.Eye();
      const float height = eye.y - feet.y;
-@@ -185,18 +336,20 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -185,18 +339,20 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
      const glm::vec3 correction = kept - offset;
      last_anchor_ = anchor;
      last_correction_ = correction;
@@ -3545,7 +3664,7 @@ index e8e4ae7..abcccd3 100644
          t.format = sc.format;
          t.extent = sc.extent;
          t.rect = rect;
-@@ -207,19 +360,179 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -207,19 +363,179 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          for (xr::Swapchain* sc : {&host_.EyeSwapchain(0), &host_.EyeSwapchain(1), &host_.HudSwapchain()}) host_.Release(*sc);
          return false;
      }
@@ -3726,7 +3845,7 @@ index e8e4ae7..abcccd3 100644
      layers.hud_position = hud_position_;
      layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
      host_.EndFrame(layers);
-@@ -268,16 +581,48 @@ void VrPlay::EndEmpty() {
+@@ -268,16 +584,48 @@ void VrPlay::EndEmpty() {
  }
  
  void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
@@ -3778,7 +3897,7 @@ index e8e4ae7..abcccd3 100644
      if (!hud_placed_ || (menu_open && !menu_was_open_)) {
          hud_yaw_ = head_yaw_local;
          hud_placed_ = true;
-@@ -289,7 +634,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
+@@ -289,7 +637,8 @@ void VrPlay::Place(const glm::vec3& head_local, float head_yaw_local, bool menu_
          }
      }
      menu_was_open_ = menu_open;
@@ -3891,7 +4010,7 @@ index d1485b2..2bcbcd6 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..ce1aca9 100644
+index d629ab3..5faa465 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,7 +95,7 @@
@@ -3922,13 +4041,11 @@ index d629ab3..ce1aca9 100644
              if (app_.options.release_locks) {
                  auto lock = Row(kLoopLock, "pc_loop_lock", {"pc_extras_start"}, 0, "pc_note_loop_lock");
                  lock.action = true;
-@@ -1611,9 +1615,55 @@ public:
+@@ -1611,9 +1615,66 @@ public:
          if (page_ == kVrPage) {
              const pt::AppSettings::Vr& v = app_.settings.vr;
              pt::game::PcSettingSection vr{"pc_vr", 0, {}};
 +#if PT_VISIONOS
-+            vr.rows.push_back(Row(kVrFlashlight, "pc_vr_flashlight", {"pc_vr_head", "pc_vp_left_hand", "pc_vp_right_hand"},
-+                                  v.flashlight == 0 ? 0 : v.flashlight_hand == 0 ? 1 : 2, "pc_note_vp_flashlight"));
 +            vr.rows.push_back(Row(kVrTurn, "pc_vr_turn", {"pc_vr_snap", "pc_vr_smooth"}, v.turn, "pc_note_vr_turn"));
 +            auto snap = Row(kVrSnapDegrees, "pc_vr_snap_degrees", {"15", "30", "45", "60", "90"}, Nearest(kSnapSteps, v.snap_degrees),
 +                            "pc_note_vr_snap_degrees");
@@ -3943,6 +4060,19 @@ index d629ab3..ce1aca9 100644
 +            auto recenter = Row(kVpRecenter, "pc_vp_recenter", {"pc_vp_recenter_value"}, 0, "pc_note_vp_recenter");
 +            recenter.action = true;
 +            vr.rows.push_back(std::move(recenter));
++            {
++                const pt::visionos::HeadsetSettings& hs = pt::visionos::Headset();
++                pt::game::PcSettingRow size = Row(kVpSubtitleSize, "pc_vp_subtitle_size", {}, std::clamp((hs.subtitle_size - 100 + 12) / 25, 0, 6),
++                                                  "pc_note_vp_subtitle_size");
++                for (int i = 0; i <= 6; ++i) size.values.push_back(std::format("{}%", 100 + 25 * i));
++                size.wrap = false;
++                vr.rows.push_back(std::move(size));
++                pt::game::PcSettingRow height = Row(kVpSubtitleHeight, "pc_vp_subtitle_height", {}, std::clamp((hs.subtitle_height + 2) / 5, 0, 8),
++                                                    "pc_note_vp_subtitle_height");
++                for (int i = 0; i <= 8; ++i) height.values.push_back(std::format("{}%", 5 * i));
++                height.wrap = false;
++                vr.rows.push_back(std::move(height));
++            }
 +            // Foveation (the headset's and the game's) and the sharp zone's antialiasing, together.
 +            const pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
 +            pt::game::PcSettingSection foveation{"pc_vp_section_foveation", 1, {}};
@@ -3978,7 +4108,7 @@ index d629ab3..ce1aca9 100644
              return {std::move(vr)};
          }
          if (page_ == kGraphicsPage) return GraphicsSections();
-@@ -1629,6 +1679,9 @@ public:
+@@ -1629,6 +1690,9 @@ public:
              test.rows.push_back(Row(kMicMonitor, "pc_mic_monitor", OffOn(), app_.microphone_monitor ? 1 : 0, "pc_mic_monitor_note"));
              return {std::move(test)};
          }
@@ -3988,7 +4118,7 @@ index d629ab3..ce1aca9 100644
          const pt::AppSettings& s = app_.settings;
          std::vector<pt::game::PcSettingSection> out;
          pt::game::PcSettingSection display{"pc_section_display", 0, {}};
-@@ -1863,12 +1916,106 @@ public:
+@@ -1863,12 +1927,114 @@ public:
              s.vr.enabled = value == 1;
              pt::LogInfo("vr: {} at the next start (PC settings)", s.vr.enabled ? "on" : "off");
              break;
@@ -4027,6 +4157,14 @@ index d629ab3..ce1aca9 100644
 +        case kVpAa:
 +            pt::visionos::Headset().aa = std::clamp(value, 0, 4);
 +            pt::visionos::SettingChanged("aa", std::to_string(pt::visionos::Headset().aa));
++            return;
++        case kVpSubtitleSize:
++            pt::visionos::Headset().subtitle_size = 100 + 25 * std::clamp(value, 0, 6);
++            pt::visionos::SettingChanged("subtitle_size", std::to_string(pt::visionos::Headset().subtitle_size));
++            return;
++        case kVpSubtitleHeight:
++            pt::visionos::Headset().subtitle_height = 5 * std::clamp(value, 0, 8);
++            pt::visionos::SettingChanged("subtitle_height", std::to_string(pt::visionos::Headset().subtitle_height));
 +            return;
 +        case kVpSceneDepth:
 +            pt::visionos::Headset().scene_depth = value == 1;
@@ -4095,7 +4233,7 @@ index d629ab3..ce1aca9 100644
          case kFrameLimit:
              if (!app_.options.fps_limit_override) s.display.fps_limit = value == 1 ? 60 : 30;
              break;
-@@ -1939,7 +2086,13 @@ public:
+@@ -1939,7 +2105,13 @@ public:
              std::string reason;
              pt::ApplyGraphicsPreset(s,static_cast<pt::GraphicsPreset>(std::clamp(value,0,4)),app_.scene.RayTracingSupported(reason));
              app_.textures.SetAnisotropy(s.graphics.anisotropy);
@@ -4109,7 +4247,7 @@ index d629ab3..ce1aca9 100644
              break;
          }
          case kShadowQuality:
-@@ -1995,6 +2148,11 @@ public:
+@@ -1995,6 +2167,11 @@ public:
              return;
          }
          ApplyGraphicsSettings(app_);
@@ -4121,7 +4259,7 @@ index d629ab3..ce1aca9 100644
          Save();
      }
  
-@@ -2197,6 +2355,9 @@ public:
+@@ -2197,6 +2374,9 @@ public:
          if (id == kGraphics) {
              page_ = kGraphicsPage;
          }
@@ -4131,16 +4269,17 @@ index d629ab3..ce1aca9 100644
          if (id == kMicrophoneTest) {
              page_ = kMicrophonePage;
              app_.microphone_test = true;
-@@ -2285,6 +2446,8 @@ private:
+@@ -2285,6 +2465,9 @@ private:
          kArchive, kArchiveLock,
          kVr, kVrMode, kVrFlashlight, kVrTurn,
          kFrameLimit,
 +        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpMetalFx, kVpFov, kVpRecenter,
 +        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp, kVpAa, kVpSceneDepth,
++        kVpSubtitleSize, kVpSubtitleHeight,
          kLoopFirst = 1000,
          kRunSplitFirst = 3000,
          kModFirst = 2000,
-@@ -2572,6 +2735,9 @@ private:
+@@ -2572,6 +2755,9 @@ private:
      int page_ = kMainPage;
      static constexpr float kMouseSteps[] = {0.25f, 0.35f, 0.5f, 0.7f, 1.0f, 1.4f, 2.0f, 2.8f, 4.0f, 5.0f};
      static constexpr float kDeadZoneSteps[] = {0.0f, 0.05f, 26.0f / 255.0f, 0.15f, 0.2f, 0.25f, 0.3f};
@@ -4150,7 +4289,7 @@ index d629ab3..ce1aca9 100644
  
      static pt::game::PcSettingRow Row(int id, std::string label, std::vector<std::string> values, int value, std::string note) {
          pt::game::PcSettingRow row;
-@@ -2642,6 +2808,85 @@ private:
+@@ -2642,6 +2828,85 @@ private:
          return Row(kEnhancedTextures,"pc_enhanced_textures",std::move(values),app_.settings.graphics.enhanced_textures?1:0,note);
      }
  
@@ -4236,7 +4375,7 @@ index d629ab3..ce1aca9 100644
      std::vector<pt::game::PcSettingSection> GraphicsSections() const {
          const auto& s=app_.settings;
          std::string reason;
-@@ -2690,7 +2935,9 @@ private:
+@@ -2690,7 +2955,9 @@ private:
      std::vector<pt::game::PcSettingSection> TextureSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection textures{"pc_section_textures",0,{}};
@@ -4246,7 +4385,7 @@ index d629ab3..ce1aca9 100644
          auto anisotropy=Row(kAnisotropy,"pc_anisotropy",{"pc_off","2x","4x","8x","16x"},g.anisotropy>=16?4:g.anisotropy>=8?3:g.anisotropy>=4?2:g.anisotropy>=2?1:0,"pc_note_anisotropy");
          anisotropy.wrap=false;textures.rows.push_back(std::move(anisotropy));
          textures.rows.push_back(Row(kTextureDetail,"pc_texture_detail",{"pc_detail_reduced","pc_preset_original","pc_detail_fine"},g.texture_detail,"pc_note_texture_detail"));
-@@ -2724,6 +2971,14 @@ private:
+@@ -2724,6 +2991,14 @@ private:
      std::vector<pt::game::PcSettingSection> EffectSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection effects{"pc_graphics_effects",0,{}};
@@ -4261,7 +4400,7 @@ index d629ab3..ce1aca9 100644
          effects.rows.push_back(Row(kDepthOfField,"pc_dof",OffOn(),g.depth_of_field?1:0,"pc_note_dof"));
          effects.rows.push_back(Row(kMotionBlur,"pc_motion_blur",OffOn(),g.motion_blur?1:0,"pc_note_motion_blur"));
          effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
-@@ -3095,7 +3350,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3095,7 +3370,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
      game.SetThirdPerson(app.settings.camera.third_person || options.third_person);
      pt::game::GameSound sound(game);
      std::vector<float> captured;
@@ -4271,7 +4410,7 @@ index d629ab3..ce1aca9 100644
          sound.System().SetMasterVolume(app.settings.audio.volume);
          if (options.seed) {
              sound.System().SetRandomSeed(options.seed);
-@@ -3139,14 +3395,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3139,14 +3415,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
      const bool pads = app.window || options.virtual_pads;
      if (pads) {
          input.Init();
@@ -4288,7 +4427,7 @@ index d629ab3..ce1aca9 100644
      script.SetPads(options.virtual_pads ? &virtual_pads : nullptr, &input);
      std::vector<float> offline_audio;
      double audio_device_time = 0.0;
-@@ -3207,7 +3463,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3207,7 +3483,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
      float accumulator = 0.0f;
      pt::Camera tick_camera_from = game.ViewCamera();
      pt::Camera motion_camera_from = tick_camera_from;
@@ -4299,7 +4438,7 @@ index d629ab3..ce1aca9 100644
      TickState tick_state;
      std::vector<glm::mat4> blended_skins;
      static const bool render_trace = std::getenv("PT_RENDER_TRACE") != nullptr;
-@@ -3434,8 +3692,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3434,8 +3712,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  visible = false;
                  SDL_Delay(10);
              }
@@ -4319,7 +4458,7 @@ index d629ab3..ce1aca9 100644
          const std::optional<bool> forced_focus = script.ForcedFocus(frame);
          if (app.window || forced_focus || vr) {
              const bool focused = forced_focus ? *forced_focus
-@@ -3487,6 +3755,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3487,6 +3775,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
          float dt = options.display_rate > 0.0f ? 1.0f / options.display_rate : 1.0f / options.tick_rate;
@@ -4333,7 +4472,7 @@ index d629ab3..ce1aca9 100644
          if (app.window) {
              const uint64_t now = SDL_GetTicksNS();
              dt = std::clamp(static_cast<float>(now - last_ticks) * 1e-9f, 0.0001f, 0.1f);
-@@ -3554,7 +3829,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3554,7 +3849,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (polled.pointer_valid) {
              pending_input.pointer = polled.pointer;
              pending_input.pointer_valid = true;
@@ -4342,7 +4481,7 @@ index d629ab3..ce1aca9 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
-@@ -3876,8 +4151,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3876,8 +4171,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
              previous_microphone_test = app.microphone_test;
          }
          const bool voice_file = !voice_input.empty();
@@ -4359,7 +4498,7 @@ index d629ab3..ce1aca9 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4123,23 +4404,132 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4123,23 +4424,139 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.SetRenderExtent(stereo.render);
                  scene_builder.Build(game, stereo.head, scene_dt, lighting, light_blend);
                  last_scene_time = game.Time();
@@ -4463,6 +4602,10 @@ index d629ab3..ce1aca9 100644
 +                    app.scene.Render(inset ? stereo.insets[eye - 2] : stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
 +                    app.scene.SetVrDepthOut(VK_NULL_HANDLE, VK_NULL_HANDLE, {});  // (not left for another render)
++                    if (pt::visionos::Headset().aa > 0 && !app.scene.UpscaleStatistics().error.empty()) {
++                        pt::LogWarn("vr: MetalFX temporal cannot run ({}): FXAA instead", app.scene.UpscaleStatistics().error);
++                        pt::visionos::Headset().aa = 0;  // (for this session only: the saved choice stays)
++                    }
 +                    // The frame slots alternate over the views: the times read now are those of the view
 +                    // drawn two renders ago (with insets, the other eye's view of the same kind).
 +                    pt::visionos::ReportEye(views == 4 ? kInsetOrder[(k + 2) % 4] : eye, views, app.scene.Stats().gpu_ms, app.scene.Stats().pass_ms,
@@ -4470,6 +4613,9 @@ index d629ab3..ce1aca9 100644
 +#endif
 +                    frame_gpu_ms += app.scene.Stats().gpu_ms;
                      ui.SetVrHud(true);
++                    // The subtitles' size and height in the headset (the VR page).
++                    pt::game::GameUi::subtitle_scale = static_cast<float>(pt::visionos::Headset().subtitle_size) / 100.0f;
++                    pt::game::GameUi::subtitle_lift = static_cast<float>(pt::visionos::Headset().subtitle_height) / 100.0f;
                      pt::XrFrame xr_frame;
 -                    xr_frame.eye = &stereo.targets[eye];
 +                    xr_frame.eye = inset ? &stereo.inset_targets[eye - 2] : &stereo.targets[eye];
@@ -4498,7 +4644,7 @@ index d629ab3..ce1aca9 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +4958,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +4985,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -4515,7 +4661,7 @@ index d629ab3..ce1aca9 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +5004,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +5031,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

@@ -171,6 +171,26 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   imagen 60 %, altura -10 → 45 fps estables, GPU 19–20 ms (4 vistas; zona 830x830, periferia 270x216); térmico fair a ~7 min.
   Las anchas cuestan ~4,5 ms cada una casi todo fijo (bloom 1,2–1,7, sombras ancha izq. 1,1–2,4, partículas). Imagen 100 % + 70°:
   26–28 fps. MetalFX espacial (270x216 → 4493x3604 por ojo): composición 6,7 ms y −10 fps → eliminado.
+- **Run 38041630512 (commit a6af22c): FALLÓ** al compilar: `MTLFXTemporalScaler`/`Descriptor` "not available on visionOS" en el SDK.
+- **Prueba build 42 completa (log pt (27), juego terminado):** ajustes de referencia del usuario (menos se ve borroso): imagen 50 %,
+  zona 70° al 100 % (1158x1158), periferia 10 % (226x182), altura -10. 45 fps al inicio, 25–35 en el pasillo (GPU 30–40 ms, picos 48).
+  Por vista: inset lighting 3,2–3,6, inset gbuffer 1,4–2,1, inset compose 1,9, wide bloom 1,4, sombras hasta 3,5–6 ms/frame.
+  Mirilla: 31 abortos ("zoom released"); el usuario no tiene R3 cómodo; cuadro (marca X) pedía Cuadrado (gouge).
+- **Build 40 (commit siguiente): arreglo de compilación + jugabilidad VR + subtítulos.**
+  - metalfx_upscaler.mm: sin `#import <MetalFX/MetalFX.h>`; clase por `NSClassFromString(@"MTLFXTemporalScalerDescriptor")` y
+    llamadas por `objc_msgSend` con firma exacta (`Send<R>`, `SendNew` con `__bridge_transfer`). Logs: `upscale: MetalFX temporal
+    scaler found at run time on visionOS` o `this visionOS has no MetalFX temporal scaler`. main.cpp: si
+    `UpscaleStatistics().error` no vacío con aa>0 → `Headset().aa = 0` (FXAA) solo en la sesión. AA por defecto 3 (75 %).
+  - vr_play: X (interact) también pone `kRawR3` (zoom) salvo con menú abierto. trap_system: `kGougeButtons` = Gouge|Action en
+    visionOS (marca X del cuadro). game.cpp `InViewNdc`: área ×1,5 (máx 0,95, nunca menor) en visionOS.
+  - Linterna siempre en la cabeza (`ApplySettings` fuerza flashlight=0); fila del menú y Picker del launcher quitados; Sense ya no
+    se rastrea (`GameRunner.tick`).
+  - Subtítulos: `GameUi::subtitle_scale/subtitle_lift` (static inline, game_ui.h) puestos en main.cpp antes de cada HUD estéreo;
+    `DrawSubtitle` ajusta el ancho de línea a 0,9·ancho/escala y escala/eleva los glifos sobre el centro inferior. Ajustes
+    `HeadsetSettings.subtitle_size` (100–250, def. 175, `PT_VP_SUBTITLE_SIZE`) y `subtitle_height` (0–40 %, def. 20,
+    `PT_VP_SUBTITLE_HEIGHT`); filas `kVpSubtitleSize/kVpSubtitleHeight` en la página VR; Swift `subtitleSize/subtitleHeight`.
+  - Revisión adversarial (Sonnet) aplicada: área nunca menor, ancho de línea original con escala 1, R3 no con menú, fallback no
+    guardado.
 - **Build 39 (pendiente de run): MetalFX temporal en la zona nítida, un bloom por fotograma, profundidad al compositor, menú VR.**
   - MoltenVK `patches/moltenvk/0002-metal-encode-command.patch`: comando privado `vkCmdEncodeMetalMVK(cmd, fn, data, size)`
     (`MVKCmdEncodeMetal` en MVKCmdDebug.h/.mm, pool en MVKCommandTypePools.def, símbolo en vulkan.mm): al codificar cierra los

@@ -2522,7 +2522,9 @@ void ApplySettings(AppSettings& s) {
     // drawable's full size (6-7 ms a frame for nothing). MetalFX is now the sharp views' temporal
     // antialiasing (`aa`), inside the game's frame.
     h.metalfx = false;
-    h.aa = std::clamp(static_cast<int>(Number("PT_VP_AA", 1.0f)), 0, 4);
+    h.aa = std::clamp(static_cast<int>(Number("PT_VP_AA", 3.0f)), 0, 4);
+    h.subtitle_size = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_SIZE", 175.0f)), 100, 250);
+    h.subtitle_height = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_HEIGHT", 20.0f)), 0, 40);
     h.scene_depth = Flag("PT_VP_SCENE_DEPTH", true);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 20.0f)), 10, 50);
@@ -2545,9 +2547,10 @@ void ApplySettings(AppSettings& s) {
     s.vr.turn = static_cast<int>(Number("PT_VP_TURN", 0.0f)) == 1 ? 1 : 0;
     s.vr.snap_degrees = std::clamp(Number("PT_VP_SNAP_DEGREES", 30.0f), 10.0f, 90.0f);
     s.vr.smooth_speed = std::clamp(Number("PT_VP_SMOOTH_SPEED", 90.0f), 20.0f, 360.0f);
-    const int hand = static_cast<int>(Number("PT_VP_FLASHLIGHT_HAND", -1.0f));
-    s.vr.flashlight = hand >= 0 ? 1 : 0;
-    s.vr.flashlight_hand = hand == 1 ? 1 : 0;
+    // The flashlight follows the head (the PlayStation VR2 Sense hand option is gone: the game is
+    // played with a PS4/PS5 controller).
+    s.vr.flashlight = 0;
+    s.vr.flashlight_hand = 0;
     s.display.fps_limit = 0;  // the headset paces the frames
     s.display.vsync = false;
     s.display.pause_on_focus_loss = Flag("PT_VP_PAUSE_AWAY", true);

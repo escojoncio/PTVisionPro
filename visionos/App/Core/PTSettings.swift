@@ -54,7 +54,11 @@ struct PTSettings: Codable, Equatable {
     var metalFX = false
     /// Antialiasing of the sharp zone: 0 FXAA, 1 MetalFX temporal at 100 %, 2-4 MetalFX temporal
     /// drawing at 85, 75 or 67 % and rebuilding the full size. Not part of a preset.
-    var aa = 1
+    var aa = 3
+    /// Subtitles in the headset: size, percent of the original's (100 to 250).
+    var subtitleSize = 175
+    /// ...and how far up from the bottom edge, percent of the view's height (0 to 40).
+    var subtitleHeight = 20
     /// The scene's depth handed to the headset with each picture (its reprojection moves near
     /// things correctly, 45 to 90 included).
     var sceneDepth = true
@@ -255,7 +259,7 @@ struct PTSettings: Codable, Equatable {
         case center = "sharpZoneDegrees"
         case compositorQuality, metalFX, sharpen, gameFoveation, centerResolution, centerUp
         case aa = "sharpZoneAntialiasing"
-        case sceneDepth
+        case sceneDepth, subtitleSize, subtitleHeight
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, showPerformanceOverlay, gamePath
     }
@@ -282,6 +286,8 @@ struct PTSettings: Codable, Equatable {
         metalFX = false  // (the old spatial MetalFX is gone: a saved "on" must not keep the preset from matching)
         aa = min(max((try? c.decodeIfPresent(Int.self, forKey: .aa)) ?? base.aa, 0), 4)
         sceneDepth = (try? c.decodeIfPresent(Bool.self, forKey: .sceneDepth)) ?? base.sceneDepth
+        subtitleSize = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleSize)) ?? base.subtitleSize, 100), 250)
+        subtitleHeight = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleHeight)) ?? base.subtitleHeight, 0), 40)
         gameFoveation = (try? c.decodeIfPresent(Bool.self, forKey: .gameFoveation)) ?? base.gameFoveation
         periphery = min(max((try? c.decodeIfPresent(Int.self, forKey: .periphery)) ?? base.periphery, 10), 50)
         center = (try? c.decodeIfPresent(Int.self, forKey: .center)) ?? base.center
@@ -334,6 +340,8 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
             "PT_VP_AA=\(min(max(aa, 0), 4))",
             "PT_VP_SCENE_DEPTH=\(flag(sceneDepth))",
+            "PT_VP_SUBTITLE_SIZE=\(subtitleSize)",
+            "PT_VP_SUBTITLE_HEIGHT=\(subtitleHeight)",
             "PT_VP_GAME_FOVEATION=\(flag(gameFoveation))",
             "PT_VP_PERIPHERY=\(periphery)",
             "PT_VP_CENTER_DEG=\(center)",
