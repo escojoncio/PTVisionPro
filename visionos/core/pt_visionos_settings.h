@@ -35,7 +35,11 @@ struct HeadsetSettings {
     // Antialiasing of the sharp views (the insets, or the eyes without the game's foveation):
     // 0 FXAA; 1 MetalFX temporal at the full size (antialiasing only); 2-4 MetalFX temporal
     // drawing at 85, 75 or 67 % and rebuilding the full size from the past frames.
-    int aa = 1;
+    int aa = 3;
+    // Subtitles in the headset: size (percent of the original's, 100 to 250) and how far up from
+    // the bottom edge (percent of the view's height, 0 to 40), where the headset is sharpest.
+    int subtitle_size = 175;
+    int subtitle_height = 20;
     // The scene's depth handed to the compositor with each picture, so its reprojection (45 to
     // 90, and every picture's correction to the latest head pose) moves near things correctly.
     bool scene_depth = true;

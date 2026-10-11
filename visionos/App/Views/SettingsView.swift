@@ -219,18 +219,13 @@ struct SettingsView: View {
                     Stepper("\(model.settings.smoothSpeed) °/s", value: int(\.smoothSpeed), in: 30...240, step: 15)
                 }
             }
-            Picker(L("Linterna", "Flashlight"), selection: int(\.flashlightHand)) {
-                Text(L("Sigue la cabeza", "Follows the head")).tag(-1)
-                Text(L("Mano izquierda", "Left hand")).tag(0)
-                Text(L("Mano derecha", "Right hand")).tag(1)
-            }
             Toggle(L("Ver mis manos durante el juego", "See my hands while playing"), isOn: bool(\.showHands))
             Toggle(L("Pausar al quitarse el visor", "Pause when the headset is taken off"), isOn: bool(\.pauseWhenAway))
         } header: {
             Text(L("Mando y manos", "Controller and hands"))
         } footer: {
-            Text(L("La linterna en una mano necesita que el visor siga esa mano o un mando PlayStation VR2 Sense; si no, sigue la cabeza.",
-                   "The flashlight in a hand needs the headset to track that hand or a PlayStation VR2 Sense controller; otherwise it follows the head."))
+            Text(L("La linterna sigue la cabeza. En VR, X sirve también de zoom (R3): mira al punto y pulsa o mantén X.",
+                   "The flashlight follows the head. In VR, X also works as the zoom (R3): look at the spot and press or hold X."))
         }
     }
 
@@ -238,6 +233,12 @@ struct SettingsView: View {
         Section {
             Toggle(L("Reconocimiento de voz (radio)", "Voice recognition (radio)"), isOn: bool(\.voiceRecognition))
             Toggle(L("Escenas inmersivas", "Immersive cutscenes"), isOn: bool(\.immersiveCutscenes))
+            LabeledContent(L("Tamaño de los subtítulos", "Subtitle size")) {
+                Stepper("\(model.settings.subtitleSize) %", value: int(\.subtitleSize), in: 100...250, step: 25)
+            }
+            LabeledContent(L("Altura de los subtítulos", "Subtitle height")) {
+                Stepper("\(model.settings.subtitleHeight) %", value: int(\.subtitleHeight), in: 0...40, step: 5)
+            }
             Picker(L("Idioma", "Language"), selection: Binding(
                 get: { AppLanguage(rawValue: model.settings.language) ?? .system },
                 set: { model.setLanguage($0) })) {

@@ -14,6 +14,11 @@
 // command buffer, and the game's next passes follow in new encoders. MoltenVK's textures are
 // hazard-tracked, so Metal orders the reads and writes on its own.
 //
+// The visionOS SDK marks MTLFXTemporalScaler unavailable (iOS, macOS, tvOS only), so this file
+// does not name it: the class is looked up at run time (NSClassFromString) and spoken to through
+// objc_msgSend. If the headset's MetalFX has it, it works; if not, Available() says so and the
+// game keeps FXAA.
+//
 // One scaler (one history) per picture: a headset frame has up to four views (UpscaleDispatch
 // .history), and each keeps its own past, otherwise an eye would accumulate the other eye's.
 
@@ -23,7 +28,8 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#import <MetalFX/MetalFX.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -38,6 +44,23 @@ namespace pt {
 namespace {
 
 constexpr uint32_t kHistories = 4;
+
+// objc_msgSend with the method's real signature (arm64: one entry point for every return type).
+template <class R, class... A>
+R Send(id object, const char* selector, A... args) {
+    return reinterpret_cast<R (*)(id, SEL, A...)>(objc_msgSend)(object, sel_registerName(selector), args...);
+}
+bool Responds(id object, const char* selector) {
+    return object && [object respondsToSelector:sel_registerName(selector)];
+}
+// A "new..." method's object belongs to the caller (ARC must not retain it again).
+id SendNew(id object, const char* selector, id argument) {
+    void* made = reinterpret_cast<void* (*)(id, SEL, id)>(objc_msgSend)(object, sel_registerName(selector), argument);
+    return (__bridge_transfer id)made;
+}
+Class DescriptorClass() {
+    return NSClassFromString(@"MTLFXTemporalScalerDescriptor");
+}
 
 PFN_vkExportMetalObjectsEXT ExportFn(VkDevice device) {
     return reinterpret_cast<PFN_vkExportMetalObjectsEXT>(vkGetDeviceProcAddr(device, "vkExportMetalObjectsEXT"));
@@ -73,24 +96,24 @@ struct EncodeData {
 
 void Encode(void* data, void* command_buffer) {
     const EncodeData& d = *static_cast<const EncodeData*>(data);
-    id<MTLFXTemporalScaler> scaler = (__bridge id<MTLFXTemporalScaler>)d.scaler;
+    id scaler = (__bridge id)d.scaler;
     id<MTLCommandBuffer> cb = (__bridge id<MTLCommandBuffer>)command_buffer;
     if (!scaler || !cb) return;
-    scaler.colorTexture = (__bridge id<MTLTexture>)d.color;
-    scaler.depthTexture = (__bridge id<MTLTexture>)d.depth;
-    scaler.motionTexture = (__bridge id<MTLTexture>)d.motion;
-    scaler.outputTexture = (__bridge id<MTLTexture>)d.output;
-    if (d.reactive && [scaler respondsToSelector:@selector(setReactiveMaskTexture:)]) {
-        scaler.reactiveMaskTexture = (__bridge id<MTLTexture>)d.reactive;
+    Send<void>(scaler, "setColorTexture:", (__bridge id<MTLTexture>)d.color);
+    Send<void>(scaler, "setDepthTexture:", (__bridge id<MTLTexture>)d.depth);
+    Send<void>(scaler, "setMotionTexture:", (__bridge id<MTLTexture>)d.motion);
+    Send<void>(scaler, "setOutputTexture:", (__bridge id<MTLTexture>)d.output);
+    if (d.reactive && Responds(scaler, "setReactiveMaskTexture:")) {
+        Send<void>(scaler, "setReactiveMaskTexture:", (__bridge id<MTLTexture>)d.reactive);
     }
-    scaler.jitterOffsetX = d.jitter_x;
-    scaler.jitterOffsetY = d.jitter_y;
-    scaler.motionVectorScaleX = d.motion_x;
-    scaler.motionVectorScaleY = d.motion_y;
-    scaler.preExposure = d.pre_exposure;
-    scaler.depthReversed = YES;  // the game's depth is reversed (1 near, 0 far)
-    scaler.reset = d.reset != 0;
-    [scaler encodeToCommandBuffer:cb];
+    Send<void>(scaler, "setJitterOffsetX:", d.jitter_x);
+    Send<void>(scaler, "setJitterOffsetY:", d.jitter_y);
+    Send<void>(scaler, "setMotionVectorScaleX:", d.motion_x);
+    Send<void>(scaler, "setMotionVectorScaleY:", d.motion_y);
+    Send<void>(scaler, "setPreExposure:", d.pre_exposure);
+    Send<void>(scaler, "setDepthReversed:", (BOOL)YES);  // the game's depth is reversed (1 near, 0 far)
+    Send<void>(scaler, "setReset:", (BOOL)(d.reset != 0));
+    Send<void>(scaler, "encodeToCommandBuffer:", cb);
 }
 
 bool Covers(MTLTextureUsage have, MTLTextureUsage need) {
@@ -120,10 +143,18 @@ public:
             reason = "no Metal device";
             return false;
         }
-        if (![MTLFXTemporalScalerDescriptor supportsDevice:device_]) {
-            reason = "this GPU has no MetalFX temporal scaling";
+        Class cls = DescriptorClass();
+        if (!cls) {
+            reason = "this visionOS has no MetalFX temporal scaler (MTLFXTemporalScalerDescriptor missing)";
+            LogWarn("upscale: {}", reason);
             return false;
         }
+        if (Responds((id)cls, "supportsDevice:") && !Send<BOOL>((id)cls, "supportsDevice:", device_)) {
+            reason = "MetalFX temporal scaling: supportsDevice says no on this GPU";
+            LogWarn("upscale: {}", reason);
+            return false;
+        }
+        LogInfo("upscale: MetalFX temporal scaler found at run time on visionOS");
         return true;
     }
 
@@ -137,9 +168,10 @@ public:
             return false;
         }
         const float scale = static_cast<float>(display_.width) / static_cast<float>(render_.width);
-        if ([MTLFXTemporalScalerDescriptor respondsToSelector:@selector(supportedInputContentMinScaleForDevice:)]) {
-            const float lo = [MTLFXTemporalScalerDescriptor supportedInputContentMinScaleForDevice:device_];
-            const float hi = [MTLFXTemporalScalerDescriptor supportedInputContentMaxScaleForDevice:device_];
+        id cls = (id)DescriptorClass();
+        if (Responds(cls, "supportedInputContentMinScaleForDevice:") && Responds(cls, "supportedInputContentMaxScaleForDevice:")) {
+            const float lo = Send<float>(cls, "supportedInputContentMinScaleForDevice:", device_);
+            const float hi = Send<float>(cls, "supportedInputContentMaxScaleForDevice:", device_);
             if (scale < lo - 0.001f || scale > hi + 0.001f) {
                 LogError("upscale: MetalFX takes scales {:.2f} to {:.2f}, not {:.2f}", lo, hi, scale);
                 return false;
@@ -164,31 +196,38 @@ public:
         }
         bool fresh = false;
         if (!scalers_[h] || color.pixelFormat != formats_[h][0] || output.pixelFormat != formats_[h][1]) {
-            MTLFXTemporalScalerDescriptor* desc = [MTLFXTemporalScalerDescriptor new];
-            desc.colorTextureFormat = color.pixelFormat;
-            desc.depthTextureFormat = depth.pixelFormat;
-            desc.motionTextureFormat = motion.pixelFormat;
-            desc.outputTextureFormat = output.pixelFormat;
-            desc.inputWidth = d.render.width;
-            desc.inputHeight = d.render.height;
-            desc.outputWidth = d.display.width;
-            desc.outputHeight = d.display.height;
-            desc.autoExposureEnabled = YES;
-            const bool use_reactive = reactive != nil && [desc respondsToSelector:@selector(setReactiveMaskTextureEnabled:)];
-            if (use_reactive) {
-                desc.reactiveMaskTextureEnabled = YES;
-                desc.reactiveMaskTextureFormat = reactive.pixelFormat;
+            Class cls = DescriptorClass();
+            id desc = cls ? [cls new] : nil;
+            if (!desc) {
+                Fail("no MTLFXTemporalScalerDescriptor");
+                return false;
             }
-            id<MTLFXTemporalScaler> scaler = [desc newTemporalScalerWithDevice:device_];
+            Send<void>(desc, "setColorTextureFormat:", (NSUInteger)color.pixelFormat);
+            Send<void>(desc, "setDepthTextureFormat:", (NSUInteger)depth.pixelFormat);
+            Send<void>(desc, "setMotionTextureFormat:", (NSUInteger)motion.pixelFormat);
+            Send<void>(desc, "setOutputTextureFormat:", (NSUInteger)output.pixelFormat);
+            Send<void>(desc, "setInputWidth:", (NSUInteger)d.render.width);
+            Send<void>(desc, "setInputHeight:", (NSUInteger)d.render.height);
+            Send<void>(desc, "setOutputWidth:", (NSUInteger)d.display.width);
+            Send<void>(desc, "setOutputHeight:", (NSUInteger)d.display.height);
+            Send<void>(desc, "setAutoExposureEnabled:", (BOOL)YES);
+            const bool use_reactive = reactive != nil && Responds(desc, "setReactiveMaskTextureEnabled:") &&
+                                      Responds(desc, "setReactiveMaskTextureFormat:");
+            if (use_reactive) {
+                Send<void>(desc, "setReactiveMaskTextureEnabled:", (BOOL)YES);
+                Send<void>(desc, "setReactiveMaskTextureFormat:", (NSUInteger)reactive.pixelFormat);
+            }
+            id scaler = SendNew(desc, "newTemporalScalerWithDevice:", device_);
             if (!scaler) {
                 Fail("MTLFXTemporalScaler could not be created");
                 return false;
             }
-            const char* missing = !Covers(color.usage, scaler.colorTextureUsage)    ? "colour"
-                                  : !Covers(depth.usage, scaler.depthTextureUsage)  ? "depth"
-                                  : !Covers(motion.usage, scaler.motionTextureUsage) ? "motion"
-                                  : !Covers(output.usage, scaler.outputTextureUsage) ? "output"
-                                                                                      : nullptr;
+            auto usage = [&](const char* name) { return (MTLTextureUsage)Send<NSUInteger>(scaler, name); };
+            const char* missing = !Covers(color.usage, usage("colorTextureUsage"))    ? "colour"
+                                  : !Covers(depth.usage, usage("depthTextureUsage"))  ? "depth"
+                                  : !Covers(motion.usage, usage("motionTextureUsage")) ? "motion"
+                                  : !Covers(output.usage, usage("outputTextureUsage")) ? "output"
+                                                                                        : nullptr;
             if (missing) {
                 Fail(std::string("the ") + missing + " texture lacks a usage MetalFX needs");
                 return false;
@@ -245,7 +284,7 @@ private:
     id<MTLDevice> device_ = nil;
     VkExtent2D render_{};
     VkExtent2D display_{};
-    id<MTLFXTemporalScaler> scalers_[kHistories];
+    id scalers_[kHistories];  // MTLFXTemporalScaler (looked up at run time)
     bool reactive_[kHistories] = {};
     MTLPixelFormat formats_[kHistories][2] = {};
     float jitter_sign_ = 1.0f;

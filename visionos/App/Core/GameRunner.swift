@@ -176,6 +176,8 @@ final class GameRunner: @unchecked Sendable {
         case "metalfx": return  // (the old spatial MetalFX: gone)
         case "aa": s.aa = min(max(Int(value) ?? s.aa, 0), 4)
         case "scene_depth": s.sceneDepth = flag
+        case "subtitle_size": s.subtitleSize = min(max(Int(value) ?? s.subtitleSize, 100), 250)
+        case "subtitle_height": s.subtitleHeight = min(max(Int(value) ?? s.subtitleHeight, 0), 40)
         case "fov": s.fov = Int(value) ?? s.fov
         case "game_foveation": s.gameFoveation = flag
         case "periphery": s.periphery = Int(value) ?? s.periphery
@@ -208,9 +210,7 @@ final class GameRunner: @unchecked Sendable {
             detach()
             return
         }
-        // The PlayStation VR2 Sense controllers connected now, tracked in space (does nothing
-        // while they are the same ones).
-        SenseTracking.shared.track(PlayStationController.shared.senses)
+        // (PlayStation VR2 Sense tracking is gone: the flashlight follows the head.)
         var raw = pt_vp_stats()
         pt_vp_stats_get(&raw)
         let stats = GameStats(fps: raw.fps, frameMs: raw.frame_ms, gpuMs: raw.gpu_ms,
