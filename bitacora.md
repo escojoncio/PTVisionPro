@@ -176,7 +176,7 @@ cambios de visionOS sobre `build/port-src`. Sin emulación ni JIT: C++ nativo + 
   zona 70° al 100 % (1158x1158), periferia 10 % (226x182), altura -10. 45 fps al inicio, 25–35 en el pasillo (GPU 30–40 ms, picos 48).
   Por vista: inset lighting 3,2–3,6, inset gbuffer 1,4–2,1, inset compose 1,9, wide bloom 1,4, sombras hasta 3,5–6 ms/frame.
   Mirilla: 31 abortos ("zoom released"); el usuario no tiene R3 cómodo; cuadro (marca X) pedía Cuadrado (gouge).
-- **Build 40 (commit siguiente): arreglo de compilación + jugabilidad VR + subtítulos.**
+- **Build 40 (run 38146256001): OK** → `releases/download/build-44/PTVisionPro-44.ipa` (sin probar). Arreglo de compilación + jugabilidad VR + subtítulos.**
   - metalfx_upscaler.mm: sin `#import <MetalFX/MetalFX.h>`; clase por `NSClassFromString(@"MTLFXTemporalScalerDescriptor")` y
     llamadas por `objc_msgSend` con firma exacta (`Send<R>`, `SendNew` con `__bridge_transfer`). Logs: `upscale: MetalFX temporal
     scaler found at run time on visionOS` o `this visionOS has no MetalFX temporal scaler`. main.cpp: si
