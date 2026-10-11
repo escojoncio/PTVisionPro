@@ -20,14 +20,13 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
 
 ## Pendiente (en orden)
 
-1. Según la respuesta del usuario sobre los fantasmas:
-   - Si es MetalFX: opciones en el menú para invertir signo del jitter (x/y) y de los vectores de movimiento
-     (`metalfx_upscaler.mm` `Encode`: `jitter_x/y`, `motion_x/y`); el log ya registra los 8 primeros
-     (`upscale: MetalFX picture N jitter ...`). Revisar también: motion de cámara por vista (`vr_last_camera_`, offset del
-     inset en `upscale_motion.frag`), reactive mask/handy demod, historia por vista (`history` = `vr_eye_`).
-   - Si es la profundidad: revisar `SceneDepth` (MSL) frente a la convención de `cp_drawable_compute_projection`,
-     posible falta de `cp_drawable_set_depth_range`, y coste de 2 ms de la composición.
-2. Lanzar build con el preajuste M2 nuevo + el arreglo.
+1. **Build 45: opción «Alineación de MetalFX»** (`HeadsetSettings::aa_jitter`, menú VR → Foveado y nitidez, `kVpAaJitter`;
+   Swift `aaJitter`/`metalFXAlignment`, env `PT_VP_AA_JITTER`): 0 Apple (jitter negado al scaler, por defecto), 1 como DLSS/FSR
+   (lo de la build 44), 2 sin jitter (`SceneRenderer::SetVrNoJitter`, `scene_upscale.cpp`). Cambiar reinicia las historias
+   (`restart_` en `metalfx_upscaler.mm`). Motivo: log pt (29): con FXAA (profundidad on) no hay fantasmas → la causa es MetalFX,
+   no la profundidad; `depthReversed` ya estaba a YES. Pedido al usuario: probar 0, 1 y 2 con MetalFX y decir cuál quita la sombra.
+   Si ninguno: revisar vectores de movimiento (signo/`motion_scale`) y la colocación del inset en la composición.
+2. (Incluido en la build 45 el preajuste M2 del commit 12bd8f9.)
 3. MetalFX no da fps aún (2,7 ms/inset ≈ lo ahorrado): medir con 67 %, o TAA propio más barato.
 4. Comprobar en el visor: X como zoom (mirilla, reloj), X en la marca del cuadro, subtítulos (tamaño/altura).
 5. Rendimiento: bloom con menos pasadas (41 pasadas casi de coste fijo), sombras (3,5–6 ms/frame en el pasillo),

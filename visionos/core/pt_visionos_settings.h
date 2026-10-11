@@ -36,6 +36,9 @@ struct HeadsetSettings {
     // 0 FXAA; 1 MetalFX temporal at the full size (antialiasing only); 2-4 MetalFX temporal
     // drawing at 85, 75 or 67 % and rebuilding the full size from the past frames.
     int aa = 3;
+    // How MetalFX is told the frames' jitter: 0 Apple's sign (the opposite of DLSS/FSR), 1 as
+    // DLSS/FSR, 2 no jitter at all (a test: nothing can be misaligned). Not part of a preset.
+    int aa_jitter = 0;
     // Subtitles in the headset: size (percent of the original's, 100 to 250) and how far up from
     // the bottom edge (percent of the view's height, 0 to 40), where the headset is sharpest.
     int subtitle_size = 175;

@@ -2536,6 +2536,7 @@ void ApplySettings(AppSettings& s) {
     // antialiasing (`aa`), inside the game's frame.
     h.metalfx = false;
     h.aa = std::clamp(static_cast<int>(Number("PT_VP_AA", 3.0f)), 0, 4);
+    h.aa_jitter = std::clamp(static_cast<int>(Number("PT_VP_AA_JITTER", 0.0f)), 0, 2);
     h.subtitle_size = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_SIZE", 175.0f)), 100, 250);
     h.subtitle_height = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_HEIGHT", 20.0f)), 0, 40);
     h.scene_depth = Flag("PT_VP_SCENE_DEPTH", true);
