@@ -17,7 +17,6 @@ struct HeadsetSettings {
     float resolution_scale = 0.6f;
     int target_fps = 90;
     bool foveation = true;
-    bool metalfx = false;  // (old: MetalFX spatial over the whole eye; always off, see `aa`)
     int fov = 100;        // percent of the views' field of view the game draws (70 to 100)
     // The game's own foveation: each eye drawn whole at a low density (`periphery`, percent of
     // the image size) and a sharp zone around its forward axis again (`center_deg` degrees
@@ -33,16 +32,17 @@ struct HeadsetSettings {
     // up to the headset's 200). Not part of a preset: it costs almost nothing.
     int hdr = 200;
     // Antialiasing of the sharp views (the insets, or the eyes without the game's foveation):
-    // 0 FXAA; 1 MetalFX temporal at the full size (antialiasing only); 2-4 MetalFX temporal
-    // drawing at 85, 75 or 67 % and rebuilding the full size from the past frames; 5 the engine's
-    // own TAA at the full size (taa.frag). The menu shows them FXAA, TAA, MetalFX (main.cpp).
+    // 5 VPKTAA, the engine's own temporal antialiasing (taa.frag; the default), 0 FXAA (kept to
+    // compare). Any other value (saved by older builds: MetalFX) is read as 5.
     int aa = 5;
-    // How MetalFX is told the frames' jitter: 0 Apple's sign (the opposite of DLSS/FSR), 1 as
-    // DLSS/FSR, 2 no jitter at all (a test: nothing can be misaligned). Not part of a preset.
-    int aa_jitter = 0;
-    // A test of MetalFX for this session (not kept): 0 normal, 1 no history (reset every frame),
-    // 2 no motion vectors (scale 0), 3 the upscaler path without its picture.
-    int aa_debug = 0;
+    // VPKTAA only: the sharp view drawn at this percent of its size (80, 85, 90 or 100) and
+    // rebuilt to the full size from the past frames (100: antialiasing only, the sharpest).
+    int taa_res = 100;
+    // VPKTAA only: how much its picture is sharpened (0 to 100 percent, steps of 10).
+    int taa_sharpness = 50;
+    // VPKTAA only: the wide, low-detail views outside the sharp circle get it too (no added
+    // detail there; steadier edges at the side of the vision).
+    bool taa_periphery = true;
     // Subtitles in the headset: size (percent of the original's, 100 to 250) and how far up from
     // the bottom edge (percent of the view's height, 0 to 40), where the headset is sharpest.
     int subtitle_size = 175;
@@ -59,10 +59,16 @@ struct HeadsetSettings {
     bool device_m5 = false;
 };
 
-// What each antialiasing step draws, as a fraction of the sharp view's size (HeadsetSettings::aa).
-inline float AaScale(int aa) {
-    static constexpr float kScales[6] = {1.0f, 1.0f, 0.85f, 0.75f, 0.67f, 1.0f};
-    return kScales[aa < 0 ? 0 : aa > 5 ? 5 : aa];
+// HeadsetSettings::aa from any stored value: 0 stays FXAA, everything else is VPKTAA (5).
+inline int SanitizeAa(int aa) { return aa == 0 ? 0 : 5; }
+// HeadsetSettings::taa_res from any stored value: the nearest of 80, 85, 90, 100.
+inline int SanitizeTaaRes(int percent) {
+    return percent >= 95 ? 100 : percent >= 88 ? 90 : percent >= 83 ? 85 : 80;
+}
+// HeadsetSettings::taa_sharpness from any stored value: 0 to 100 in steps of 10.
+inline int SanitizeTaaSharpness(int percent) {
+    const int v = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    return (v + 5) / 10 * 10;
 }
 
 // The launcher's settings into the game's, after pt.ini was read.

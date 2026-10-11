@@ -186,18 +186,28 @@ struct SettingsView: View {
             }
             .disabled(!model.settings.gameFoveation)
             Picker(L("Antialiasing de la zona nítida", "Sharp zone antialiasing"), selection: int(\.aa)) {
-                Text(L("FXAA (básico)", "FXAA (basic)")).tag(0)
-                Text(L("TAA (temporal, con nitidez)", "TAA (temporal, sharpened)")).tag(5)
-                Text("MetalFX 100 %").tag(1)
-                Text("MetalFX 85 %").tag(2)
-                Text("MetalFX 75 %").tag(3)
-                Text("MetalFX 67 %").tag(4)
+                Text(L("VPKTAA (temporal)", "VPKTAA (temporal)")).tag(5)
+                Text(L("FXAA (básico, para comparar)", "FXAA (basic, to compare)")).tag(0)
             }
+            Picker(L("Resolución interna de VPKTAA", "VPKTAA internal resolution"), selection: int(\.taaRes)) {
+                ForEach([100, 90, 85, 80], id: \.self) { percent in
+                    Text("\(percent) %").tag(percent)
+                }
+            }
+            .disabled(model.settings.aa != 5)
+            Picker(L("Nitidez de VPKTAA", "VPKTAA sharpness"), selection: int(\.taaSharpness)) {
+                ForEach(Array(stride(from: 0, through: 100, by: 10)), id: \.self) { percent in
+                    Text("\(percent) %").tag(percent)
+                }
+            }
+            .disabled(model.settings.aa != 5)
+            Toggle(L("VPKTAA también en la periferia", "VPKTAA also in the periphery"), isOn: bool(\.taaPeriphery))
+                .disabled(model.settings.aa != 5)
         } header: {
             Text(L("Foveado del juego", "Game foveation"))
         } footer: {
-            Text(L("Solo un círculo en el centro de la vista se dibuja nítido; todo lo de fuera, a baja resolución. Ancho: diámetro del círculo en grados (40° es más o menos lo que miras de frente; más ancho cuesta mucho más). Altura: súbelo (+) o bájalo (-) hasta que lo borroso de arriba y de abajo te parezca igual. Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un aro rojo donde acaba la zona. Antialiasing: FXAA difumina los bordes de cada fotograma (blando). TAA combina varios fotogramas con un desplazamiento diminuto: bordes limpios y menos parpadeo a resolución completa, con afilado. MetalFX es el de Apple; al 85/75/67 % dibuja la zona más pequeña y la reconstruye: más fps, menos detalle.",
-                   "Only a circle in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: the circle's diameter in degrees (40° is about what you look at straight ahead; wider costs much more). Height: move it up (+) or down (-) until the blur above and below look the same. Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red ring where the zone ends. Antialiasing: FXAA blurs each frame's edges (soft). TAA combines several frames drawn with a tiny shift: clean edges and less shimmer at full resolution, sharpened. MetalFX is Apple's; at 85/75/67 % it draws the zone smaller and rebuilds it: more frames per second, less detail."))
+            Text(L("Solo un círculo en el centro de la vista se dibuja nítido; todo lo de fuera, a baja resolución. Ancho: diámetro del círculo en grados (40° es más o menos lo que miras de frente; más ancho cuesta mucho más). Altura: súbelo (+) o bájalo (-) hasta que lo borroso de arriba y de abajo te parezca igual. Nitidez de la zona y de la periferia: resolución respecto al tamaño de imagen, independientes entre sí. En el menú del juego puedes mostrar un aro rojo donde acaba la zona. Antialiasing: VPKTAA dibuja la zona con un desplazamiento diminuto en cada fotograma y combina varios: bordes limpios y mucho menos parpadeo, con afilado. FXAA difumina los bordes de cada fotograma (más blando; se deja para comparar). Solo con VPKTAA: resolución interna (100 %: la zona a tamaño completo, solo suaviza bordes, lo más nítido; 90/85/80 %: la zona se dibuja más pequeña y VPKTAA la reconstruye con los fotogramas anteriores: más fps, algo menos de detalle) nitidez (cuánto se afila la imagen; 0 % nada, muy alta puede dejar un contorno claro en los bordes) y periferia (la parte borrosa fuera del círculo también lleva VPKTAA: no añade detalle, pero evita que los bordes parpadeen por el rabillo del ojo; cuesta muy poco).",
+                   "Only a circle in the middle of the view is drawn sharp; everything outside it at a low resolution. Width: the circle's diameter in degrees (40° is about what you look at straight ahead; wider costs much more). Height: move it up (+) or down (-) until the blur above and below look the same. Zone and periphery resolution: relative to the image size, independent of each other. The game's menu can show a red ring where the zone ends. Antialiasing: VPKTAA draws the zone with a tiny shift each frame and combines several frames: clean edges and much less shimmer, sharpened. FXAA blurs each frame's edges (softer; kept to compare). Only with VPKTAA: internal resolution (100 %: the zone at full size, it only smooths the edges, the sharpest; 90/85/80 %: the zone is drawn smaller and VPKTAA rebuilds it from the past frames: more frames per second, a little less detail) sharpness (how much the picture is sharpened; 0 % none, very high can leave a bright outline around edges) and periphery (the blurry part outside the circle gets VPKTAA too: no added detail, but edges stop flickering at the side of your vision; costs very little)."))
         }
     }
 
