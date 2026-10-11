@@ -5,7 +5,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nativo + MoltenVK
 (con `patches/moltenvk/0001-rasterization-rate-map.patch` y `0002-metal-encode-command.patch`).
 
-## Estado (última build: 44, `releases/download/build-44/PTVisionPro-44.ipa`)
+## Estado (última build publicada: 47; en curso: 48, sonda TBDR)
 
 - Juego completo jugable de principio a fin (log pt (27), build 42). Sin cierres desde la build 14.
 - Ajustes de referencia del usuario (por debajo "se ve borroso"): imagen 50 %, zona nítida 70° al 100 % (1158x1158/ojo),
@@ -43,7 +43,18 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
    «Antialiasing: FXAA / SMAA / TAA» para comparar en el visor. Prever 2–3 builds de ajuste (estelas/borrosidad).
    Con MetalFX 67 % (776→1158): 40 fps, GPU 21 ms; `inset/upscale` 2,2 ms/inset.
 2. (Incluido en la build 45 el preajuste M2 del commit 12bd8f9.)
-3. **Rendimiento: arquitectura TBDR (prioridad tras cerrar MetalFX).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
+3. **Build 48: sonda TBDR** (`visionos/core/tbdr_probe.mm`, nuevo; shaders `shaders/tbdr_probe*.{vert,frag,glsl}` en el parche;
+   `prepare_source.py` lo añade a `pt_visionos`; llamada `pt::visionos::RunTbdrProbe` al final de `Host::StartSession`, con el
+   keeper ya presentando; `PT_VP_TBDR_PROBE=0` la apaga). 1384², G-buffer del motor (+ profundidad R32F), 3 capas de overdraw,
+   16 luces aditivas, composición; 8 frames por command buffer, 5 rondas + calentamiento. Orden: A (Vulkan pasadas separadas),
+   M1 (Metal encoders separados), M2 (Metal un encoder + memoryless + `[[color(n)]]`) intercalados → log; después B (Vulkan
+   1 render pass, 3 subpasadas, input attachments, adjuntos TRANSIENT + LAZILY_ALLOCATED) intercalada con A' (B al final por
+   riesgo de fallo de MoltenVK). Tiempos: reloj GPU del MTLCommandBuffer (Vulkan vía `vkCmdEncodeMetalMVK` + completed handler),
+   timestamps Vulkan y wall. Log: líneas `tbdr:` (storageMode de los adjuntos de B, ms/frame, 4 píxeles por variante,
+   `verdict ...`). Leer: si B ≈ A o píxeles distintos → MoltenVK no sirve para TBDR; si M2 ≪ A → la vía es Metal nativo
+   (en PTVisionPro vía `vkCmdEncodeMetalMVK` o en el traductor de VPEngine); si M2 ≈ A → el cuello no es ancho de banda.
+   Comprobado en local: glslang (shaders), clang -fsyntax-only con Metal simulado (.mm); MSL solo revisado a mano.
+   **Plan TBDR (contexto de la sonda).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
    → coste en pasadas de pantalla completa y ancho de banda (G-buffer escrito/leído de memoria en cada pasada, ×4 vistas).
    Plan: (a) build sonda: microbenchmark al arrancar a 1384² con el formato del G-buffer del motor, 3 variantes con
    timestamps GPU: pasadas separadas (actual) / una render pass Vulkan con subpasadas + input attachments + adjuntos
