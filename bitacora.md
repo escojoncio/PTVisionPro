@@ -27,11 +27,20 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
    no la profundidad; `depthReversed` ya estaba a YES. Pedido al usuario: probar 0, 1 y 2 con MetalFX y decir cuál quita la sombra.
    Si ninguno: revisar vectores de movimiento (signo/`motion_scale`) y la colocación del inset en la composición.
 2. (Incluido en la build 45 el preajuste M2 del commit 12bd8f9.)
-3. MetalFX no da fps aún (2,7 ms/inset ≈ lo ahorrado): medir con 67 %, o TAA propio más barato.
-4. Comprobar en el visor: X como zoom (mirilla, reloj), X en la marca del cuadro, subtítulos (tamaño/altura).
-5. Rendimiento: bloom con menos pasadas (41 pasadas casi de coste fijo), sombras (3,5–6 ms/frame en el pasillo),
+3. **Rendimiento: arquitectura TBDR (prioridad tras cerrar MetalFX).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
+   → coste en pasadas de pantalla completa y ancho de banda (G-buffer escrito/leído de memoria en cada pasada, ×4 vistas).
+   Plan: (a) build sonda: microbenchmark al arrancar a 1384² con el formato del G-buffer del motor, 3 variantes con
+   timestamps GPU: pasadas separadas (actual) / una render pass Vulkan con subpasadas + input attachments + adjuntos
+   transitorios (LAZILY_ALLOCATED) / Metal nativo en un solo `MTLRenderCommandEncoder` con texturas `memoryless` y
+   programmable blending vía `vkCmdEncodeMetalMVK`. Loguear ms de cada una y `storageMode` real de los adjuntos
+   (`vkGetMTLTextureMVK`) y si MoltenVK abre un encoder por subpasada. (b) Según el resultado: G-buffer+luz+compose
+   en memoria de teselas, posproceso en una pasada (bloom corto), multiview. Estimación: −9–12 ms GPU (30–40 %).
+   Si ni Vulkan ni Metal nativo ganan, el usuario plantea pasar a VPEngine.
+4. MetalFX no da fps aún (2,7 ms/inset ≈ lo ahorrado): medir con 67 %, o TAA propio más barato.
+5. Comprobar en el visor: X como zoom (mirilla, reloj), X en la marca del cuadro, subtítulos (tamaño/altura).
+6. Rendimiento: bloom con menos pasadas (41 pasadas casi de coste fijo), sombras (3,5–6 ms/frame en el pasillo),
    inset lighting (luces por teselas).
-6. 45→90 de verdad (spacewarp propio con vectores de movimiento) si la reproyección con profundidad convence.
+7. 45→90 de verdad (spacewarp propio con vectores de movimiento) si la reproyección con profundidad convence.
 
 ## Funciones vigentes (dónde está cada cosa)
 
