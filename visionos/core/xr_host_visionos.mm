@@ -2409,10 +2409,12 @@ struct Preset {
     bool metalfx;
     int fps;  // 45: a picture every other refresh (half the display's rate)
     int anisotropy;  // the textures' anisotropic filtering (0 off, 2, 4, 8, 16)
+    // The game's foveation: sharp zone degrees, its height, its resolution, the periphery's.
+    int center_deg, center_up, center_res, periphery;
 };
 constexpr Preset kPresets[2] = {
-    {0.60f, 3, true, true, true, false, 45, 8},     // Vision Pro M2 (shadows as on PS4)
-    {0.85f, 3, true, true, true, false, 90, 16},    // Vision Pro M5
+    {0.50f, 3, true, true, true, false, 45, 8, 70, -10, 100, 10},     // Vision Pro M2 (the tester's settings; shadows as on PS4)
+    {0.85f, 3, true, true, true, false, 90, 16, 70, -10, 100, 15},    // Vision Pro M5
 };
 
 const char* ShadowName(int quality) {
@@ -2428,7 +2430,8 @@ bool MatchesPreset(int preset, const AppSettings& s, const HeadsetSettings& h) {
     if (preset < 0 || preset > 1) return false;
     const Preset& p = kPresets[preset];
     return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == p.fps && h.foveation && h.metalfx == p.metalfx && h.fov == 100 &&
-           !h.dynamic_resolution &&
+           !h.dynamic_resolution && h.game_foveation && h.center_deg == p.center_deg && h.center_up == p.center_up &&
+           h.center_res == p.center_res && h.periphery == p.periphery &&
            s.graphics.shadow_quality == p.shadow_quality && s.graphics.ambient_occlusion == p.ssao && s.graphics.bloom == p.bloom &&
            s.graphics.reflections == p.reflections && s.graphics.anisotropy == p.anisotropy;
 }
@@ -2484,6 +2487,11 @@ void ApplyPreset(int preset, AppSettings& s) {
     h.metalfx = p.metalfx;
     h.fov = 100;
     h.dynamic_resolution = false;
+    h.game_foveation = true;
+    h.center_deg = p.center_deg;
+    h.center_up = p.center_up;
+    h.center_res = p.center_res;
+    h.periphery = p.periphery;
     s.vr.resolution_scale = p.resolution_scale;
     s.graphics.shadow_quality = p.shadow_quality;
     s.graphics.ambient_occlusion = p.ssao;
@@ -2497,6 +2505,11 @@ void ApplyPreset(int preset, AppSettings& s) {
     SettingChanged("metalfx", p.metalfx ? "1" : "0");
     SettingChanged("fov", "100");
     SettingChanged("dynamic_resolution", "0");
+    SettingChanged("game_foveation", "1");
+    SettingChanged("center_deg", std::to_string(p.center_deg));
+    SettingChanged("center_up", std::to_string(p.center_up));
+    SettingChanged("center_res", std::to_string(p.center_res));
+    SettingChanged("periphery", std::to_string(p.periphery));
     SettingChanged("shadows", ShadowName(p.shadow_quality));
     SettingChanged("ssao", p.ssao ? "1" : "0");
     SettingChanged("bloom", p.bloom ? "1" : "0");
