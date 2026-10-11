@@ -260,10 +260,16 @@ public:
         e.jitter_x = d.jitter.x * sign;
         e.jitter_y = d.jitter.y * sign;
         // The game's motion vectors are in UV units (current to previous): times the input size.
-        e.motion_x = d.motion_scale.x;
-        e.motion_y = d.motion_scale.y;
+        const int test = pt::visionos::Headset().aa_debug;
+        if (test != test_) {
+            test_ = test;
+            std::fill(std::begin(restart_), std::end(restart_), true);
+            LogInfo("upscale: MetalFX test {}", test == 1 ? "no history" : test == 2 ? "no motion vectors" : test == 3 ? "no flashlight split" : "off");
+        }
+        e.motion_x = test == 2 ? 0.0f : d.motion_scale.x;
+        e.motion_y = test == 2 ? 0.0f : d.motion_scale.y;
         e.pre_exposure = 1.0f;
-        e.reset = (d.reset || fresh || restart_[h]) ? 1u : 0u;
+        e.reset = (d.reset || fresh || restart_[h] || test == 1) ? 1u : 0u;
         restart_[h] = false;
         if (logged_ < 8) {
             ++logged_;
@@ -299,6 +305,7 @@ private:
     MTLPixelFormat formats_[kHistories][2] = {};
     int jitter_mode_ = -1;
     bool restart_[kHistories] = {};
+    int test_ = 0;
     int logged_ = 0;
     std::string last_failure_;
 };

@@ -26,6 +26,11 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
    (`restart_` en `metalfx_upscaler.mm`). Motivo: log pt (29): con FXAA (profundidad on) no hay fantasmas → la causa es MetalFX,
    no la profundidad; `depthReversed` ya estaba a YES. Pedido al usuario: probar 0, 1 y 2 con MetalFX y decir cuál quita la sombra.
    Si ninguno: revisar vectores de movimiento (signo/`motion_scale`) y la colocación del inset en la composición.
+   **Resultado build 45 (log pt (30)):** los 3 modos de jitter se ven igual de mal (bordes dobles/halos claros en marcos,
+   lámpara y paneles) → no es el jitter. **Build 46:** «Prueba de MetalFX» (`HeadsetSettings::aa_debug`, solo sesión,
+   `kVpAaDebug`): 1 sin historial (reset cada frame), 2 vectores a 0 (`motion_scale` 0), 3 sin desmodulación de la linterna
+   (`SceneRenderer::SetVrNoDemod` → `handy_demod_` off). Según cuál quite lo doble: historia/vectores o `handy_demod_`.
+   Con MetalFX 67 % (776→1158): 40 fps, GPU 21 ms; `inset/upscale` 2,2 ms/inset.
 2. (Incluido en la build 45 el preajuste M2 del commit 12bd8f9.)
 3. **Rendimiento: arquitectura TBDR (prioridad tras cerrar MetalFX).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
    → coste en pasadas de pantalla completa y ancho de banda (G-buffer escrito/leído de memoria en cada pasada, ×4 vistas).
