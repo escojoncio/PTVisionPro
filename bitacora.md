@@ -5,7 +5,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nativo + MoltenVK
 (con `patches/moltenvk/0001-rasterization-rate-map.patch` y `0002-metal-encode-command.patch`).
 
-## Estado (última build publicada: 47; en curso: 48, sonda TBDR)
+## Estado (última build: 48, sonda TBDR, `releases/download/build-48/PTVisionPro-48.ipa`; pendiente el log del usuario)
 
 - Juego completo jugable de principio a fin (log pt (27), build 42). Sin cierres desde la build 14.
 - Ajustes de referencia del usuario (por debajo "se ve borroso"): imagen 50 %, zona nítida 70° al 100 % (1158x1158/ojo),
