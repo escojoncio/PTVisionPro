@@ -173,9 +173,10 @@ final class GameRunner: @unchecked Sendable {
         case "resolution_scale": s.resolutionScale = Double(value) ?? s.resolutionScale
         case "target_fps": s.targetFPS = Int(value) ?? s.targetFPS
         case "foveation": s.foveation = flag
-        case "metalfx": return  // (the old spatial MetalFX: gone)
-        case "aa": s.aa = min(max(Int(value) ?? s.aa, 0), 5)
-        case "aa_jitter": s.aaJitter = min(max(Int(value) ?? s.aaJitter, 0), 2)
+        case "aa": s.aa = PTSettings.sanitizedAA(Int(value) ?? s.aa)
+        case "taa_res": s.taaRes = PTSettings.sanitizedTaaRes(Int(value) ?? s.taaRes)
+        case "taa_periphery": s.taaPeriphery = flag
+        case "taa_sharpness": s.taaSharpness = PTSettings.sanitizedTaaSharpness(Int(value) ?? s.taaSharpness)
         case "scene_depth": s.sceneDepth = flag
         case "tiled_lights": s.tiledLights = flag
         case "subtitle_size": s.subtitleSize = min(max(Int(value) ?? s.subtitleSize, 100), 250)

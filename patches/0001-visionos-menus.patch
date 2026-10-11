@@ -1,5 +1,5 @@
 diff --git a/shaders/common.glsl b/shaders/common.glsl
-index 3b70a46..af334aa 100644
+index 3b70a46..1f2fb7b 100644
 --- a/shaders/common.glsl
 +++ b/shaders/common.glsl
 @@ -13,6 +13,7 @@ struct View {
@@ -10,7 +10,7 @@ index 3b70a46..af334aa 100644
  };
  
  struct Light {
-@@ -64,6 +65,7 @@ layout(std430, set = 1, binding = 0) readonly buffer FrameData {
+@@ -64,13 +65,14 @@ layout(std430, set = 1, binding = 0) readonly buffer FrameData {
      Probe probes[512];
      vec4 fog[8];
      vec4 mirror;
@@ -18,6 +18,14 @@ index 3b70a46..af334aa 100644
  } frame;
  
  layout(std430, set = 1, binding = 1) readonly buffer SkinData {
+     mat4 skin[];
+ };
+ 
+-layout(set = 1, binding = 2) uniform texture2D images[56];
++layout(set = 1, binding = 2) uniform texture2D images[60];
+ layout(set = 1, binding = 3) uniform sampler samplers[5];
+ layout(set = 1, binding = 4) uniform texture3D lut2_image;
+ 
 @@ -101,6 +103,7 @@ layout(set = 1, binding = 4) uniform texture3D lut2_image;
  #define RES_LUT1 24
  #define RES_MATERIAL 25
@@ -440,306 +448,6 @@ index 35ad849..144f24f 100644
 +    }
 +    out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), alpha);
  }
-diff --git a/shaders/taa.frag b/shaders/taa.frag
-new file mode 100644
-index 0000000..f7a795f
---- /dev/null
-+++ b/shaders/taa.frag
-@@ -0,0 +1,159 @@
-+#version 460
-+// Temporal antialiasing of a headset's sharp view (HeadsetSettings::aa 5), at the render's size:
-+// the render (jittered by the upscaler's Halton sequence) resolved to unjittered pixel centres and
-+// blended with the view's own history, reprojected by the motion vectors. Karis (UE4) / Playdead:
-+// reconstruction filter over the 3x3 render samples, motion of the closest sample, Catmull-Rom
-+// history, variance clipping in YCoCg, blend in a reversible tonemap (luma-weighted). The output
-+// goes where MetalFX's would (upscaled_), so the resolve and everything after it stay the same;
-+// the sharpening is in the resolve (upscale_resolve.frag), so the history stays unsharpened.
-+#include "common.glsl"
-+
-+#define IMG_MOTION 45
-+#define IMG_TAA_HISTORY 36
-+
-+layout(push_constant) uniform PassPush {
-+    uvec4 ids;  // x the history's column (the eye), y 1 when the history is valid
-+    vec4 f0;    // xy the jitter in render pixels, zw 1 / size
-+    vec4 f1;    // xy size, z the history column's left edge in pixels, w the history image's width (2 columns)
-+    vec4 f2;    // x history weight when still, y when moving fast, z clip width (sigmas)
-+    mat4 m;
-+} pass;
-+
-+layout(location = 0) in vec2 in_uv;
-+layout(location = 0) out vec4 out_color;
-+
-+float MaxOf(vec3 c) {
-+    return max(c.r, max(c.g, c.b));
-+}
-+
-+// Reversible tonemap: blending in it weighs each sample by 1 / (1 + luma), so a bright spot (the
-+// flashlight on a wet floor) does not flicker or smear its neighbours.
-+vec3 Compress(vec3 c) {
-+    return c / (1.0 + MaxOf(c));
-+}
-+
-+vec3 Expand(vec3 c) {
-+    // (A clipped or blended value can step past the compressed range: capped, about 1000x white.)
-+    float m = MaxOf(c);
-+    if (m > 0.999) {
-+        c *= 0.999 / m;
-+    }
-+    return c / max(1.0 - MaxOf(c), 1.0e-4);
-+}
-+
-+// A NaN or infinity in the render would stay in the history for good and spread: dropped.
-+vec3 Sane(vec3 c) {
-+    return any(isnan(c)) || any(isinf(c)) ? vec3(0.0) : clamp(c, vec3(0.0), vec3(60000.0));
-+}
-+
-+vec3 ToYCoCg(vec3 c) {
-+    return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
-+}
-+
-+vec3 FromYCoCg(vec3 c) {
-+    return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
-+}
-+
-+// The history at uv (inside its own column of the history image), bilinear taps clamped to the
-+// column so the other views' histories never bleed in.
-+vec3 HistoryTap(vec2 pixel) {
-+    float lo = pass.f1.z + 0.5;
-+    float hi = pass.f1.z + pass.f1.x - 0.5;
-+    vec2 p = vec2(clamp(pixel.x + pass.f1.z, lo, hi), clamp(pixel.y, 0.5, pass.f1.y - 0.5));
-+    return Img(IMG_TAA_HISTORY, SMP_LINEAR_CLAMP, p / vec2(pass.f1.w, pass.f1.y)).rgb;
-+}
-+
-+// 5-tap Catmull-Rom (the corner taps dropped): sharper than bilinear, so the history does not
-+// soften a little more every frame. pixel: in the column's pixels.
-+vec3 HistoryCatmullRom(vec2 pixel) {
-+    vec2 position = pixel - 0.5;
-+    vec2 center = floor(position) + 0.5;
-+    vec2 f = position - floor(position);
-+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
-+    vec2 w12 = w1 + w2;
-+    vec2 offset12 = w2 / w12;
-+    vec2 p0 = center - 1.0;
-+    vec2 p3 = center + 2.0;
-+    vec2 p12 = center + offset12;
-+    vec3 sum = HistoryTap(vec2(p12.x, p0.y)) * (w12.x * w0.y) + HistoryTap(vec2(p0.x, p12.y)) * (w0.x * w12.y) +
-+               HistoryTap(vec2(p12.x, p12.y)) * (w12.x * w12.y) + HistoryTap(vec2(p3.x, p12.y)) * (w3.x * w12.y) +
-+               HistoryTap(vec2(p12.x, p3.y)) * (w12.x * w3.y);
-+    float weight = (w12.x * w0.y) + (w0.x * w12.y) + (w12.x * w12.y) + (w3.x * w12.y) + (w12.x * w3.y);
-+    return max(sum / max(weight, 1.0e-4), vec3(0.0));
-+}
-+
-+// Clip toward the neighbourhood's mean (Playdead): keeps the history's hue where a plain clamp
-+// would make it blocky.
-+vec3 ClipToBox(vec3 history, vec3 lo, vec3 hi) {
-+    vec3 center = 0.5 * (hi + lo);
-+    vec3 extent = max(0.5 * (hi - lo), vec3(1.0e-5));
-+    vec3 offset = history - center;
-+    vec3 units = abs(offset / extent);
-+    float largest = max(units.x, max(units.y, units.z));
-+    return largest > 1.0 ? center + offset / largest : history;
-+}
-+
-+void main() {
-+    ivec2 size = ivec2(pass.f1.xy);
-+    // A render sample p lies at (p + 0.5 - jitter) in this picture's pixels (PrepareFrame shifts
-+    // the projection by the jitter; upscale_resolve.frag reads the render at uv + jitter).
-+    vec2 render_point = gl_FragCoord.xy + pass.f0.xy;
-+    ivec2 base = ivec2(floor(render_point));
-+    vec3 filtered = vec3(0.0);
-+    float filtered_weight = 0.0;
-+    vec3 m1 = vec3(0.0);
-+    vec3 m2 = vec3(0.0);
-+    float closest = -1.0;
-+    ivec2 closest_pixel = clamp(base, ivec2(0), size - 1);
-+    for (int y = -1; y <= 1; ++y) {
-+        for (int x = -1; x <= 1; ++x) {
-+            ivec2 p = clamp(base + ivec2(x, y), ivec2(0), size - 1);
-+            vec3 s = Compress(Sane(ImgFetch(IMG_HDR, p).rgb));
-+            vec3 ycc = ToYCoCg(s);
-+            m1 += ycc;
-+            m2 += ycc * ycc;
-+            // The reconstruction filter (a Gaussian fit of Blackman-Harris, UE4) by the sample's
-+            // distance to this pixel's centre.
-+            vec2 d = vec2(base + ivec2(x, y)) + 0.5 - render_point;
-+            float w = exp(-2.29 * dot(d, d));
-+            filtered += ycc * w;
-+            filtered_weight += w;
-+            // Reverse depth: the larger, the nearer (0: the sky).
-+            float depth = ImgFetch(IMG_DEPTH, p).x;
-+            if (depth > closest) {
-+                closest = depth;
-+                closest_pixel = p;
-+            }
-+        }
-+    }
-+    vec3 current = filtered / max(filtered_weight, 1.0e-5);
-+    vec3 mean = m1 / 9.0;
-+    vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
-+    vec3 lo = mean - pass.f2.z * sigma;
-+    vec3 hi = mean + pass.f2.z * sigma;
-+    // The box never excludes the filtered current sample itself.
-+    lo = min(lo, current);
-+    hi = max(hi, current);
-+
-+    // Motion of the nearest surface around (an edge moves with the object in front, so it does
-+    // not trail): previous uv - current uv, without jitter (upscale_motion.frag).
-+    vec2 motion = ImgFetch(IMG_MOTION, closest_pixel).xy;
-+    vec2 uv = gl_FragCoord.xy * pass.f0.zw;
-+    vec2 previous_uv = uv + motion;
-+    bool inside = all(greaterThanEqual(previous_uv, vec2(0.0))) && all(lessThanEqual(previous_uv, vec2(1.0)));
-+    if (pass.ids.y == 0u || !inside) {
-+        out_color = vec4(Expand(FromYCoCg(current)), 1.0);
-+        return;
-+    }
-+    vec3 history = ToYCoCg(Compress(Sane(HistoryCatmullRom(previous_uv * pass.f1.xy))));
-+    history = ClipToBox(history, lo, hi);
-+    // Less history while moving (fewer pixels of the past are right), more when still (cleanest
-+    // edges). Speed in pixels a frame.
-+    float speed = length(motion * pass.f1.xy);
-+    float keep = mix(pass.f2.x, pass.f2.y, clamp(speed * 0.125, 0.0, 1.0));
-+    vec3 result = mix(current, history, keep);
-+    out_color = vec4(Expand(max(FromYCoCg(result), vec3(0.0))), 1.0);
-+}
-diff --git a/shaders/tbdr_probe.vert b/shaders/tbdr_probe.vert
-new file mode 100644
-index 0000000..e3d6a9d
---- /dev/null
-+++ b/shaders/tbdr_probe.vert
-@@ -0,0 +1,18 @@
-+#version 450
-+// TBDR probe (visionos/core/tbdr_probe.mm): mode 0 = G-buffer layers (full screen, nearer each
-+// instance), 1 = light triangles (about half the screen each), 2 = full screen.
-+layout(push_constant) uniform Probe { int mode; int pad; } pc;
-+layout(location = 0) flat out int inst;
-+void main() {
-+    vec2 v = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
-+    vec2 p = v * 2.0 - 1.0;
-+    float z = 0.5;
-+    if (pc.mode == 0) {
-+        z = 0.9 - 0.2 * float(gl_InstanceIndex);
-+    } else if (pc.mode == 1) {
-+        float a = float(gl_InstanceIndex) * 2.399;
-+        p = 0.45 * vec2(cos(a), sin(a)) + (v * 2.0 - 1.0) * 0.55;
-+    }
-+    gl_Position = vec4(p, z, 1.0);
-+    inst = gl_InstanceIndex;
-+}
-diff --git a/shaders/tbdr_probe_common.glsl b/shaders/tbdr_probe_common.glsl
-new file mode 100644
-index 0000000..c6f2bae
---- /dev/null
-+++ b/shaders/tbdr_probe_common.glsl
-@@ -0,0 +1,18 @@
-+// TBDR probe: the same maths as the Metal variant in visionos/core/tbdr_probe.mm.
-+float ProbeHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
-+vec3 ProbeShade(vec4 a, vec4 nrm, vec4 m, float d, int inst) {
-+    float ang = float(inst) * 2.399;
-+    vec3 lp = vec3(0.45 * cos(ang), 0.45 * sin(ang), 0.3);
-+    vec3 pos = vec3(gl_FragCoord.xy * 0.00144 - 1.0, d);
-+    vec3 l = lp - pos;
-+    float dist = length(l);
-+    l /= max(dist, 1e-4);
-+    vec3 n = normalize(nrm.xyz);
-+    float ndl = max(dot(n, l), 0.0);
-+    float spec = pow(max(dot(reflect(-l, n), vec3(0.0, 0.0, 1.0)), 0.0), 8.0 + m.y * 32.0);
-+    return (a.rgb * ndl + spec * m.x) / (1.0 + dist * dist * 4.0) * vec3(1.0, 0.9, 0.8);
-+}
-+vec4 ProbeCompose(vec4 a, vec4 light) {
-+    vec3 c = light.rgb + a.rgb * 0.03;
-+    return vec4(c / (1.0 + c), 1.0);
-+}
-diff --git a/shaders/tbdr_probe_comp_in.frag b/shaders/tbdr_probe_comp_in.frag
-new file mode 100644
-index 0000000..751a4ce
---- /dev/null
-+++ b/shaders/tbdr_probe_comp_in.frag
-@@ -0,0 +1,7 @@
-+#version 450
-+#include "tbdr_probe_common.glsl"
-+layout(location = 0) flat in int inst;
-+layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput g_albedo;
-+layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput g_light;
-+layout(location = 0) out vec4 colour;
-+void main() { colour = ProbeCompose(subpassLoad(g_albedo), subpassLoad(g_light)); }
-diff --git a/shaders/tbdr_probe_comp_tex.frag b/shaders/tbdr_probe_comp_tex.frag
-new file mode 100644
-index 0000000..89cd863
---- /dev/null
-+++ b/shaders/tbdr_probe_comp_tex.frag
-@@ -0,0 +1,10 @@
-+#version 450
-+#include "tbdr_probe_common.glsl"
-+layout(location = 0) flat in int inst;
-+layout(set = 0, binding = 0) uniform sampler2D g_albedo;
-+layout(set = 0, binding = 1) uniform sampler2D g_light;
-+layout(location = 0) out vec4 colour;
-+void main() {
-+    ivec2 c = ivec2(gl_FragCoord.xy);
-+    colour = ProbeCompose(texelFetch(g_albedo, c, 0), texelFetch(g_light, c, 0));
-+}
-diff --git a/shaders/tbdr_probe_gbuf.frag b/shaders/tbdr_probe_gbuf.frag
-new file mode 100644
-index 0000000..46c5989
---- /dev/null
-+++ b/shaders/tbdr_probe_gbuf.frag
-@@ -0,0 +1,16 @@
-+#version 450
-+#include "tbdr_probe_common.glsl"
-+layout(location = 0) flat in int inst;
-+layout(location = 0) out vec4 albedo;
-+layout(location = 1) out vec4 normal;
-+layout(location = 2) out vec4 material;
-+layout(location = 3) out float depth;
-+void main() {
-+    vec2 p = gl_FragCoord.xy * 0.01 + float(inst);
-+    float n = 0.0;
-+    for (int i = 0; i < 8; ++i) n += ProbeHash(floor(p * float(i + 1))) / float(i + 1);
-+    albedo = vec4(fract(n), fract(n * 1.7), fract(n * 2.3), 1.0);
-+    normal = vec4(normalize(vec3(sin(p.x), cos(p.y), 1.0)), n);
-+    material = vec4(0.5, fract(n * 3.1), 0.2, 1.0);
-+    depth = gl_FragCoord.z;
-+}
-diff --git a/shaders/tbdr_probe_light_in.frag b/shaders/tbdr_probe_light_in.frag
-new file mode 100644
-index 0000000..b746105
---- /dev/null
-+++ b/shaders/tbdr_probe_light_in.frag
-@@ -0,0 +1,11 @@
-+#version 450
-+#include "tbdr_probe_common.glsl"
-+layout(location = 0) flat in int inst;
-+layout(input_attachment_index = 0, set = 0, binding = 0) uniform subpassInput g_albedo;
-+layout(input_attachment_index = 1, set = 0, binding = 1) uniform subpassInput g_normal;
-+layout(input_attachment_index = 2, set = 0, binding = 2) uniform subpassInput g_material;
-+layout(input_attachment_index = 3, set = 0, binding = 3) uniform subpassInput g_depth;
-+layout(location = 0) out vec4 light;
-+void main() {
-+    light = vec4(ProbeShade(subpassLoad(g_albedo), subpassLoad(g_normal), subpassLoad(g_material), subpassLoad(g_depth).r, inst), 1.0);
-+}
-diff --git a/shaders/tbdr_probe_light_tex.frag b/shaders/tbdr_probe_light_tex.frag
-new file mode 100644
-index 0000000..c24e3c9
---- /dev/null
-+++ b/shaders/tbdr_probe_light_tex.frag
-@@ -0,0 +1,13 @@
-+#version 450
-+#include "tbdr_probe_common.glsl"
-+layout(location = 0) flat in int inst;
-+layout(set = 0, binding = 0) uniform sampler2D g_albedo;
-+layout(set = 0, binding = 1) uniform sampler2D g_normal;
-+layout(set = 0, binding = 2) uniform sampler2D g_material;
-+layout(set = 0, binding = 3) uniform sampler2D g_depth;
-+layout(location = 0) out vec4 light;
-+void main() {
-+    ivec2 c = ivec2(gl_FragCoord.xy);
-+    light = vec4(ProbeShade(texelFetch(g_albedo, c, 0), texelFetch(g_normal, c, 0), texelFetch(g_material, c, 0),
-+                            texelFetch(g_depth, c, 0).r, inst), 1.0);
-+}
 diff --git a/shaders/tonemap.frag b/shaders/tonemap.frag
 index d39d6a6..4c2b603 100644
 --- a/shaders/tonemap.frag
@@ -839,6 +547,315 @@ index 1be202c..25df602 100644
      if (particles.a >= 1.0 && all(equal(particles.rgb, vec3(0.0)))) {
          out_color = scene;
          return;
+diff --git a/shaders/vpktaa.frag b/shaders/vpktaa.frag
+new file mode 100644
+index 0000000..ab6faa0
+--- /dev/null
++++ b/shaders/vpktaa.frag
+@@ -0,0 +1,303 @@
++#version 460
++// VPKTAA: the headset's temporal antialiasing, in the pass that hands the scene to the post chain
++// (it replaces the upscale resolve for a headset view). For each output pixel, in one pass:
++//   1. reconstruct the current frame at the pixel's centre from the 3x3 jittered render samples
++//      (sharpened by the filter itself: no separate sharpening pass);
++//   2. reproject the view's history with the motion of the nearest surface around (the camera's
++//      own motion computed here from the depth; moving objects' from the motion target);
++//   3. reject what the history cannot hold: a surface that was hidden the frame before (its
++//      distance), anything outside the neighbourhood's colour box (narrower at edges), particles
++//      and transparent layers (their layer's coverage);
++//   4. blend (less history while moving and where history and current disagree), then write the
++//      result, the depth and velocity at the output's size, and the next history (rgb the light,
++//      a the surface's distance).
++// The output can be larger than the render (internal resolution below 100 %): the samples are
++// weighed by their distance in output pixels, and history fills what this frame's samples miss.
++#include "common.glsl"
++
++#define IMG_MOTION 45
++#define IMG_OBJECT_VELOCITY_ 33
++
++// Motion target value for "no moving object here: use the camera's motion" (upscale clears it).
++#define MOTION_NONE 1000.0
++// History weights still / moving fast (8 px a frame), the colour box in sigmas at flat areas /
++// edges, the disocclusion distance tolerance (relative).
++#define KEEP_STILL 0.93
++#define KEEP_MOVING 0.80
++#define SIGMA_FLAT 1.25
++#define SIGMA_EDGE 0.85
++#define DISOCCLUSION 0.05
++
++layout(push_constant) uniform PassPush {
++    uvec4 ids;  // x the history to read (image slot), y flags (1 history valid, 2 the TAA is on the
++                // periphery: no sharpening), z the reflection layer (0 none), w the view
++    vec4 f0;    // xy the jitter in render uv, zw 1 / output size
++    vec4 f1;    // xy render size, z sharpness 0-1
++    vec4 f2;    // particles layer: x < 0 none, 0 this view's own, > 0 a wider view's (0.5 + (uv - 0.5) * xy + zw)
++    mat4 m;     // the previous frame's view-projection
++} pass;
++
++layout(location = 0) in vec2 in_uv;
++layout(location = 0) out vec4 out_color;
++layout(location = 1) out vec4 out_depth;
++layout(location = 2) out vec4 out_velocity;
++layout(location = 3) out vec4 out_history;
++
++float MaxOf(vec3 c) {
++    return max(c.r, max(c.g, c.b));
++}
++
++// Reversible tonemap: blending in it weighs each sample by 1 / (1 + brightness), so a bright spot
++// (the flashlight on a wet floor) does not flicker or smear its neighbours.
++vec3 Compress(vec3 c) {
++    return c / (1.0 + MaxOf(c));
++}
++
++vec3 Expand(vec3 c) {
++    // (Capped about 10000x white: a blended value can step past the compressed range.)
++    float m = MaxOf(c);
++    if (m > 0.9999) {
++        c *= 0.9999 / m;
++    }
++    return c / max(1.0 - MaxOf(c), 1.0e-4);
++}
++
++// A NaN or infinity in the render would stay in the history for good: dropped.
++vec3 Sane(vec3 c) {
++    return any(isnan(c)) || any(isinf(c)) ? vec3(0.0) : clamp(c, vec3(0.0), vec3(60000.0));
++}
++
++vec3 ToYCoCg(vec3 c) {
++    return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
++}
++
++vec3 FromYCoCg(vec3 c) {
++    return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
++}
++
++vec4 HistoryTap(vec2 pixel, vec2 size) {
++    vec2 p = clamp(pixel, vec2(0.5), size - 0.5);
++    return Img(pass.ids.x, SMP_LINEAR_CLAMP, p / size);
++}
++
++// 5-tap Catmull-Rom (corner taps dropped): sharper than bilinear, so the history does not soften
++// a little more every frame. pixel: in output pixels. rgb only (a is read point-sampled). The
++// history is stored as plain HDR light (half floats keep 0.1 % of any brightness; stored in the
++// compressed range they would band near white): compressed here, after the filter.
++vec3 HistoryCatmullRom(vec2 pixel, vec2 size) {
++    vec2 position = pixel - 0.5;
++    vec2 center = floor(position) + 0.5;
++    vec2 f = position - floor(position);
++    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
++    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
++    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
++    vec2 w3 = f * f * (-0.5 + 0.5 * f);
++    vec2 w12 = w1 + w2;
++    vec2 p0 = center - 1.0;
++    vec2 p3 = center + 2.0;
++    vec2 p12 = center + w2 / w12;
++    float a = w12.x * w0.y, b = w0.x * w12.y, c = w12.x * w12.y, d = w3.x * w12.y, e = w12.x * w3.y;
++    vec3 sum = HistoryTap(vec2(p12.x, p0.y), size).rgb * a + HistoryTap(vec2(p0.x, p12.y), size).rgb * b +
++               HistoryTap(p12, size).rgb * c + HistoryTap(vec2(p3.x, p12.y), size).rgb * d + HistoryTap(vec2(p12.x, p3.y), size).rgb * e;
++    return Compress(Sane(max(sum / max(a + b + c + d + e, 1.0e-4), vec3(0.0))));
++}
++
++// Clip toward the box's centre (keeps the history's hue where a clamp would make it blocky).
++vec3 ClipToBox(vec3 history, vec3 lo, vec3 hi) {
++    vec3 center = 0.5 * (hi + lo);
++    vec3 extent = max(0.5 * (hi - lo), vec3(1.0e-5));
++    vec3 offset = history - center;
++    vec3 units = abs(offset / extent);
++    float largest = max(units.x, max(units.y, units.z));
++    return largest > 1.0 ? center + offset / largest : history;
++}
++
++// The reflection layer (screen-space reflections composed after the upscale), as the resolve.
++vec4 Reflection(vec2 uv) {
++    ivec2 size = ivec2(pass.f1.xy);
++    vec2 texel = uv * pass.f1.xy - 0.5;
++    ivec2 p0 = ivec2(floor(texel));
++    vec2 f = texel - vec2(p0);
++    vec4 sum = vec4(0.0);
++    for (int i = 0; i < 4; ++i) {
++        ivec2 o = ivec2(i & 1, i >> 1);
++        vec4 s = ImgFetch(pass.ids.z, clamp(p0 + o, ivec2(0), size - 1));
++        float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
++        sum += s.a > 0.0 ? s * w : vec4(0.0);
++    }
++    return sum;
++}
++
++void main() {
++    View v = frame.views[pass.ids.w];
++    ivec2 render_size = ivec2(pass.f1.xy);
++    vec2 output_size = 1.0 / pass.f0.zw;
++    // Render pixels per output pixel (1 at 100 %, 0.8 at 80 %).
++    vec2 ratio = pass.f1.xy * pass.f0.zw;
++    vec2 uv = gl_FragCoord.xy * pass.f0.zw;
++    // A render sample p lies at (p + 0.5 - jitter) in unjittered render pixels; this output
++    // pixel's centre is at uv * render size.
++    vec2 jitter_px = pass.f0.xy * pass.f1.xy;
++    vec2 render_point = uv * pass.f1.xy + jitter_px;
++    ivec2 base = ivec2(floor(render_point));
++
++    vec3 samples[9];
++    float distance2[9];
++    vec3 m1 = vec3(0.0);
++    vec3 m2 = vec3(0.0);
++    vec3 box_lo = vec3(1.0e9);
++    vec3 box_hi = vec3(-1.0e9);
++    float closest = -1.0;
++    float farthest = 1.0e9;
++    ivec2 closest_pixel = clamp(base, ivec2(0), render_size - 1);
++    float nearest2 = 1.0e9;
++    ivec2 nearest_pixel = closest_pixel;
++    for (int i = 0; i < 9; ++i) {
++        ivec2 o = ivec2(i % 3 - 1, i / 3 - 1);
++        ivec2 p = clamp(base + o, ivec2(0), render_size - 1);
++        vec3 s = ToYCoCg(Compress(Sane(ImgFetch(IMG_HDR, p).rgb)));
++        samples[i] = s;
++        m1 += s;
++        m2 += s * s;
++        box_lo = min(box_lo, s);
++        box_hi = max(box_hi, s);
++        // Distance to this output pixel's centre, in output pixels.
++        vec2 d = (vec2(base + o) + 0.5 - render_point) / ratio;
++        distance2[i] = dot(d, d);
++        if (distance2[i] < nearest2) {
++            nearest2 = distance2[i];
++            nearest_pixel = p;
++        }
++        // Reverse depth: the larger, the nearer (0: nothing drawn).
++        float depth = ImgFetch(IMG_DEPTH, p).x;
++        if (depth > closest) {
++            closest = depth;
++            closest_pixel = p;
++        }
++        farthest = min(farthest, depth);
++    }
++
++    // Motion of the nearest surface around (an edge moves with what is in front: no trail).
++    // previous uv - current uv, unjittered.
++    vec2 motion = ImgFetch(IMG_MOTION, closest_pixel).xy;
++    if (any(isnan(motion)) || any(isinf(motion))) {
++        motion = vec2(MOTION_NONE);  // (a broken object motion: the camera's instead)
++    }
++    bool camera_motion = motion.x > 0.5 * MOTION_NONE;
++    float expected_distance = 0.0;  // the closest surface's distance in the previous frame (0: unknown)
++    if (camera_motion) {
++        // The camera's own motion from the depth (what upscale_motion.frag drew before).
++        vec2 frag = vec2(closest_pixel) + 0.5;
++        vec2 ndc = PixelNdc(v, frag);
++        // (The view's off-centre shift: in v.jitter with the jitter, which the previous
++        // projection does not hold; the shift it does.)
++        vec2 shift = v.jitter.xy - 2.0 * pass.f0.xy;
++        vec4 previous;
++        if (closest > 0.0) {
++            float z = ViewZ(v, closest);
++            vec3 world = (v.inv_view * vec4(ndc * v.projection_param.xy * z, z, 1.0)).xyz;
++            previous = pass.m * vec4(world, 1.0);
++            expected_distance = previous.w;
++        } else {
++            vec3 direction = mat3(v.inv_view) * vec3(ndc * v.projection_param.xy, 1.0);
++            previous = pass.m * vec4(direction, 0.0);
++        }
++        motion = previous.w > 1.0e-6 ? (previous.xy / previous.w - (ndc + shift)) * 0.5 : vec2(0.0);
++    }
++    float speed = min(length(motion * output_size), 64.0);  // output pixels a frame
++    float still = 1.0 - clamp(speed * 0.5, 0.0, 1.0);
++
++    // The current frame at this pixel: a Gaussian fit of Blackman-Harris over the samples, then
++    // sharpened against the 3x3's mean (the accumulation converges on the sharpened value, so
++    // the picture comes out sharp without a separate pass, and the history is never sharpened
++    // twice).
++    vec3 gauss = vec3(0.0);
++    float gauss_weight = 0.0;
++    for (int i = 0; i < 9; ++i) {
++        float w = exp(-2.29 * distance2[i]);
++        gauss += samples[i] * w;
++        gauss_weight += w;
++    }
++    gauss /= max(gauss_weight, 1.0e-5);
++    vec3 mean = m1 / 9.0;
++    vec3 current = gauss;
++    bool periphery = (pass.ids.y & 2u) != 0u;
++    if (!periphery) {
++        // Contrast-adaptive (as AMD's CAS): less where the neighbourhood already spans a wide
++        // range (strong edges: no halos) or is near black/white. More while moving, where the
++        // history blurs the most.
++        float lo = box_lo.x;
++        float hi = box_hi.x;
++        float amp = sqrt(clamp(min(lo, 1.0 - hi) / max(hi, 1.0e-4), 0.0, 1.0));
++        float amount = pass.f1.z * amp * (1.0 + 0.6 * (1.0 - still));
++        current = gauss + amount * 1.2 * (gauss - mean);
++        // Never outside what the samples hold (no ringing).
++        current = clamp(current, box_lo, box_hi);
++    }
++
++    // Edges (a depth step in the 3x3) get a narrow box: the history cannot drag an edge's old
++    // place along. Flat areas get a wide one: less flicker of fine detail.
++    float depth_range = (closest - farthest) / max(closest, 1.0e-6);
++    float edge = smoothstep(0.02, 0.15, depth_range);
++    vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
++    float k = mix(SIGMA_FLAT, SIGMA_EDGE, edge);
++    vec3 lo = max(mean - k * sigma, box_lo);
++    vec3 hi = min(mean + k * sigma, box_hi);
++    lo = min(lo, current);
++    hi = max(hi, current);
++
++    // Particles and transparent layers have no motion: what they cover keeps little history.
++    float reactive = 0.0;
++    if (pass.f2.x >= 0.0) {
++        vec2 render_uv = uv + pass.f0.xy;
++        vec4 particles = pass.f2.x > 0.0 ? Img(IMG_PARTICLES, SMP_LINEAR_CLAMP, 0.5 + (render_uv - 0.5) * pass.f2.xy + pass.f2.zw)
++                                         : ImgFetch(IMG_PARTICLES, nearest_pixel);
++        reactive = clamp(max(1.0 - particles.a, MaxOf(particles.rgb) * 4.0), 0.0, 1.0);
++    }
++
++    // The nearest render sample: this pixel's depth, distance and velocity.
++    float own_depth = ImgFetch(IMG_DEPTH, nearest_pixel).x;
++    float own_distance = own_depth > 0.0 ? ViewZ(v, own_depth) : 60000.0;
++    vec3 result = current;
++    vec2 previous_uv = uv + motion;
++    bool inside = all(greaterThanEqual(previous_uv, vec2(0.0))) && all(lessThanEqual(previous_uv, vec2(1.0)));
++    if ((pass.ids.y & 1u) != 0u && inside) {
++        vec2 previous_pixel = previous_uv * output_size;
++        vec3 history = ToYCoCg(HistoryCatmullRom(previous_pixel, output_size));
++        history = ClipToBox(history, lo, hi);
++        float keep = mix(KEEP_STILL, KEEP_MOVING, clamp(speed * 0.125, 0.0, 1.0));
++        // Anti-flicker (after Lottes): where history and current already agree, keep more;
++        // where they disagree after clipping, take more of the current.
++        float lc = current.x;
++        float lh = history.x;
++        float agree = 1.0 - abs(lc - lh) / max(max(lc, lh), 0.2);
++        keep = mix(keep - 0.12, keep, agree * agree);
++        // Disocclusion: the history held something nearer there (this surface was hidden).
++        if (expected_distance > 0.0) {
++            float held = HistoryTap(floor(previous_pixel) + 0.5, output_size).a;
++            float nearer = (expected_distance - held) / expected_distance;
++            // (Wider where the surface itself spans depth across the 3x3: a floor at a grazing
++            // angle must not lose its history.)
++            float tolerance = max(DISOCCLUSION, 1.5 * depth_range);
++            keep *= 1.0 - smoothstep(tolerance, 2.0 * tolerance, nearer);
++        }
++        keep *= 1.0 - 0.75 * reactive;
++        // Below 100 %: where no sample falls near this pixel, the history knows it better.
++        if (ratio.x < 0.999) {
++            float confidence = exp(-2.29 * nearest2);
++            keep = 1.0 - (1.0 - keep) * mix(0.35, 1.0, confidence);
++        }
++        result = mix(current, history, clamp(keep, 0.0, 0.97));
++    }
++    vec3 color = Expand(max(FromYCoCg(result), vec3(0.0)));
++    out_history = vec4(color, own_distance);
++    if (pass.ids.z != 0u) {
++        vec4 reflection = Reflection(uv);
++        if (reflection.a > 0.0) {
++            color = min(color, vec3(1.0)) * (1.0 - reflection.a) + reflection.rgb;
++        }
++    }
++    out_color = vec4(color, ImgFetch(IMG_HDR, nearest_pixel).a);
++    out_depth = vec4(own_depth, 0.0, 0.0, 0.0);
++    out_velocity = ImgFetch(IMG_OBJECT_VELOCITY_, nearest_pixel);
++}
 diff --git a/shaders/xr_copy.frag b/shaders/xr_copy.frag
 index 8ed00c4..8e3f88f 100644
 --- a/shaders/xr_copy.frag
@@ -922,9 +939,18 @@ index ffee464..5d15d12 100644
      }
  };
 diff --git a/src/engine/render/gpu_types.h b/src/engine/render/gpu_types.h
-index 61d401d..2c44e67 100644
+index 61d401d..e0d221e 100644
 --- a/src/engine/render/gpu_types.h
 +++ b/src/engine/render/gpu_types.h
+@@ -10,7 +10,7 @@ constexpr uint32_t kMaxViews = 64;
+ constexpr uint32_t kMaxLights = 256;
+ constexpr uint32_t kMaxProbes = 512;
+ constexpr uint32_t kMaxSkinMatrices = 16384;
+-constexpr uint32_t kImageSlots = 56;
++constexpr uint32_t kImageSlots = 60;
+ constexpr uint32_t kInvalid = 0xFFFFFFFFu;
+ constexpr uint32_t kLuminanceGroups = 16384;
+ constexpr uint32_t kReflectionReadback = kLuminanceGroups;
 @@ -31,6 +31,10 @@ struct View {
      glm::vec4 jitter{0.0f};
      glm::vec4 temporal{0.0f};
@@ -945,15 +971,27 @@ index 61d401d..2c44e67 100644
  };
  
  struct DrawPush {
-@@ -114,6 +120,8 @@ enum Image : uint32_t {
+@@ -114,6 +120,7 @@ enum Image : uint32_t {
      kImgVelocity = 32,
      kImgObjectVelocity = 33,
      kImgMbTile = 34,
 +    kResVrrMap = 35,
-+    kImgTaaHistory = 36,
      kImgMbNeighbour = 39,
      kImgMbBake = 40,
      kImgMbBlurA = 41,
+@@ -131,6 +138,12 @@ enum Image : uint32_t {
+     kImgReflectHistoryB = 53,
+     kImgProbeAcc = 54,
+     kImgHandyFactor = 55,
++    // VPKTAA's histories (column * 2 + turn: SceneRenderer::taa_history_). (34-38 are the
++    // motion blur's tiles.)
++    kImgTaaHistory = 56,
++    kImgTaaHistory1 = 57,
++    kImgTaaHistory2 = 58,
++    kImgTaaHistory3 = 59,
+ };
+ 
+ enum Sampler : uint32_t {
 diff --git a/src/engine/render/render_util.cpp b/src/engine/render/render_util.cpp
 index c327bd9..5bc9b33 100644
 --- a/src/engine/render/render_util.cpp
@@ -1211,7 +1249,7 @@ index 9bb3b5d..d9886c0 100644
      XrFrame xr_frame_;
      bool xr_pending_ = false;
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..7b48868 100644
+index 40d339d..99682d2 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -306,7 +306,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -1975,7 +2013,7 @@ index 40d339d..7b48868 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +2282,82 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +2282,84 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -2030,6 +2068,8 @@ index 40d339d..7b48868 100644
 +            SharedByInset(shared_particles_frame_);
 +        }
 +    }
++    // (VPKTAA's reactive mask: where this view's particles are, read the way the composite does.)
++    taa_particles_place_ = recorded > 0 ? SharePlace(reuse) : glm::vec4(-1.0f, 0.0f, 0.0f, 0.0f);
 +    if (recorded > 0) {
 +        BeginLabel(cmd, "particles composite");
 +        UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
@@ -2059,7 +2099,7 @@ index 40d339d..7b48868 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +2369,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +2371,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -2067,7 +2107,7 @@ index 40d339d..7b48868 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +2380,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +2382,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -2107,7 +2147,7 @@ index 40d339d..7b48868 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +2405,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2407,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -2115,7 +2155,7 @@ index 40d339d..7b48868 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -1908,7 +2470,8 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
+@@ -1908,7 +2472,8 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
      push.f2 = glm::vec4(1.0f / static_cast<float>(refmap_.Extent().width), 1.0f / static_cast<float>(refmap_.Extent().height), 0.0f, 0.0f);
      static const bool march_fixed = std::getenv("PT_REFLECT_MARCH_FIXED") != nullptr;
      static const bool temporal_off_march = std::getenv("PT_REFLECT_TEMPORAL_OFF") != nullptr;
@@ -2125,7 +2165,7 @@ index 40d339d..7b48868 100644
          push.f2.z = 1.0f;
          push.f2.w = static_cast<float>(frame_counter_ % 64u);
      }
-@@ -1956,7 +2519,7 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
+@@ -1956,7 +2521,7 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
      push.f1 = glm::vec4(1.0f, 1.0f, screen.reflect_scale, screen.reflect_bias);
      push.f2 = glm::vec4(horizontal, screen.reflect_edge ? 1.0f : 0.0f);
      static const bool temporal_off = std::getenv("PT_REFLECT_TEMPORAL_OFF") != nullptr;
@@ -2134,7 +2174,7 @@ index 40d339d..7b48868 100644
          (rt_reflections_ ? reflect_layer_rt_ : reflect_layer_pipeline_)) {
          RecordReflectionTemporal(cmd, view, push);
          return;
-@@ -2099,9 +2662,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2664,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -2149,7 +2189,7 @@ index 40d339d..7b48868 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2675,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2677,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -2158,7 +2198,7 @@ index 40d339d..7b48868 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2700,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2702,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -2175,7 +2215,7 @@ index 40d339d..7b48868 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,8 +2717,9 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,8 +2719,9 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -2186,7 +2226,7 @@ index 40d339d..7b48868 100644
          RecordOpaqueSnapshot(cmd, output);
      }
      if (vfx_forward) {
-@@ -2181,6 +2752,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2181,6 +2754,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -2194,7 +2234,7 @@ index 40d339d..7b48868 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2810,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +2812,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -2207,7 +2247,7 @@ index 40d339d..7b48868 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2827,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +2829,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -2223,7 +2263,7 @@ index 40d339d..7b48868 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2260,6 +2847,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2260,6 +2849,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          return;
      }
      FrameSlot& slot = slots_[renderer_->FrameIndex()];
@@ -2235,7 +2275,7 @@ index 40d339d..7b48868 100644
      textures_->FlushMaterials();
      textures_->ReportCounts("scene");
      if (has_last_eye_ && glm::distance(camera.position, last_eye_) > kCameraCutDistance) {
-@@ -2325,15 +2917,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2325,15 +2919,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          SettleExposure(lighting_->exposure);
      }
      VkCommandBuffer cmd = renderer_->Cmd();
@@ -2314,7 +2354,15 @@ index 40d339d..7b48868 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2454,15 +3108,25 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2417,6 +3073,7 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+         mirror_history_valid_ = false;
+     }
+     Stamp(cmd, 2);
++    taa_particles_place_ = glm::vec4(-1.0f, 0.0f, 0.0f, 0.0f);
+     RecordView(cmd, main_view_, hdr_, true);
+     RecordReflectionSample(cmd, *lighting_);
+     BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
+@@ -2454,15 +3111,25 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          RecordDebug(cmd);
          EndLabel(cmd);
      }
@@ -2542,7 +2590,7 @@ index 19dd1a8..eb32220 100644
      const float step = std::clamp(interval, 1.0e-4f, 1.0f);
      frame_time_ = reference ? static_cast<double>(step) : static_cast<double>(step * 0.016666668f) + frame_time_ * 0.9833333333333333;
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..20ead5f 100644
+index 1f96981..6f6cd20 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
 @@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
@@ -2741,11 +2789,11 @@ index 1f96981..20ead5f 100644
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
 -        RenderTarget* upscale_colors[] = {&motion_, &reactive_, &opaque_, &post_hdr_, &post_depth_, &post_object_velocity_, &refmap_color_,
-+        RenderTarget* upscale_colors[] = {&motion_, &reactive_, &opaque_, &post_hdr_, &post_depth_, &post_object_velocity_, &taa_history_, &refmap_color_,
++        RenderTarget* upscale_colors[] = {&motion_, &reactive_, &opaque_, &post_hdr_, &post_depth_, &post_object_velocity_, &taa_history_[0], &taa_history_[1], &taa_history_[2], &taa_history_[3], &refmap_color_,
                                           &mirror_history_, &mirror_temporal_, &reflect_layer_, &reflect_offset_, &reflect_history_[0],
                                           &reflect_history_[1]};
          for (RenderTarget* t : upscale_colors) {
-@@ -708,7 +759,93 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -708,7 +759,96 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
      return true;
  }
  
@@ -2797,7 +2845,10 @@ index 1f96981..20ead5f 100644
 +    std::swap(post_hdr_, s.post_hdr);
 +    std::swap(post_depth_, s.post_depth);
 +    std::swap(post_object_velocity_, s.post_object_velocity);
-+    std::swap(taa_history_, s.taa_history);
++    for (int i = 0; i < 4; ++i) {
++        std::swap(taa_history_[i], s.taa_history[i]);
++        std::swap(taa_owner_[i], s.taa_owner[i]);
++    }
 +    std::swap(refmap_color_, s.refmap_color);
 +    std::swap(history_valid_, s.history_valid);
 +    std::swap(flare_clean_, s.flare_clean);
@@ -2840,7 +2891,7 @@ index 1f96981..20ead5f 100644
      VkDescriptorImageInfo images[gpu::kImageSlots];
      for (VkDescriptorImageInfo& info : images) {
          info = {VK_NULL_HANDLE, white_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-@@ -773,6 +910,7 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -773,6 +913,7 @@ void SceneRenderer::WriteImageDescriptors() {
      set_image(gpu::kResLut1, lut1_);
      set_image(gpu::kResMaterial, material_tex_);
      set_image(gpu::kResDither, dither_);
@@ -2848,7 +2899,7 @@ index 1f96981..20ead5f 100644
      set_image(gpu::kResColorLut, color_lut_);
      set_image(gpu::kResColorLutPrev, color_lut_prev_);
      set_image(gpu::kResNoise, noise_);
-@@ -789,7 +927,9 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -789,7 +930,9 @@ void SceneRenderer::WriteImageDescriptors() {
      std::copy(std::begin(images), std::end(images), std::begin(post_images));
      WriteUpscaleDescriptors(post_images, true);
      for (int set_index = 0; set_index < 2 * static_cast<int>(Renderer::kFramesInFlight); ++set_index) {
@@ -2858,7 +2909,7 @@ index 1f96981..20ead5f 100644
          const bool post = (set_index & 1) != 0;
          VkDescriptorBufferInfo frame_info{slot.frame_data.buffer, 0, VK_WHOLE_SIZE};
          VkDescriptorBufferInfo skin_info{slot.skin.buffer, 0, VK_WHOLE_SIZE};
-@@ -824,6 +964,19 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -824,6 +967,19 @@ void SceneRenderer::WriteImageDescriptors() {
      }
  }
  
@@ -2878,7 +2929,7 @@ index 1f96981..20ead5f 100644
  bool SceneRenderer::UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size) {
      vk::Context& ctx = renderer_->Context();
      if (!image.image || image.format != format || image.extent.width != extent.width || image.extent.height != extent.height ||
-@@ -1083,7 +1236,13 @@ void SceneRenderer::UpdateColorLut(const ScreenSettings& screen) {
+@@ -1083,7 +1239,13 @@ void SceneRenderer::UpdateColorLut(const ScreenSettings& screen) {
      color_lut_prev_key_ = color_lut_key_;
      color_lut_key_ = key;
      if (extent_.width > 0) {
@@ -2893,7 +2944,7 @@ index 1f96981..20ead5f 100644
      }
  }
  
-@@ -1174,10 +1333,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+@@ -1174,10 +1336,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
      stats_.gpu_ms = span(0, 6);
  }
  
@@ -2979,7 +3030,7 @@ index 1f96981..20ead5f 100644
      if (slot.reflection_sampled) {
          vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
          const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
-@@ -1189,7 +1423,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -1189,7 +1426,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -2991,7 +3042,7 @@ index 1f96981..20ead5f 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..567b151 100644
+index 6c9b165..bfca5b5 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
 @@ -133,6 +133,7 @@ struct RenderToggles {
@@ -3002,18 +3053,22 @@ index 6c9b165..567b151 100644
  };
  
  struct LightBox {
-@@ -206,6 +207,78 @@ public:
+@@ -206,6 +207,82 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
-+    // The headset views drawn without the upscaler's jitter (a diagnosis of MetalFX's alignment).
-+    void SetVrNoJitter(bool off) { vr_no_jitter_ = off; }
-+    // The headset views show the scene through the upscaler's path but without its picture (a
-+    // diagnosis of MetalFX: the plain render, stretched).
-+    void SetVrUpscaleBypass(bool on) { vr_upscale_bypass_ = on; }
-+    // The headset's sharp views antialiased by the engine's own TAA (taa.frag) instead of FXAA or
-+    // MetalFX: at the render's size, through the upscaler's path (jitter, motion, resolve).
-+    void SetVrTaa(bool on) { vr_taa_ = on; }
++    // The headset's sharp views antialiased by VPKTAA (vpktaa.frag), the engine's own temporal
++    // antialiasing, instead of FXAA: the upscaler's jitter and motion, and one pass that resolves,
++    // accumulates and writes the view's next history. render_scale: the inset drawn at this
++    // fraction of its size (0.8 to 1) and rebuilt to the full size from the past frames;
++    // sharpness 0 to 1 (built into its reconstruction filter, no extra pass). periphery: the wide,
++    // low-density views too (at their own size: it steadies their edges, it cannot add detail).
++    void SetVrTaa(bool on, float render_scale = 1.0f, float sharpness = 0.5f, bool periphery = true) {
++        vr_taa_ = on;
++        vr_taa_periphery_ = periphery;
++        vr_taa_scale_ = render_scale < 0.8f ? 0.8f : render_scale > 1.0f ? 1.0f : render_scale;
++        vr_taa_sharpness_ = sharpness < 0.0f ? 0.0f : sharpness > 1.0f ? 1.0f : sharpness;
++    }
 +    bool TaaReady() const { return taa_ != VK_NULL_HANDLE; }
 +    // (Headset) Where this view's depth goes for the compositor (xr_depth.frag): an R32 float
 +    // image and its view, written at the end of the next Render. Null: none.
@@ -3081,7 +3136,7 @@ index 6c9b165..567b151 100644
  
  private:
      struct FrameSlot {
-@@ -214,6 +287,7 @@ private:
+@@ -214,6 +291,7 @@ private:
          vk::Buffer luminance;
          VkDescriptorSet set = VK_NULL_HANDLE;
          VkDescriptorSet post_set = VK_NULL_HANDLE;
@@ -3089,7 +3144,7 @@ index 6c9b165..567b151 100644
          VkQueryPool queries = VK_NULL_HANDLE;
          VkQueryPool upscale_queries = VK_NULL_HANDLE;
          bool upscale_timed = false;
-@@ -222,7 +296,30 @@ private:
+@@ -222,7 +300,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -3120,7 +3175,7 @@ index 6c9b165..567b151 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -274,8 +371,10 @@ private:
+@@ -274,8 +375,10 @@ private:
      void DestroyPipelines();
      bool CreateDescriptors();
      bool EnsureTargets(VkExtent2D extent, VkExtent2D output, bool upscaling);
@@ -3133,7 +3188,7 @@ index 6c9b165..567b151 100644
      bool CreateTarget(RenderTarget& target, VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, VkImageAspectFlags aspect);
      bool UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size);
      bool UploadImageMips(vk::Image& image, VkFormat format, VkExtent3D extent, const std::vector<std::vector<uint8_t>>& mips);
-@@ -301,6 +400,7 @@ private:
+@@ -301,6 +404,7 @@ private:
      bool EnsureShadowTarget();
      void RecordRtAmbientOcclusion(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordLighting(VkCommandBuffer cmd, const ViewSetup& view);
@@ -3141,16 +3196,18 @@ index 6c9b165..567b151 100644
      void RecordLuminance(VkCommandBuffer cmd);
      void RecordForward(VkCommandBuffer cmd, const ViewSetup& view, RenderTarget& output);
      void RecordPost(VkCommandBuffer cmd, const SceneLighting& lighting, float dt);
-@@ -342,6 +442,8 @@ private:
+@@ -342,7 +446,10 @@ private:
      void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
      void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
      void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
 +    // The particles drawn into particles_ (the offscreen VFX), the render pass ended; `recorded`: how many.
 +    void RecordParticles(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext& context, uint32_t& recorded);
      void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
++    void RecordVpkTaa(VkCommandBuffer cmd);
      void RecordUpscale(VkCommandBuffer cmd, float dt);
      void ReadUpscaleTimestamps(FrameSlot& slot);
-@@ -377,6 +479,34 @@ private:
+ 
+@@ -377,6 +484,34 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
@@ -3185,7 +3242,7 @@ index 6c9b165..567b151 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -395,6 +525,24 @@ private:
+@@ -395,6 +530,24 @@ private:
      RenderTarget reflect_offset_;
      RenderTarget reflect_history_[2];
      RenderTarget shadow_;
@@ -3210,19 +3267,26 @@ index 6c9b165..567b151 100644
      RenderTarget ao_[2];
      RenderTarget refmap_;
      RenderTarget hdr_copy_;
-@@ -410,6 +558,11 @@ private:
+@@ -410,6 +563,18 @@ private:
      RenderTarget post_hdr_;
      RenderTarget post_depth_;
      RenderTarget post_object_velocity_;
-+    // TAA: one column per eye (left, right) of the render's size, side by side (per target set).
-+    RenderTarget taa_history_;
++    // VPKTAA: two histories per eye column (left, right), read one and write the other in turns
++    // (index column * 2 + turn), at the output's size (per target set). rgb the result, a the
++    // surface's distance (disocclusion test).
++    RenderTarget taa_history_[4];
++    uint8_t taa_turn_[4] = {};
++    int taa_owner_[4] = {-1, -1, -1, -1};  // (the view that wrote each history: per target set)
 +    bool taa_valid_[4] = {};
++    // This view's particles/transparent layer for VPKTAA's reactive mask: x < 0 none this frame,
++    // 0 this view's own (pixel for pixel), > 0 a wider view's (SharePlace).
++    glm::vec4 taa_particles_place_{-1.0f, 0.0f, 0.0f, 0.0f};
 +    bool taa_active_ = false;
-+    bool taa_logged_[4] = {};
++    uint32_t taa_logged_[4] = {};  // (render and output width last logged)
      bool dump_requested_ = false;
      bool dump_recorded_ = false;
      vk::Buffer dump_compose_;
-@@ -418,6 +571,17 @@ private:
+@@ -418,6 +583,17 @@ private:
      vk::Buffer dump_mirror_;
      VkExtent2D output_extent_{0, 0};
      bool targets_upscaled_ = false;
@@ -3240,7 +3304,7 @@ index 6c9b165..567b151 100644
      bool history_valid_ = false;
  
      vk::Image lut1_;
-@@ -441,6 +605,8 @@ private:
+@@ -441,6 +617,8 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -3249,7 +3313,7 @@ index 6c9b165..567b151 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -482,6 +648,7 @@ private:
+@@ -482,6 +660,7 @@ private:
      VkPipeline up_reactive_ = VK_NULL_HANDLE;
      VkPipeline up_resolve_ = VK_NULL_HANDLE;
      VkPipeline up_demod_ = VK_NULL_HANDLE;
@@ -3257,7 +3321,7 @@ index 6c9b165..567b151 100644
  
      std::unique_ptr<RayTracing> rt_;
      SubsurfacePass sss_;
-@@ -554,6 +721,35 @@ private:
+@@ -554,6 +733,36 @@ private:
          uint32_t size = 0;
      };
      MirrorStale mirror_stale_;
@@ -3271,7 +3335,8 @@ index 6c9b165..567b151 100644
 +        RenderTarget mb_tile[5], mb_neighbour, mb_bake, mb_blur[2];
 +        RenderTarget mirror, mirror_history, mirror_temporal, reflect_layer, reflect_offset, reflect_history[2];
 +        RenderTarget ao[2], refmap, hdr_copy, particles;
-+        RenderTarget motion, reactive, opaque, handy_factor, exposure_image, upscaled, post_hdr, post_depth, post_object_velocity, taa_history;
++        RenderTarget motion, reactive, opaque, handy_factor, exposure_image, upscaled, post_hdr, post_depth, post_object_velocity, taa_history[4];
++        int taa_owner[4] = {-1, -1, -1, -1};
 +        RenderTarget refmap_color;
 +        bool history_valid = false;
 +        bool flare_clean = false;
@@ -3293,13 +3358,14 @@ index 6c9b165..567b151 100644
      bool mirror_stale_active_ = false;
      const SceneLighting* lighting_ = nullptr;
      SceneLighting fallback_;
-@@ -636,6 +832,50 @@ private:
+@@ -636,6 +845,51 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
-+    bool vr_no_jitter_ = false;
-+    bool vr_upscale_bypass_ = false;
 +    bool vr_taa_ = false;
++    bool vr_taa_periphery_ = true;
++    float vr_taa_scale_ = 1.0f;
++    float vr_taa_sharpness_ = 0.5f;
 +    bool vr_low_detail_ = false;
 +    RenderTarget vr_depth_out_;
 +    VkPipeline vr_depth_pipeline_ = VK_NULL_HANDLE;
@@ -3345,27 +3411,28 @@ index 6c9b165..567b151 100644
  
  }
 diff --git a/src/engine/render/upscale/scene_upscale.cpp b/src/engine/render/upscale/scene_upscale.cpp
-index 1feade3..a2fd8b2 100644
+index 1feade3..8f7d2f5 100644
 --- a/src/engine/render/upscale/scene_upscale.cpp
 +++ b/src/engine/render/upscale/scene_upscale.cpp
-@@ -122,6 +122,16 @@ bool SceneRenderer::CreateUpscalePipelines() {
+@@ -122,6 +122,17 @@ bool SceneRenderer::CreateUpscalePipelines() {
      demod.colors = {kHdrTargetFormat, kHandyFactorFormat};
      up_demod_ = CreateGraphicsPipeline(device_, demod);
  
-+    // The headset's own TAA (optional: without it the sharp views fall back to FXAA).
++    // VPKTAA, the headset's temporal antialiasing (optional: without it the headset falls back
++    // to FXAA). The resolve's three outputs plus the view's next history.
 +    PipelineDesc taa;
 +    taa.layout = layout_;
-+    taa.fragment = "taa.frag";
-+    taa.colors = {kUpscaleColorFormat};
++    taa.fragment = "vpktaa.frag";
++    taa.colors = {kUpscaleColorFormat, kPostDepthFormat, kUpscaleColorFormat, kUpscaleColorFormat};
 +    taa_ = CreateGraphicsPipeline(device_, taa);
 +    if (!taa_) {
-+        LogWarn("taa: pipeline creation failed (FXAA instead)");
++        LogWarn("vpktaa: pipeline creation failed (FXAA instead)");
 +    }
 +
      if (!up_motion_ || !up_object_motion_ || !up_reactive_ || !up_resolve_ || !up_demod_) {
          LogError("scene renderer: upscale pipeline creation failed");
          return false;
-@@ -130,7 +140,7 @@ bool SceneRenderer::CreateUpscalePipelines() {
+@@ -130,7 +141,7 @@ bool SceneRenderer::CreateUpscalePipelines() {
  }
  
  void SceneRenderer::DestroyUpscalePipelines() {
@@ -3374,44 +3441,53 @@ index 1feade3..a2fd8b2 100644
      for (VkPipeline* p : all) {
          if (*p) {
              vkDestroyPipeline(device_, *p, nullptr);
-@@ -146,10 +156,17 @@ bool SceneRenderer::CreateUpscaleTargets(VkExtent2D render, VkExtent2D output) {
+@@ -146,10 +157,21 @@ bool SceneRenderer::CreateUpscaleTargets(VkExtent2D render, VkExtent2D output) {
                      CreateTarget(opaque_, kHdrTargetFormat, render, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
                      CreateTarget(handy_factor_, kHandyFactorFormat, render, color, c) &&
                      CreateTarget(exposure_image_, kExposureFormat, {1, 1}, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
-+                    // (A colour attachment as well: MetalFX may want its output to be a render target.)
-                     CreateTarget(upscaled_, kUpscaleColorFormat, output,
+-                    CreateTarget(upscaled_, kUpscaleColorFormat, output,
 -                                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
-+                                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-+                                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-+                                 c) &&
-+                    // (The headset's TAA histories: a column per eye, side by side; a set holds one kind of view.)
-+                    (!VrView() || CreateTarget(taa_history_, kUpscaleColorFormat, {output.width * 2, output.height},
-+                                               color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c)) &&
++                    // (The upscalers' output: not on the headset, whose VPKTAA writes the post targets itself.)
++                    (VrView() || CreateTarget(upscaled_, kUpscaleColorFormat, output,
++                                              VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
++                                                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
++                                              c)) &&
++                    // (VPKTAA's histories at the output's size: two per eye column, read one and
++                    // write the other; a target set holds one kind of view, so two columns do.)
++                    (!VrView() || (CreateTarget(taa_history_[0], kUpscaleColorFormat, output, color, c) &&
++                                   CreateTarget(taa_history_[1], kUpscaleColorFormat, output, color, c) &&
++                                   CreateTarget(taa_history_[2], kUpscaleColorFormat, output, color, c) &&
++                                   CreateTarget(taa_history_[3], kUpscaleColorFormat, output, color, c))) &&
                      CreateTarget(post_hdr_, kUpscaleColorFormat, output, color, c) && CreateTarget(post_depth_, kPostDepthFormat, output, color, c) &&
                      CreateTarget(post_object_velocity_, kUpscaleColorFormat, output, color, c);
 +    for (bool& v : taa_valid_) v = false;
++    for (int& o : taa_owner_) o = -1;
      if (!ok) {
          LogError("scene renderer: cannot create upscale targets {}x{} -> {}x{}", render.width, render.height, output.width, output.height);
      }
-@@ -158,7 +175,8 @@ bool SceneRenderer::CreateUpscaleTargets(VkExtent2D render, VkExtent2D output) {
+@@ -158,7 +180,9 @@ bool SceneRenderer::CreateUpscaleTargets(VkExtent2D render, VkExtent2D output) {
  
  void SceneRenderer::DestroyUpscaleTargets() {
      vk::Context& ctx = renderer_->Context();
 -    RenderTarget* targets[] = {&motion_, &reactive_, &opaque_, &handy_factor_, &exposure_image_, &upscaled_, &post_hdr_, &post_depth_, &post_object_velocity_};
-+    RenderTarget* targets[] = {&motion_, &reactive_, &opaque_, &handy_factor_, &exposure_image_, &upscaled_, &post_hdr_, &post_depth_, &post_object_velocity_,
-+                               &taa_history_};
++    RenderTarget* targets[] = {&motion_,         &reactive_,        &opaque_,          &handy_factor_,    &exposure_image_,       &upscaled_,
++                               &post_hdr_,       &post_depth_,      &post_object_velocity_, &taa_history_[0], &taa_history_[1], &taa_history_[2],
++                               &taa_history_[3]};
      for (RenderTarget* t : targets) {
          ctx.DestroyImage(t->image);
          *t = RenderTarget{};
-@@ -177,6 +195,7 @@ void SceneRenderer::WriteUpscaleDescriptors(VkDescriptorImageInfo* images, bool
+@@ -177,6 +201,10 @@ void SceneRenderer::WriteUpscaleDescriptors(VkDescriptorImageInfo* images, bool
      set(gpu::kImgOpaque, opaque_);
      set(gpu::kImgMotion, motion_);
      set(gpu::kImgHandyFactor, handy_factor_);
-+    set(gpu::kImgTaaHistory, taa_history_);
++    set(gpu::kImgTaaHistory, taa_history_[0]);
++    set(gpu::kImgTaaHistory1, taa_history_[1]);
++    set(gpu::kImgTaaHistory2, taa_history_[2]);
++    set(gpu::kImgTaaHistory3, taa_history_[3]);
      if (post && targets_upscaled_) {
          set(gpu::kImgHdr, post_hdr_);
          set(gpu::kImgDepth, post_depth_);
-@@ -227,8 +246,49 @@ bool SceneRenderer::SetupUpscaler(VkExtent2D output) {
+@@ -227,8 +255,54 @@ bool SceneRenderer::SetupUpscaler(VkExtent2D output) {
          }
      }
      up_.enabled = false;
@@ -3419,41 +3495,46 @@ index 1feade3..a2fd8b2 100644
      upscale_stats_.active = false;
      upscale_stats_.kind = upscale.kind;
 +#if PT_VISIONOS
-+    // The engine's own TAA on a headset's sharp view: the upscaler's jitter and motion at the
-+    // render's own size, no backend (MetalFX stays created, unused, if it was).
-+    if (vr_taa_ && taa_ && VrView() && !VrSkipsUpscale() && (debug_view == DebugView::Lit || debug_view == DebugView::Ambient) &&
-+        output.width > 0 && output.height > 0) {
-+        up_.render = output;
++    // VPKTAA on a headset view: the upscaler's jitter and motion, no backend. The sharp views at
++    // the chosen internal resolution (rebuilt to their size), the wide views (with the periphery
++    // option) at their own size.
++    const bool wide = VrSkipsUpscale();
++    if (vr_taa_ && taa_ && VrView() && (!wide || vr_taa_periphery_) && !VrrActive() &&
++        (debug_view == DebugView::Lit || debug_view == DebugView::Ambient) && output.width > 0 && output.height > 0) {
++        const float scale = wide ? 1.0f : vr_taa_scale_;
++        up_.render = {std::clamp(static_cast<uint32_t>(std::lround(static_cast<double>(output.width) * scale)), 1u, output.width),
++                      std::clamp(static_cast<uint32_t>(std::lround(static_cast<double>(output.height) * scale)), 1u, output.height)};
 +        up_.warp_test = false;
-+        up_.phase_count = 8;
-+        // (Both eyes walk the same sequence: their samples fall at the same places.)
++        // 8 phases at 100 %, more below so the samples still cover each output pixel.
++        const float ratio = static_cast<float>(output.width) / static_cast<float>(up_.render.width);
++        up_.phase_count = std::max(8, static_cast<int32_t>(std::ceil(8.0f * ratio * ratio)));
 +        int32_t& jitter_index = vr_jitter_index_[vr_eye_];
-+        up_.jitter_pixels = JitterOffset(jitter_index, up_.phase_count);  // (MetalFX's no-jitter test does not apply)
++        up_.jitter_pixels = JitterOffset(jitter_index, up_.phase_count);
 +        jitter_index = (jitter_index + 1) % up_.phase_count;
-+        up_.jitter_ndc = 2.0f * up_.jitter_pixels / glm::vec2(static_cast<float>(output.width), static_cast<float>(output.height));
-+        // Textures a little sharper (the accumulation takes away the shimmer that would cost).
-+        static const float taa_mip_bias = [] {
-+            const char* e = std::getenv("PT_TAA_MIP_BIAS");
-+            return e ? std::clamp(static_cast<float>(std::atof(e)), -2.0f, 0.0f) : -0.5f;
-+        }();
-+        up_.mip_bias = taa_mip_bias;
++        up_.jitter_ndc = 2.0f * up_.jitter_pixels / glm::vec2(static_cast<float>(up_.render.width), static_cast<float>(up_.render.height));
++        // Textures a little sharper (the accumulation takes away the shimmer that would cost),
++        // more below 100 % (the texels a sample sees are larger than an output pixel's).
++        up_.mip_bias = -0.5f + std::log2(1.0f / ratio);
 +        up_.enabled = true;
 +        taa_active_ = true;
 +        upscale_stats_.active = true;
-+        upscale_stats_.render = output;
++        upscale_stats_.render = up_.render;
 +        upscale_stats_.output = output;
 +        upscale_stats_.error.clear();
-+        if (!taa_logged_[vr_eye_]) {
-+            taa_logged_[vr_eye_] = true;
-+            LogInfo("taa: on {}x{} view {} (8 jitter phases, own history column)", output.width, output.height, vr_eye_);
++        const uint32_t key = up_.render.width * 4096u + output.width;
++        if (taa_logged_[vr_eye_] != key) {
++            taa_logged_[vr_eye_] = key;
++            LogInfo("vpktaa: on {}x{} -> {}x{} view {} ({} jitter phases{})", up_.render.width, up_.render.height, output.width, output.height,
++                    vr_eye_, up_.phase_count, wide ? ", periphery" : "");
 +        }
 +        return true;
 +    }
 +    if (VrView()) {
-+        taa_valid_[vr_eye_] = false;  // (not antialiased by the TAA this time: its history goes stale)
++        taa_valid_[vr_eye_] = false;  // (not antialiased by VPKTAA this time: its history goes stale)
++        return false;  // (FXAA in the post chain; no other upscaler on the headset)
 +    }
-+    // On the headset only its views use it (not the virtual screen), and of those only the sharp
-+    // ones; the wide views just skip it, the backend and its histories stay.
++    // On the headset only its views use an upscaler (not the virtual screen), and of those only
++    // the sharp ones.
 +    if (upscale.kind != UpscalerKind::Off && (vr_eye_ < 0 || VrSkipsUpscale())) {
 +        return false;
 +    }
@@ -3461,37 +3542,52 @@ index 1feade3..a2fd8b2 100644
      const bool lit = debug_view == DebugView::Lit || debug_view == DebugView::Ambient;
      const UpscalerKind kind = upscale.kind;
      if (kind == UpscalerKind::Off || !lit || output.width == 0 || output.height == 0) {
-@@ -310,9 +370,11 @@ bool SceneRenderer::SetupUpscaler(VkExtent2D output) {
+@@ -310,8 +384,10 @@ bool SceneRenderer::SetupUpscaler(VkExtent2D output) {
      up_.warp_test = kind == UpscalerKind::Spatial && render.width == output.width && render.height == output.height &&
                      std::getenv("PT_UPSCALE_WARP") != nullptr;
      up_.phase_count = std::max(1, JitterPhaseCount(render.width, output.width));
 -    up_.jitter_pixels = JitterOffset(up_.jitter_index, up_.phase_count);
 -    up_.jitter_index = (up_.jitter_index + 1) % up_.phase_count;
--    if (up_.warp_test) {
 +    // (Each headset view walks its own jitter sequence.)
 +    int32_t& jitter_index = VrView() ? vr_jitter_index_[vr_eye_] : up_.jitter_index;
 +    up_.jitter_pixels = JitterOffset(jitter_index, up_.phase_count);
 +    jitter_index = (jitter_index + 1) % up_.phase_count;
-+    if (up_.warp_test || (VrView() && vr_no_jitter_)) {
+     if (up_.warp_test) {
          up_.jitter_pixels = glm::vec2(0.0f);
      }
-     up_.jitter_ndc = 2.0f * up_.jitter_pixels / glm::vec2(static_cast<float>(render.width), static_cast<float>(render.height));
-@@ -349,6 +411,9 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
+@@ -345,11 +421,22 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
+     FrameSlot& slot = slots_[renderer_->FrameIndex()];
+     vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.upscale_queries, 0);
+     UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}, {&motion_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+-    BeginPass(cmd, extent_, {{&motion_, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
-     push.ids = glm::uvec4(0, 0, 0, view.index);
-     push.m = previous_view_projection_;
-+    // The view's off-centre shift (a headset eye's own field, an inset's lift): the previous
-+    // projection holds it, so the current position must too (PixelNdc takes it away).
-+    push.f0 = glm::vec4(camera_.offset, 0.0f, 0.0f);
-     Fullscreen(cmd, up_motion_, push);
+-    push.ids = glm::uvec4(0, 0, 0, view.index);
+-    push.m = previous_view_projection_;
+-    Fullscreen(cmd, up_motion_, push);
++    if (taa_active_) {
++        // VPKTAA works the camera's motion out from the depth itself: only the moving objects'
++        // motion is drawn, over a value that says "none" (vpktaa.frag MOTION_NONE).
++        VkClearColorValue none{};
++        none.float32[0] = 1000.0f;
++        BeginPass(cmd, extent_, {{&motion_, true, none}}, &depth_, true, false);
++    } else {
++        BeginPass(cmd, extent_, {{&motion_, false, {}}}, &depth_, true, false);
++        push.ids = glm::uvec4(0, 0, 0, view.index);
++        push.m = previous_view_projection_;
++        // The view's off-centre shift (a headset eye's own field, an inset's lift): the previous
++        // projection holds it, so the current position must too (PixelNdc takes it away).
++        push.f0 = glm::vec4(camera_.offset, 0.0f, 0.0f);
++        Fullscreen(cmd, up_motion_, push);
++    }
      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, up_object_motion_);
      for (const Draw& d : draws_) {
-@@ -371,6 +436,13 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
+         const SubMesh& sub = *d.sub;
+@@ -371,6 +458,13 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
          vkCmdDrawIndexed(cmd, sub.index_count, 1, sub.first_index, sub.vertex_offset, 0);
      }
      vkCmdEndRendering(cmd);
 +    if (taa_active_) {
-+        // (The TAA needs only the motion: no reactive mask, no flashlight split.)
++        // (VPKTAA needs only the motion: its reactive mask is the particles' layer, no flashlight split.)
 +        UseTargets(cmd, {{&motion_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
 +        handy_demod_ = false;
 +        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.upscale_queries, 1);
@@ -3500,7 +3596,7 @@ index 1feade3..a2fd8b2 100644
      UseTargets(cmd, {{&motion_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&opaque_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -423,7 +495,9 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
+@@ -423,7 +517,9 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
              break;
          }
      }
@@ -3511,65 +3607,33 @@ index 1feade3..a2fd8b2 100644
      if (handy_demod_) {
          UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&diffuse_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -450,7 +524,56 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+@@ -443,6 +539,16 @@ void SceneRenderer::RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& vi
+ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+     FrameSlot& slot = slots_[renderer_->FrameIndex()];
+     vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.upscale_queries, 2);
++    if (taa_active_ && taa_history_[0].Valid()) {
++        // VPKTAA: this render + the view's history -> the post targets and its next history, in
++        // one pass (no copies).
++        RecordVpkTaa(cmd);
++        up_.reset = false;
++        vr_reset_[vr_eye_] = false;
++        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.upscale_queries, 3);
++        slot.upscale_timed = true;
++        return;
++    }
+     UseTargets(cmd, {{&exposure_image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+     VkClearColorValue value{};
+     value.float32[0] = exposure_;
+@@ -450,7 +556,7 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
      vkCmdClearColorImage(cmd, exposure_image_.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &range);
      UseTargets(cmd, {{&exposure_image_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      bool upscaled = false;
 -    if (up_.backend) {
-+    if (taa_active_ && taa_history_.Valid()) {
-+        // TAA: the view's history column + this render -> upscaled_, then upscaled_ back into
-+        // the column (unsharpened; the resolve sharpens what is shown).
-+        BeginLabel(cmd, "taa resolve");
-+        const uint32_t eye = static_cast<uint32_t>(vr_eye_);
-+        const uint32_t column = eye & 1u;  // (left 0, right 1: eyes 0/1, or the insets 2/3)
-+        const bool reset = vr_reset_[eye];
-+        const bool valid = taa_valid_[eye] && !reset;
-+        if (!valid) {
-+            static uint32_t logged = 0;
-+            if (logged < 12) {
-+                ++logged;
-+                LogInfo("taa: view {} history starts again ({})", eye, reset ? "camera cut or first frame" : "new targets");
-+            }
-+        }
-+        UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-+                         {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
-+                         {&motion_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-+                         {&taa_history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-+                         {&upscaled_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
-+        BeginPass(cmd, output_extent_, {{&upscaled_, false, {}}});
-+        static const glm::vec3 tuning = [] {
-+            // (history weight still, moving fast, clip width in sigmas)
-+            glm::vec3 v(0.92f, 0.80f, 1.1f);
-+            if (const char* e = std::getenv("PT_TAA_TUNING")) {
-+                std::sscanf(e, "%f,%f,%f", &v.x, &v.y, &v.z);
-+            }
-+            return v;
-+        }();
-+        gpu::PassPush taa;
-+        taa.ids = glm::uvec4(column, valid ? 1u : 0u, 0u, main_view_.index);
-+        taa.f0 = glm::vec4(up_.jitter_pixels, 1.0f / static_cast<float>(output_extent_.width), 1.0f / static_cast<float>(output_extent_.height));
-+        taa.f1 = glm::vec4(static_cast<float>(output_extent_.width), static_cast<float>(output_extent_.height),
-+                           static_cast<float>(column * output_extent_.width), static_cast<float>(taa_history_.Extent().width));
-+        taa.f2 = glm::vec4(tuning, 0.0f);
-+        Fullscreen(cmd, taa_, taa);
-+        vkCmdEndRendering(cmd);
-+        UseTargets(cmd, {{&upscaled_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&taa_history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
-+        VkImageCopy copy{};
-+        copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-+        copy.dstSubresource = copy.srcSubresource;
-+        copy.dstOffset = {static_cast<int32_t>(column * output_extent_.width), 0, 0};
-+        copy.extent = {output_extent_.width, output_extent_.height, 1};
-+        vkCmdCopyImage(cmd, upscaled_.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, taa_history_.image.image,
-+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-+        UseTargets(cmd, {{&upscaled_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&taa_history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
-+        taa_valid_[eye] = true;
-+        upscaled = true;
-+        EndLabel(cmd);
-+    } else if (up_.backend && !taa_active_) {
++    if (up_.backend && !taa_active_) {
          UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&depth_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                           {&motion_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -473,8 +596,9 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+@@ -473,8 +579,9 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
          d.frame_ms = std::clamp(dt, 1.0e-4f, 0.25f) * 1000.0f;
          d.near_plane = camera_.near_plane;
          d.fov_y = camera_.fov_y;
@@ -3580,20 +3644,15 @@ index 1feade3..a2fd8b2 100644
          if (streamline::Active()) {
              const float aspect = static_cast<float>(output_extent_.width) / static_cast<float>(std::max(1u, output_extent_.height));
              streamline::FrameConstants k;
-@@ -517,8 +641,12 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
-         if (!upscaled && upscale_stats_.error.empty()) {
-             upscale_stats_.error = "dispatch failed, see pt.log";
+@@ -519,6 +626,7 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
          }
-+        if (upscaled && VrView() && vr_upscale_bypass_) {
-+            upscaled = false;  // (the resolve stretches the render instead: a test)
-+        }
      }
      up_.reset = false;
 +    if (VrView()) vr_reset_[vr_eye_] = false;
      UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
                       {&object_velocity_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -532,7 +660,12 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+@@ -532,7 +640,12 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
                            reflect_post_upscale_ ? gpu::kImgReflectHistoryA + reflect_history_index_ : 0u, main_view_.index);
      push.f0 = glm::vec4(up_.jitter_pixels.x / static_cast<float>(extent_.width), up_.jitter_pixels.y / static_cast<float>(extent_.height),
                          1.0f / static_cast<float>(output_extent_.width), 1.0f / static_cast<float>(output_extent_.height));
@@ -3607,6 +3666,65 @@ index 1feade3..a2fd8b2 100644
      Fullscreen(cmd, up_resolve_, push);
      vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&post_hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+@@ -553,6 +666,58 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+     slot.upscale_timed = true;
+ }
+ 
++void SceneRenderer::RecordVpkTaa(VkCommandBuffer cmd) {
++    static constexpr uint32_t kSlots[4] = {gpu::kImgTaaHistory, gpu::kImgTaaHistory1, gpu::kImgTaaHistory2, gpu::kImgTaaHistory3};
++    BeginLabel(cmd, "vpktaa");
++    const int eye = vr_eye_;
++    const int column = eye & 1;  // (left 0, right 1: the wide views 0/1 and the insets 2/3 are in different target sets)
++    const int read = column * 2 + taa_turn_[eye];
++    const int write = column * 2 + (taa_turn_[eye] ^ 1);
++    const bool reset = vr_reset_[eye];
++    // (The history must be this view's: the other kind of view may have used this set's column.)
++    const bool valid = taa_valid_[eye] && !reset && taa_owner_[read] == eye;
++    if (!valid) {
++        static uint32_t logged = 0;
++        if (logged < 16) {
++            ++logged;
++            LogInfo("vpktaa: view {} history starts again ({})", eye,
++                    reset ? "camera cut or first frame" : taa_owner_[read] != eye && taa_valid_[eye] ? "the set's column changed hands" : "new targets");
++        }
++    }
++    const bool particles = taa_particles_place_.x >= 0.0f;
++    const uint32_t reflection = reflect_post_upscale_ ? gpu::kImgReflectHistoryA + reflect_history_index_ : 0u;
++    UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                     {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
++                     {&motion_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                     {&object_velocity_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                     {&taa_history_[read], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                     {&taa_history_[write], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
++                     {&post_hdr_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
++                     {&post_depth_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
++                     {&post_object_velocity_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
++    if (particles) {
++        UseTargets(cmd, {{&particles_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    }
++    BeginPass(cmd, output_extent_, {{&post_hdr_, false, {}}, {&post_depth_, false, {}}, {&post_object_velocity_, false, {}}, {&taa_history_[write], false, {}}});
++    gpu::PassPush push;
++    push.ids = glm::uvec4(kSlots[read], (valid ? 1u : 0u) | (VrSkipsUpscale() ? 2u : 0u), reflection, main_view_.index);
++    push.f0 = glm::vec4(up_.jitter_pixels.x / static_cast<float>(extent_.width), up_.jitter_pixels.y / static_cast<float>(extent_.height),
++                        1.0f / static_cast<float>(output_extent_.width), 1.0f / static_cast<float>(output_extent_.height));
++    push.f1 = glm::vec4(static_cast<float>(extent_.width), static_cast<float>(extent_.height), vr_taa_sharpness_, 0.0f);
++    push.f2 = particles ? taa_particles_place_ : glm::vec4(-1.0f, 0.0f, 0.0f, 0.0f);
++    push.m = previous_view_projection_;
++    Fullscreen(cmd, taa_, push);
++    vkCmdEndRendering(cmd);
++    UseTargets(cmd, {{&post_hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                     {&post_depth_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                     {&post_object_velocity_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                     {&taa_history_[write], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    taa_owner_[write] = eye;
++    taa_turn_[eye] ^= 1;
++    taa_valid_[eye] = true;
++    EndLabel(cmd);
++}
++
+ void SceneRenderer::ReadUpscaleTimestamps(FrameSlot& slot) {
+     if (!slot.upscale_timed) {
+         return;
 diff --git a/src/engine/render/upscale/upscale.cpp b/src/engine/render/upscale/upscale.cpp
 index 101ab0d..68d420d 100644
 --- a/src/engine/render/upscale/upscale.cpp
@@ -4104,10 +4222,10 @@ index 4bb6e4b..82f38e7 100644
      static constexpr int kPauseMenuPriority = 171;
      static constexpr int kLetterboxPriority = 170;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..fed794e 100644
+index 42d8b01..1868d99 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -16,6 +16,92 @@ struct Entry {
+@@ -16,6 +16,81 @@ struct Entry {
  };
  
  constexpr Entry kTexts[] = {
@@ -4140,24 +4258,15 @@ index 42d8b01..fed794e 100644
 +    {"pc_note_vp_subtitle_height", {"Raises the subtitles from the bottom edge towards the middle of the view (percent of its height), where the headset shows them sharpest. Applies right away.", "", "", "Sube los subtítulos desde el borde inferior hacia el centro de la vista (porcentaje de su altura), donde el visor los muestra más nítidos. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_section_foveation", {"Foveation and sharpness", "", "", "Foveado y nitidez", "", "", ""}},
 +    {"pc_vp_aa", {"Sharp zone antialiasing", "", "", "Antialiasing de la zona nítida", "", "", ""}},
-+    {"pc_vp_aa_fxaa", {"FXAA (basic)", "", "", "FXAA (básico)", "", "", ""}},
-+    {"pc_vp_aa_native", {"MetalFX 100%", "", "", "MetalFX 100 %", "", "", ""}},
-+    {"pc_vp_aa_85", {"MetalFX 85%", "", "", "MetalFX 85 %", "", "", ""}},
-+    {"pc_vp_aa_75", {"MetalFX 75%", "", "", "MetalFX 75 %", "", "", ""}},
-+    {"pc_vp_aa_67", {"MetalFX 67%", "", "", "MetalFX 67 %", "", "", ""}},
-+    {"pc_vp_aa_taa", {"TAA (temporal, sharpened)", "", "", "TAA (temporal, con nitidez)", "", "", ""}},
-+    {"pc_note_vp_aa", {"Smooths the jagged edges of the sharp zone. FXAA: blurs the edges of each frame on its own; soft picture. TAA: the zone is drawn with a tiny shift each frame and several frames are combined: clean edges and much less shimmer at full resolution, with sharpening on top; very fast movement can leave a faint trail. MetalFX 100%: Apple's temporal antialiasing (it may misalign the two eyes slightly). MetalFX 85/75/67%: the zone is drawn smaller and MetalFX rebuilds the full size: more frames per second, less detail. Applies right away.", "", "", "Suaviza los dientes de sierra de la zona nítida. FXAA: difumina los bordes de cada fotograma por separado; imagen blanda. TAA: la zona se dibuja con un desplazamiento diminuto en cada fotograma y se combinan varios: bordes limpios y mucho menos parpadeo a resolución completa, con un afilado encima; un movimiento muy rápido puede dejar una estela tenue. MetalFX 100 %: el antialiasing temporal de Apple (puede desalinear un poco los dos ojos). MetalFX 85/75/67 %: la zona se dibuja más pequeña y MetalFX reconstruye el tamaño completo: más fps, menos detalle. Se aplica al momento.", "", "", ""}},
-+    {"pc_vp_aa_jitter", {"MetalFX alignment", "", "", "Alineación de MetalFX", "", "", ""}},
-+    {"pc_vp_aa_jitter_apple", {"Apple", "", "", "Apple", "", "", ""}},
-+    {"pc_vp_aa_jitter_fsr", {"As DLSS/FSR", "", "", "Como DLSS/FSR", "", "", ""}},
-+    {"pc_vp_aa_jitter_off", {"No jitter (test)", "", "", "Sin jitter (prueba)", "", "", ""}},
-+    {"pc_note_vp_aa_jitter", {"Only for MetalFX (no effect with FXAA or TAA). How the tiny shift MetalFX gives each frame is told to it. If edges look doubled or shadowed (like 3D crosstalk), try the other value. No jitter: a test; edges get more jagged but nothing can be misaligned. Applies right away.", "", "", "Solo para MetalFX (no afecta a FXAA ni a TAA). Cómo se le indica a MetalFX el pequeño desplazamiento que lleva cada fotograma. Si ves los bordes dobles o con sombra (como crosstalk en 3D), prueba el otro valor. Sin jitter: prueba; más dientes de sierra, pero nada puede desalinearse. Se aplica al momento.", "", "", ""}},
-+    {"pc_vp_aa_debug", {"MetalFX test", "", "", "Prueba de MetalFX", "", "", ""}},
-+    {"pc_vp_aa_debug_normal", {"Normal", "", "", "Normal", "", "", ""}},
-+    {"pc_vp_aa_debug_history", {"No history", "", "", "Sin historial", "", "", ""}},
-+    {"pc_vp_aa_debug_motion", {"No motion vectors", "", "", "Sin vectores de movimiento", "", "", ""}},
-+    {"pc_vp_aa_debug_bypass", {"Same path, no MetalFX", "", "", "Mismo camino, sin MetalFX", "", "", ""}},
-+    {"pc_note_vp_aa_debug", {"Only with MetalFX, to find a fault's cause. No history: each frame alone. No motion vectors: the past frames are not moved. Same path, no MetalFX: the picture goes through everything MetalFX uses but MetalFX's own picture is not shown (the plain render, stretched): if the eyes still look too far apart, the fault is in that path, not in MetalFX. Not kept between sessions. Applies right away.", "", "", "Solo con MetalFX, para encontrar la causa de un fallo. Sin historial: cada fotograma solo. Sin vectores de movimiento: los fotogramas anteriores no se desplazan. Mismo camino, sin MetalFX: la imagen pasa por todo lo que usa MetalFX pero no se muestra la de MetalFX (el render tal cual, estirado): si los ojos siguen viéndose demasiado separados, el fallo está en ese camino y no en MetalFX. No se guarda entre sesiones. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_aa_vpktaa", {"VPKTAA (temporal)", "", "", "VPKTAA (temporal)", "", "", ""}},
++    {"pc_vp_aa_fxaa", {"FXAA (basic, to compare)", "", "", "FXAA (básico, para comparar)", "", "", ""}},
++    {"pc_note_vp_aa", {"Smooths the jagged edges of the sharp zone. VPKTAA: the zone is drawn with a tiny shift each frame and several frames are combined: clean edges and much less shimmer, with sharpening on top; very fast movement can leave a faint trail. Its internal resolution and sharpness follow. FXAA: blurs the edges of each frame on its own; softer picture, kept to compare. Applies right away.", "", "", "Suaviza los dientes de sierra de la zona nítida. VPKTAA: la zona se dibuja con un desplazamiento diminuto en cada fotograma y se combinan varios: bordes limpios y mucho menos parpadeo, con un afilado encima; un movimiento muy rápido puede dejar una estela tenue. Su resolución interna y su nitidez van a continuación. FXAA: difumina los bordes de cada fotograma por separado; imagen más blanda, se deja para comparar. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_taa_res", {"VPKTAA internal resolution", "", "", "Resolución interna de VPKTAA", "", "", ""}},
++    {"pc_note_vp_taa_res", {"Only with VPKTAA (no effect with FXAA). 100%: the sharp zone is drawn at its full size and VPKTAA only smooths the edges; the sharpest picture. 90/85/80%: the zone is drawn smaller and VPKTAA rebuilds the full size from the past frames: more frames per second, a little less detail. Applies right away.", "", "", "Solo con VPKTAA (no afecta a FXAA). 100 %: la zona nítida se dibuja a su tamaño completo y VPKTAA solo suaviza los bordes; la imagen más nítida. 90/85/80 %: la zona se dibuja más pequeña y VPKTAA reconstruye el tamaño completo a partir de los fotogramas anteriores: más fps, algo menos de detalle. Se aplica al momento.", "", "", ""}},
++    {"pc_vp_taa_sharp", {"VPKTAA sharpness", "", "", "Nitidez de VPKTAA", "", "", ""}},
++    {"pc_vp_taa_periphery", {"VPKTAA also in the periphery", "", "", "VPKTAA también en la periferia", "", "", ""}},
++    {"pc_note_vp_taa_periphery", {"Only with VPKTAA (no effect with FXAA). The wide, low-detail part of the view outside the sharp circle gets VPKTAA too. It cannot add detail there, but it stops edges flickering and crawling at the side of your vision, which the eye notices most. Costs very little. Turn it off to compare. Applies right away.", "", "", "Solo con VPKTAA (no afecta a FXAA). La parte ancha y de poco detalle de la vista, fuera del círculo nítido, también lleva VPKTAA. Ahí no puede añadir detalle, pero evita que los bordes parpadeen y se muevan por el rabillo del ojo, que es lo que más se nota. Cuesta muy poco. Apágalo para comparar. Se aplica al momento.", "", "", ""}},
++    {"pc_note_vp_taa_sharp", {"Only with VPKTAA (no effect with FXAA). How much the picture is sharpened after combining the frames. 0%: none (softest). Higher: crisper edges and textures; too high can add a bright outline around edges or more shimmer. Applies right away.", "", "", "Solo con VPKTAA (no afecta a FXAA). Cuánto se afila la imagen después de combinar los fotogramas. 0 %: nada (lo más suave). Más alto: bordes y texturas más definidos; demasiado alto puede añadir un contorno claro en los bordes o más parpadeo. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_scale", {"Image size (base resolution)", "", "", "Tamaño de imagen (resolución base)", "", "", ""}},
 +    {"pc_note_vp_restart", {"Base resolution of each eye, relative to what the headset recommends. The foveation percentages (VR page) are of this size. Applies right away.", "", "", "Resolución base de cada ojo, respecto a la que recomienda el visor. Los porcentajes del foveado (página VR) son sobre este tamaño. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_foveation", {"Headset foveation (Apple)", "", "", "Foveado del visor (Apple)", "", "", ""}},
@@ -4165,8 +4274,6 @@ index 42d8b01..fed794e 100644
 +    {"pc_note_vp_vr", {"Turning, subtitles, foveation and sharpness.", "", "", "Giro, subtítulos, foveado y nitidez.", "", "", ""}},
 +    {"pc_vp_fov", {"Drawn field of view", "", "", "Campo de visión dibujado", "", "", ""}},
 +    {"pc_note_vp_fov", {"Cuts the edges of the view with black (100% draws all of it). Nothing to do with foveation. Applies right away.", "", "", "Recorta los bordes de la vista con negro (100 % lo dibuja todo). No tiene nada que ver con el foveado. Se aplica al momento.", "", "", ""}},
-+    {"pc_vp_metalfx", {"MetalFX upscaling", "", "", "Escalado MetalFX", "", "", ""}},
-+    {"pc_note_vp_metalfx", {"Each eye is drawn at the image size and MetalFX enlarges it, sharper than plain stretching. Applies right away.", "", "", "Cada ojo se dibuja al tamaño de imagen y MetalFX lo amplía, con más nitidez que estirarlo. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_gamefov", {"Game foveation", "", "", "Foveado del juego", "", "", ""}},
 +    {"pc_note_vp_gamefov", {"Only a zone in the middle of the view is drawn sharp; everything outside it at a low resolution. The biggest performance gain. Its settings follow. Applies right away.", "", "", "Solo una zona en el centro de la vista se dibuja nítida; todo lo de fuera, a baja resolución. Es lo que más rendimiento da. Sus ajustes van a continuación. Se aplica al momento.", "", "", ""}},
 +    {"pc_vp_periphery", {"Periphery resolution", "", "", "Nitidez de la periferia", "", "", ""}},
@@ -4806,10 +4913,10 @@ index d1485b2..2bcbcd6 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..c5bfbe8 100644
+index d629ab3..31fb4ff 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
-@@ -95,11 +95,22 @@
+@@ -95,11 +95,29 @@
  #include "game/vr_play.h"
  #include "engine/xr/xr_host.h"
  #if PT_VISIONOS
@@ -4820,20 +4927,27 @@ index d629ab3..c5bfbe8 100644
  namespace {
  
 +#if PT_VISIONOS
-+// The headset's antialiasing row: shown FXAA, TAA, MetalFX 100/85/75/67 %; kept (HeadsetSettings::aa)
-+// as 0, 5, 1, 2, 3, 4 so the values saved before TAA keep their meaning.
++// The headset's antialiasing row: shown VPKTAA, FXAA; kept (HeadsetSettings::aa) as 5, 0.
 +[[maybe_unused]] int VpAaToMenu(int aa) {
-+    return aa == 5 ? 1 : aa <= 0 ? 0 : std::clamp(aa, 1, 4) + 1;
++    return aa == 0 ? 1 : 0;
 +}
 +[[maybe_unused]] int VpAaFromMenu(int index) {
-+    return index <= 0 ? 0 : index == 1 ? 5 : std::clamp(index - 1, 1, 4);
++    return index == 1 ? 0 : 5;
++}
++// The VPKTAA internal resolution row: shown 100, 90, 85, 80 %.
++constexpr int kVpTaaResSteps[4] = {100, 90, 85, 80};
++[[maybe_unused]] int VpTaaResToMenu(int percent) {
++    for (int i = 0; i < 4; ++i) {
++        if (kVpTaaResSteps[i] == percent) return i;
++    }
++    return 0;
 +}
 +#endif
 +
  #ifdef PT_RELEASE_LOCKS
  constexpr bool kReleaseLocks = true;
  #else
-@@ -1592,14 +1603,18 @@ public:
+@@ -1592,14 +1610,18 @@ public:
              photo.link = true;
              photo.enabled = app_.window != nullptr && !app_.xr;
              extras.rows.push_back(std::move(photo));
@@ -4852,7 +4966,7 @@ index d629ab3..c5bfbe8 100644
              if (app_.options.release_locks) {
                  auto lock = Row(kLoopLock, "pc_loop_lock", {"pc_extras_start"}, 0, "pc_note_loop_lock");
                  lock.action = true;
-@@ -1611,9 +1626,73 @@ public:
+@@ -1611,9 +1633,76 @@ public:
          if (page_ == kVrPage) {
              const pt::AppSettings::Vr& v = app_.settings.vr;
              pt::game::PcSettingSection vr{"pc_vr", 0, {}};
@@ -4908,14 +5022,17 @@ index d629ab3..c5bfbe8 100644
 +            periphery.wrap = false;
 +            foveation.rows.push_back(std::move(periphery));
 +            foveation.rows.push_back(Row(kVpBorder, "pc_vp_border", OffOn(), h.show_border ? 1 : 0, "pc_note_vp_border"));
-+            // Shown FXAA, TAA, MetalFX 100/85/75/67; kept as aa 0, 5, 1-4 (saved values keep their meaning).
-+            foveation.rows.push_back(Row(kVpAa, "pc_vp_aa", {"pc_vp_aa_fxaa", "pc_vp_aa_taa", "pc_vp_aa_native", "pc_vp_aa_85", "pc_vp_aa_75", "pc_vp_aa_67"},
-+                                         VpAaToMenu(h.aa), "pc_note_vp_aa"));
-+            foveation.rows.push_back(Row(kVpAaJitter, "pc_vp_aa_jitter", {"pc_vp_aa_jitter_apple", "pc_vp_aa_jitter_fsr", "pc_vp_aa_jitter_off"},
-+                                         std::clamp(h.aa_jitter, 0, 2), "pc_note_vp_aa_jitter"));
-+            foveation.rows.push_back(Row(kVpAaDebug, "pc_vp_aa_debug",
-+                                         {"pc_vp_aa_debug_normal", "pc_vp_aa_debug_history", "pc_vp_aa_debug_motion", "pc_vp_aa_debug_bypass"},
-+                                         std::clamp(h.aa_debug, 0, 3), "pc_note_vp_aa_debug"));
++            // Shown VPKTAA, FXAA; kept as aa 5, 0. Then VPKTAA's own two settings.
++            foveation.rows.push_back(Row(kVpAa, "pc_vp_aa", {"pc_vp_aa_vpktaa", "pc_vp_aa_fxaa"}, VpAaToMenu(h.aa), "pc_note_vp_aa"));
++            pt::game::PcSettingRow taa_res = Row(kVpTaaRes, "pc_vp_taa_res", {}, VpTaaResToMenu(h.taa_res), "pc_note_vp_taa_res");
++            for (int percent : kVpTaaResSteps) taa_res.values.push_back(std::format("{}%", percent));
++            taa_res.wrap = false;
++            foveation.rows.push_back(std::move(taa_res));
++            pt::game::PcSettingRow taa_sharp = Row(kVpTaaSharp, "pc_vp_taa_sharp", {}, std::clamp(h.taa_sharpness / 10, 0, 10), "pc_note_vp_taa_sharp");
++            for (int i = 0; i <= 10; ++i) taa_sharp.values.push_back(std::format("{}%", 10 * i));
++            taa_sharp.wrap = false;
++            foveation.rows.push_back(std::move(taa_sharp));
++            foveation.rows.push_back(Row(kVpTaaPeriphery, "pc_vp_taa_periphery", OffOn(), h.taa_periphery ? 1 : 0, "pc_note_vp_taa_periphery"));
 +            foveation.rows.push_back(Row(kVpTiledLights, "pc_vp_tiled_lights", OffOn(), h.tiled_lights ? 1 : 0, "pc_note_vp_tiled_lights"));
 +            return {std::move(vr), std::move(foveation)};
 +#else
@@ -4926,7 +5043,7 @@ index d629ab3..c5bfbe8 100644
              return {std::move(vr)};
          }
          if (page_ == kGraphicsPage) return GraphicsSections();
-@@ -1629,6 +1708,9 @@ public:
+@@ -1629,6 +1718,9 @@ public:
              test.rows.push_back(Row(kMicMonitor, "pc_mic_monitor", OffOn(), app_.microphone_monitor ? 1 : 0, "pc_mic_monitor_note"));
              return {std::move(test)};
          }
@@ -4936,7 +5053,7 @@ index d629ab3..c5bfbe8 100644
          const pt::AppSettings& s = app_.settings;
          std::vector<pt::game::PcSettingSection> out;
          pt::game::PcSettingSection display{"pc_section_display", 0, {}};
-@@ -1863,12 +1945,133 @@ public:
+@@ -1863,12 +1955,134 @@ public:
              s.vr.enabled = value == 1;
              pt::LogInfo("vr: {} at the next start (PC settings)", s.vr.enabled ? "on" : "off");
              break;
@@ -4970,20 +5087,21 @@ index d629ab3..c5bfbe8 100644
 +            pt::visionos::SettingChanged("fov", std::to_string(pt::visionos::Headset().fov));
 +            HeadsetCustom();
 +            return;
-+        case kVpMetalFx:  // (the old MetalFX spatial row: no longer offered)
-+            return;
 +        case kVpAa:
 +            pt::visionos::Headset().aa = VpAaFromMenu(value);
 +            pt::visionos::SettingChanged("aa", std::to_string(pt::visionos::Headset().aa));
 +            return;
-+        case kVpAaJitter:
-+            pt::visionos::Headset().aa_jitter = std::clamp(value, 0, 2);
-+            pt::LogInfo("visionos: MetalFX alignment {} (from the game's menu)", pt::visionos::Headset().aa_jitter);
-+            pt::visionos::SettingChanged("aa_jitter", std::to_string(pt::visionos::Headset().aa_jitter));
++        case kVpTaaRes:
++            pt::visionos::Headset().taa_res = kVpTaaResSteps[std::clamp(value, 0, 3)];
++            pt::visionos::SettingChanged("taa_res", std::to_string(pt::visionos::Headset().taa_res));
 +            return;
-+        case kVpAaDebug:  // (a test for this session only: not kept)
-+            pt::visionos::Headset().aa_debug = std::clamp(value, 0, 3);
-+            pt::LogInfo("visionos: MetalFX test {} (from the game's menu)", pt::visionos::Headset().aa_debug);
++        case kVpTaaSharp:
++            pt::visionos::Headset().taa_sharpness = 10 * std::clamp(value, 0, 10);
++            pt::visionos::SettingChanged("taa_sharpness", std::to_string(pt::visionos::Headset().taa_sharpness));
++            return;
++        case kVpTaaPeriphery:
++            pt::visionos::Headset().taa_periphery = value == 1;
++            pt::visionos::SettingChanged("taa_periphery", value == 1 ? "1" : "0");
 +            return;
 +        case kVpSubtitleSize:
 +            pt::visionos::Headset().subtitle_size = 100 + 25 * std::clamp(value, 0, 6);
@@ -5070,7 +5188,7 @@ index d629ab3..c5bfbe8 100644
          case kFrameLimit:
              if (!app_.options.fps_limit_override) s.display.fps_limit = value == 1 ? 60 : 30;
              break;
-@@ -1939,7 +2142,13 @@ public:
+@@ -1939,7 +2153,13 @@ public:
              std::string reason;
              pt::ApplyGraphicsPreset(s,static_cast<pt::GraphicsPreset>(std::clamp(value,0,4)),app_.scene.RayTracingSupported(reason));
              app_.textures.SetAnisotropy(s.graphics.anisotropy);
@@ -5084,7 +5202,7 @@ index d629ab3..c5bfbe8 100644
              break;
          }
          case kShadowQuality:
-@@ -1995,6 +2204,11 @@ public:
+@@ -1995,6 +2215,11 @@ public:
              return;
          }
          ApplyGraphicsSettings(app_);
@@ -5096,7 +5214,7 @@ index d629ab3..c5bfbe8 100644
          Save();
      }
  
-@@ -2197,6 +2411,9 @@ public:
+@@ -2197,6 +2422,9 @@ public:
          if (id == kGraphics) {
              page_ = kGraphicsPage;
          }
@@ -5106,17 +5224,17 @@ index d629ab3..c5bfbe8 100644
          if (id == kMicrophoneTest) {
              page_ = kMicrophonePage;
              app_.microphone_test = true;
-@@ -2285,6 +2502,9 @@ private:
+@@ -2285,6 +2513,9 @@ private:
          kArchive, kArchiveLock,
          kVr, kVrMode, kVrFlashlight, kVrTurn,
          kFrameLimit,
-+        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpMetalFx, kVpFov, kVpRecenter,
-+        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp, kVpAa, kVpAaJitter, kVpAaDebug, kVpSceneDepth,
++        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpFov, kVpRecenter,
++        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
 +        kVpSubtitleSize, kVpSubtitleHeight, kVpTiledLights,
          kLoopFirst = 1000,
          kRunSplitFirst = 3000,
          kModFirst = 2000,
-@@ -2572,6 +2792,9 @@ private:
+@@ -2572,6 +2803,9 @@ private:
      int page_ = kMainPage;
      static constexpr float kMouseSteps[] = {0.25f, 0.35f, 0.5f, 0.7f, 1.0f, 1.4f, 2.0f, 2.8f, 4.0f, 5.0f};
      static constexpr float kDeadZoneSteps[] = {0.0f, 0.05f, 26.0f / 255.0f, 0.15f, 0.2f, 0.25f, 0.3f};
@@ -5126,7 +5244,7 @@ index d629ab3..c5bfbe8 100644
  
      static pt::game::PcSettingRow Row(int id, std::string label, std::vector<std::string> values, int value, std::string note) {
          pt::game::PcSettingRow row;
-@@ -2642,6 +2865,85 @@ private:
+@@ -2642,6 +2876,85 @@ private:
          return Row(kEnhancedTextures,"pc_enhanced_textures",std::move(values),app_.settings.graphics.enhanced_textures?1:0,note);
      }
  
@@ -5212,7 +5330,7 @@ index d629ab3..c5bfbe8 100644
      std::vector<pt::game::PcSettingSection> GraphicsSections() const {
          const auto& s=app_.settings;
          std::string reason;
-@@ -2690,7 +2992,9 @@ private:
+@@ -2690,7 +3003,9 @@ private:
      std::vector<pt::game::PcSettingSection> TextureSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection textures{"pc_section_textures",0,{}};
@@ -5222,7 +5340,7 @@ index d629ab3..c5bfbe8 100644
          auto anisotropy=Row(kAnisotropy,"pc_anisotropy",{"pc_off","2x","4x","8x","16x"},g.anisotropy>=16?4:g.anisotropy>=8?3:g.anisotropy>=4?2:g.anisotropy>=2?1:0,"pc_note_anisotropy");
          anisotropy.wrap=false;textures.rows.push_back(std::move(anisotropy));
          textures.rows.push_back(Row(kTextureDetail,"pc_texture_detail",{"pc_detail_reduced","pc_preset_original","pc_detail_fine"},g.texture_detail,"pc_note_texture_detail"));
-@@ -2724,6 +3028,14 @@ private:
+@@ -2724,6 +3039,14 @@ private:
      std::vector<pt::game::PcSettingSection> EffectSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection effects{"pc_graphics_effects",0,{}};
@@ -5237,7 +5355,7 @@ index d629ab3..c5bfbe8 100644
          effects.rows.push_back(Row(kDepthOfField,"pc_dof",OffOn(),g.depth_of_field?1:0,"pc_note_dof"));
          effects.rows.push_back(Row(kMotionBlur,"pc_motion_blur",OffOn(),g.motion_blur?1:0,"pc_note_motion_blur"));
          effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
-@@ -3095,7 +3407,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3095,7 +3418,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
      game.SetThirdPerson(app.settings.camera.third_person || options.third_person);
      pt::game::GameSound sound(game);
      std::vector<float> captured;
@@ -5247,7 +5365,7 @@ index d629ab3..c5bfbe8 100644
          sound.System().SetMasterVolume(app.settings.audio.volume);
          if (options.seed) {
              sound.System().SetRandomSeed(options.seed);
-@@ -3139,14 +3452,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3139,14 +3463,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
      const bool pads = app.window || options.virtual_pads;
      if (pads) {
          input.Init();
@@ -5264,7 +5382,7 @@ index d629ab3..c5bfbe8 100644
      script.SetPads(options.virtual_pads ? &virtual_pads : nullptr, &input);
      std::vector<float> offline_audio;
      double audio_device_time = 0.0;
-@@ -3207,7 +3520,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3207,7 +3531,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
      float accumulator = 0.0f;
      pt::Camera tick_camera_from = game.ViewCamera();
      pt::Camera motion_camera_from = tick_camera_from;
@@ -5275,7 +5393,7 @@ index d629ab3..c5bfbe8 100644
      TickState tick_state;
      std::vector<glm::mat4> blended_skins;
      static const bool render_trace = std::getenv("PT_RENDER_TRACE") != nullptr;
-@@ -3434,8 +3749,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3434,8 +3760,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  visible = false;
                  SDL_Delay(10);
              }
@@ -5295,7 +5413,7 @@ index d629ab3..c5bfbe8 100644
          const std::optional<bool> forced_focus = script.ForcedFocus(frame);
          if (app.window || forced_focus || vr) {
              const bool focused = forced_focus ? *forced_focus
-@@ -3487,6 +3812,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3487,6 +3823,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
          float dt = options.display_rate > 0.0f ? 1.0f / options.display_rate : 1.0f / options.tick_rate;
@@ -5309,7 +5427,7 @@ index d629ab3..c5bfbe8 100644
          if (app.window) {
              const uint64_t now = SDL_GetTicksNS();
              dt = std::clamp(static_cast<float>(now - last_ticks) * 1e-9f, 0.0001f, 0.1f);
-@@ -3554,7 +3886,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3554,7 +3897,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (polled.pointer_valid) {
              pending_input.pointer = polled.pointer;
              pending_input.pointer_valid = true;
@@ -5318,7 +5436,7 @@ index d629ab3..c5bfbe8 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
-@@ -3876,8 +4208,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3876,8 +4219,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
              previous_microphone_test = app.microphone_test;
          }
          const bool voice_file = !voice_input.empty();
@@ -5335,7 +5453,7 @@ index d629ab3..c5bfbe8 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4123,23 +4461,149 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4123,23 +4472,145 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.SetRenderExtent(stereo.render);
                  scene_builder.Build(game, stereo.head, scene_dt, lighting, light_blend);
                  last_scene_time = game.Time();
@@ -5377,19 +5495,21 @@ index d629ab3..c5bfbe8 100644
 +                }
 +#endif
 +#if PT_VISIONOS
-+                // Antialiasing of the sharp views: the engine's TAA (5), MetalFX temporal (1-4; one
-+                // history per view, the wide views skip it: SceneRenderer::SetupUpscaler) or FXAA (0).
++                // Antialiasing of the sharp views: VPKTAA, the engine's own (5; at its internal
++                // resolution and sharpness), or FXAA (0: toggles.fxaa with no upscaler).
 +                {
-+                    if (pt::visionos::Headset().aa == 5 && !app.scene.TaaReady()) {
-+                        pt::LogWarn("vr: TAA cannot run (no pipeline): FXAA instead");
++                    const pt::visionos::HeadsetSettings& hs = pt::visionos::Headset();
++                    if (hs.aa == 5 && !app.scene.TaaReady()) {
++                        pt::LogWarn("vr: VPKTAA cannot run (no pipeline): FXAA instead");
 +                        pt::visionos::Headset().aa = 0;  // (for this session only: the saved choice stays)
 +                    }
-+                    const int aa = pt::visionos::Headset().aa;
-+                    app.scene.SetVrTaa(aa == 5);
++                    const int aa = hs.aa;
++                    app.scene.SetVrTaa(aa == 5, static_cast<float>(hs.taa_res) / 100.0f, static_cast<float>(hs.taa_sharpness) / 100.0f,
++                                    hs.taa_periphery);
 +                    pt::UpscaleSettings& u = app.scene.upscale;
-+                    u.kind = aa > 0 && aa < 5 ? pt::UpscalerKind::MetalFx : pt::UpscalerKind::Off;
-+                    u.quality = aa > 1 ? pt::UpscaleQuality::Custom : pt::UpscaleQuality::NativeAA;
-+                    u.scale = pt::visionos::AaScale(aa);
++                    u.kind = pt::UpscalerKind::Off;
++                    u.quality = pt::UpscaleQuality::NativeAA;
++                    u.scale = 1.0f;
 +                    u.sharpness = 0.0f;
 +                    u.frame_generation = pt::FrameGenKind::Off;
 +                }
@@ -5426,8 +5546,6 @@ index d629ab3..c5bfbe8 100644
                      app.scene.SetVrEye(eye);
 -                    app.scene.Render(stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
-+                    app.scene.SetVrNoJitter(pt::visionos::Headset().aa_jitter == 2);
-+                    app.scene.SetVrUpscaleBypass(pt::visionos::Headset().aa_debug == 3);
 +                    app.scene.toggles.tiled_lights = pt::visionos::Headset().tiled_lights;
 +#endif
 +#if PT_VISIONOS
@@ -5449,10 +5567,6 @@ index d629ab3..c5bfbe8 100644
 +                    app.scene.Render(inset ? stereo.insets[eye - 2] : stereo.eyes[eye], draw_items, lighting, eye == 0 ? dt : 0.0f);
 +#if PT_VISIONOS
 +                    app.scene.SetVrDepthOut(VK_NULL_HANDLE, VK_NULL_HANDLE, {});  // (not left for another render)
-+                    if (pt::visionos::Headset().aa > 0 && pt::visionos::Headset().aa < 5 && !app.scene.UpscaleStatistics().error.empty()) {
-+                        pt::LogWarn("vr: MetalFX temporal cannot run ({}): FXAA instead", app.scene.UpscaleStatistics().error);
-+                        pt::visionos::Headset().aa = 0;  // (for this session only: the saved choice stays)
-+                    }
 +                    // The frame slots alternate over the views: the times read now are those of the view
 +                    // drawn two renders ago (with insets, the other eye's view of the same kind).
 +                    pt::visionos::ReportEye(views == 4 ? kInsetOrder[(k + 2) % 4] : eye, views, app.scene.Stats().gpu_ms, app.scene.Stats().pass_ms,
@@ -5491,7 +5605,7 @@ index d629ab3..c5bfbe8 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +5032,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +5039,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -5508,7 +5622,7 @@ index d629ab3..c5bfbe8 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +5078,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +5085,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

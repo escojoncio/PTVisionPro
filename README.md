@@ -59,7 +59,8 @@ Konami or Kojima Productions.
   press of the Digital Crown).
 - **Settings**: everything is in the launcher and in the game's own menu (its PC page becomes a
   Vision Pro page): presets for the Vision Pro M2 and M5 or custom, 90 or 45 frames a second,
-  image size with MetalFX upscaling, field of view, foveation, graphics, turning and comfort.
+  image size, sharp zone antialiasing (VPKTAA, the engine's own temporal antialiasing, or FXAA), field
+  of view, foveation, graphics, turning and comfort.
   Both places stay in step.
 
 ## Layout

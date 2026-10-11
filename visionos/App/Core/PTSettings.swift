@@ -50,13 +50,16 @@ struct PTSettings: Codable, Equatable {
     /// Compositor Services' render quality with foveation (visionOS 26): 0 leaves the system's
     /// own; 0.5 to 1 asks for that much (1: the sharpest, largest drawables the system offers).
     var compositorQuality: Float = 0
-    /// (Old: MetalFX spatial over the whole eye. No longer used; the core ignores it.)
-    var metalFX = false
-    /// Antialiasing of the sharp zone: 0 FXAA, 1 MetalFX temporal at 100 %, 2-4 MetalFX temporal
-    /// drawing at 85, 75 or 67 % and rebuilding the full size. Not part of a preset.
-    var aa = 5  // 0 FXAA, 1-4 MetalFX 100/85/75/67 %, 5 TAA (the engine's own)
-    /// How MetalFX is told the frames' jitter: 0 Apple's sign, 1 as DLSS/FSR, 2 none (a test).
-    var aaJitter = 0
+    /// Antialiasing of the sharp zone: 5 VPKTAA (the engine's own temporal antialiasing), 0 FXAA
+    /// (kept to compare). Any other value is read as 5. Not part of a preset.
+    var aa = 5
+    /// VPKTAA only: the sharp zone drawn at this percent of its size (80, 85, 90 or 100) and
+    /// rebuilt to the full size from the past frames (100: antialiasing only, the sharpest).
+    var taaRes = 100
+    /// VPKTAA only: how much its picture is sharpened, percent (0 to 100, steps of 10).
+    var taaSharpness = 50
+    /// VPKTAA only: the wide, low-detail views outside the sharp circle get it too.
+    var taaPeriphery = true
     /// Subtitles in the headset: size, percent of the original's (100 to 250).
     var subtitleSize = 175
     /// ...and how far up from the bottom edge, percent of the view's height (0 to 40).
@@ -131,7 +134,6 @@ struct PTSettings: Codable, Equatable {
             settings.anisotropy = 8
             settings.foveation = true
             settings.compositorQuality = 0
-            settings.metalFX = false
         case .m5:
             settings.preset = .m5
             settings.resolutionScale = 0.85
@@ -151,7 +153,6 @@ struct PTSettings: Codable, Equatable {
             settings.anisotropy = 16
             settings.foveation = true
             settings.compositorQuality = 0
-            settings.metalFX = false
         }
         return settings
     }
@@ -203,7 +204,6 @@ struct PTSettings: Codable, Equatable {
         anisotropy = base.anisotropy
         foveation = base.foveation
         compositorQuality = base.compositorQuality
-        metalFX = base.metalFX
         sharpen = base.sharpen
         gameFoveation = base.gameFoveation
         center = base.center
@@ -220,7 +220,7 @@ struct PTSettings: Codable, Equatable {
             && targetFPS == base.targetFPS && fov == base.fov && graphicsPreset == base.graphicsPreset
             && shadows == base.shadows && ssao == base.ssao && bloom == base.bloom
             && reflections == base.reflections && anisotropy == base.anisotropy && foveation == base.foveation
-            && compositorQuality == base.compositorQuality && metalFX == base.metalFX && sharpen == base.sharpen
+            && compositorQuality == base.compositorQuality && sharpen == base.sharpen
             && gameFoveation == base.gameFoveation && center == base.center && centerUp == base.centerUp
             && centerResolution == base.centerResolution && periphery == base.periphery
     }
@@ -279,9 +279,12 @@ struct PTSettings: Codable, Equatable {
         case periphery = "peripheryDensity"
         // Degrees now (it used to be a share of the field: the earlier choice does not carry over).
         case center = "sharpZoneDegrees"
-        case compositorQuality, metalFX, sharpen, gameFoveation, centerResolution, centerUp
-        case aa = "sharpZoneAntialiasingV2"
-        case aaJitter = "metalFXAlignment"
+        case compositorQuality, sharpen, gameFoveation, centerResolution, centerUp
+        // A new key: everybody starts on VPKTAA (the earlier choices were MetalFX or the first TAA).
+        case aa = "sharpZoneAntialiasingV3"
+        case taaRes = "vpktaaResolution"
+        case taaSharpness = "vpktaaSharpness"
+        case taaPeriphery = "vpktaaPeriphery"
         case sceneDepth, subtitleSize, subtitleHeight
         case tiledLights = "tiledLights"
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
@@ -307,9 +310,10 @@ struct PTSettings: Codable, Equatable {
         hdr = (try? c.decodeIfPresent(Int.self, forKey: .hdr)) ?? base.hdr
         foveation = (try? c.decodeIfPresent(Bool.self, forKey: .foveation)) ?? base.foveation
         compositorQuality = (try? c.decodeIfPresent(Float.self, forKey: .compositorQuality)) ?? base.compositorQuality
-        metalFX = false  // (the old spatial MetalFX is gone: a saved "on" must not keep the preset from matching)
-        aa = min(max((try? c.decodeIfPresent(Int.self, forKey: .aa)) ?? base.aa, 0), 5)
-        aaJitter = min(max((try? c.decodeIfPresent(Int.self, forKey: .aaJitter)) ?? base.aaJitter, 0), 2)
+        aa = Self.sanitizedAA((try? c.decodeIfPresent(Int.self, forKey: .aa)) ?? base.aa)
+        taaRes = Self.sanitizedTaaRes((try? c.decodeIfPresent(Int.self, forKey: .taaRes)) ?? base.taaRes)
+        taaSharpness = Self.sanitizedTaaSharpness((try? c.decodeIfPresent(Int.self, forKey: .taaSharpness)) ?? base.taaSharpness)
+        taaPeriphery = (try? c.decodeIfPresent(Bool.self, forKey: .taaPeriphery)) ?? base.taaPeriphery
         sceneDepth = (try? c.decodeIfPresent(Bool.self, forKey: .sceneDepth)) ?? base.sceneDepth
         tiledLights = (try? c.decodeIfPresent(Bool.self, forKey: .tiledLights)) ?? base.tiledLights
         subtitleSize = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleSize)) ?? base.subtitleSize, 100), 250)
@@ -331,6 +335,19 @@ struct PTSettings: Codable, Equatable {
         language = (try? c.decodeIfPresent(String.self, forKey: .language)) ?? base.language
         showPerformanceOverlay = (try? c.decodeIfPresent(Bool.self, forKey: .showPerformanceOverlay)) ?? base.showPerformanceOverlay
         gamePath = (try? c.decodeIfPresent(String.self, forKey: .gamePath)) ?? base.gamePath
+    }
+
+    // MARK: - Antialiasing values (as the core reads them: pt_visionos_settings.h)
+
+    /// 0 stays FXAA; anything else is VPKTAA (5).
+    static func sanitizedAA(_ value: Int) -> Int { value == 0 ? 0 : 5 }
+    /// The nearest of 80, 85, 90, 100.
+    static func sanitizedTaaRes(_ value: Int) -> Int {
+        value >= 95 ? 100 : value >= 88 ? 90 : value >= 83 ? 85 : 80
+    }
+    /// 0 to 100 in steps of 10.
+    static func sanitizedTaaSharpness(_ value: Int) -> Int {
+        (min(max(value, 0), 100) + 5) / 10 * 10
     }
 
     // MARK: - What the game core is given
@@ -364,8 +381,10 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_HDR=\(hdr)",
             "PT_VP_FOVEATION=\(flag(foveation))",
             "PT_VP_COMPOSITOR_QUALITY=\(String(format: "%.2f", compositorQuality))",
-            "PT_VP_AA=\(min(max(aa, 0), 5))",
-            "PT_VP_AA_JITTER=\(min(max(aaJitter, 0), 2))",
+            "PT_VP_AA=\(Self.sanitizedAA(aa))",
+            "PT_VP_TAA_RES=\(Self.sanitizedTaaRes(taaRes))",
+            "PT_VP_TAA_SHARPNESS=\(Self.sanitizedTaaSharpness(taaSharpness))",
+            "PT_VP_TAA_PERIPHERY=\(flag(taaPeriphery))",
             "PT_VP_SCENE_DEPTH=\(flag(sceneDepth))",
             "PT_VP_TILED_LIGHTS=\(flag(tiledLights))",
             "PT_VP_SUBTITLE_SIZE=\(subtitleSize)",

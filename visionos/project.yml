@@ -73,7 +73,6 @@ targets:
           - $(PT_LINK_FLAGS)
           - -lc++
           - -framework CompositorServices
-          - -framework MetalFX
           - -framework ARKit
           - -framework Metal
           - -framework MetalKit

@@ -5,68 +5,52 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nativo + MoltenVK
 (con `patches/moltenvk/0001-rasterization-rate-map.patch` y `0002-metal-encode-command.patch`).
 
-## Estado (última build: 49, `releases/download/build-49/PTVisionPro-49.ipa`; sin probar en el visor)
+## Estado (última build lanzada: 50, VPKTAA; última probada: 49)
 
 - Juego completo jugable de principio a fin (log pt (27), build 42). Sin cierres desde la build 14.
 - Ajustes de referencia del usuario: imagen 50 %, zona nítida 70° al 100 %, altura -10°, periferia 10 %, sombras altas,
-  SSAO, bloom, reflejos, anisotrópico 8x, 45 fps. Coste pt (34) (habitación inicial, M2, MetalFX 100 %): GPU 28–30 ms;
-  inset/upscale 3,35 + inputs 0,46 ms ×2 insets, lighting 2,25, compose+forward 1,79, reflections 1,44, occlusion 0,68.
-- Descartados por el usuario como antialiasing: FXAA (borroso), SMAA (sin probar en el visor; lo rechazó viendo imágenes),
-  MetalFX temporal (su salida separa la estereoscopia; probado en build 47). TBDR descartado (build 48: no es el cuello).
+  SSAO, bloom, reflejos, anisotrópico 8x, 45 fps.
+- Build 49 (logs pt (35)/(36)): TAA viejo 0,8–1,0 ms/inset + copia/resolve ≈1,5–1,8 ms/inset; luces por teselas sin
+  ganancia (se quedan, opción de menú). Centro 100 % → 22–30 fps (GPU 32–40 ms); 80 % → 29–36 fps. Para 45 fps: GPU < 22 ms.
+- Antialiasing: el usuario descartó MetalFX (separa la estereoscopia, build 47) y SMAA; FXAA se queda solo para comparar.
+  TBDR descartado (build 48). MetalFX y la sonda TBDR borrados del proyecto en la build 50.
 
-## Build 49 (sin probar en el visor)
+## Build 50 (sin probar en el visor): VPKTAA
 
-1. **TAA propio** (`HeadsetSettings::aa` = 5, por defecto; Swift `aa`, clave nueva `sharpZoneAntialiasingV2` para que todos
-   empiecen en TAA). Menú: FXAA / TAA / MetalFX 100/85/75/67 (índice ↔ valor: `VpAaToMenu`/`VpAaFromMenu` en main.cpp; 0,5,1,2,3,4).
-   - `shaders/taa.frag` (nuevo): filtro de reconstrucción 3x3 (gaussiana tipo Blackman-Harris) sobre el render con jitter,
-     movimiento del más cercano (3x3), historia Catmull-Rom 5 taps, recorte por varianza en YCoCg (1,1 σ), mezcla en
-     tonemap reversible (0,92 quieto → 0,80 a 8 px/frame), `Sane()` contra NaN/Inf, `Expand` con tope.
-   - Afilado CAS en `upscale_resolve.frag` (`Sharpen`, `f1.w`; la historia no se afila). `PT_TAA_SHARPEN` (0,5),
-     `PT_TAA_TUNING` (quieto,movimiento,σ), `PT_TAA_MIP_BIAS` (-0,5).
-   - `scene_upscale.cpp`: rama TAA en `SetupUpscaler` (jitter Halton 8 fases por ojo, sin backend, `taa_active_`), en
-     `RecordUpscale` pasada "taa resolve" → `upscaled_` → copia a la columna del ojo de `taa_history_` (2 columnas, slot 36
-     `kImgTaaHistory`, en el stash por juego de objetivos); `RecordUpscaleInputs` sin máscara reactiva ni flashlight split;
-     sin `RecordOpaqueSnapshot` (scene_frame.cpp). Historia inválida si la vista no pasó por TAA o `vr_reset_`.
-   - Sin pipeline → FXAA con aviso (main.cpp). Log: `taa: on WxH view N`, `taa: view N history starts again`.
-2. **Luces por teselas** (`tiled_lights`, def. sí; menú «Luces por teselas», launcher toggle, `PT_VP_TILED_LIGHTS`):
-   CPU proyecta la caja de cada luz a teselas (≥32 px, rejilla ≤64x64), máscaras de 64 luces en `FrameData.light_tiles`
-   (escritas en el buffer mapeado del slot), `light_all.frag` recorre solo los bits de su tesela. Cae a volúmenes con
-   >64 luces, VRR, RT, contacto o espejo. Log `cull` añade `tiled in N%: X lights, avg Y per tile`.
-3. Atajos exactos: `lighting.glsl` sale antes de sombras si NdotL ≤ 0 y no translúcido; `reflect_make.frag` corta la marcha
-   al encontrar impacto o terminar.
-4. Sonda TBDR: llamada quitada (`tbdr_probe.mm` sigue compilándose).
+- `shaders/vpktaa.frag` (nuevo; `taa.frag` y `tbdr_probe*` borrados): una pasada por vista que sustituye al resolve
+  (`RecordVpkTaa` en `scene_upscale.cpp`): 3x3 de render con jitter → reconstrucción gaussiana (Blackman-Harris) + afilado
+  contra la media del 3x3 tipo CAS (×1,6 en movimiento, recortado al min/max: sin halos; no en la periferia); movimiento del
+  más cercano: objetos desde `motion_`, cámara calculada en el shader desde la profundidad (`motion_` se limpia a 1000 =
+  "sin objeto"; ya no hay pasada `upscale_motion` con VPKTAA); historia Catmull-Rom 5 taps; caja de varianza YCoCg 1,25σ
+  (zonas planas) → 0,85σ (bordes de profundidad), recortada al min/max; antiparpadeo (acuerdo de luma); disoclusión: la
+  historia guarda en `.a` la distancia (ViewZ), se rechaza si guardaba algo más cercano que `previous.w` (tolerancia
+  max(5 %, 1,5× rango de profundidad del 3x3)); reactivo de partículas (`particles_` con `SharePlace`,
+  `taa_particles_place_` en scene_frame.cpp); pesos 0,93 quieto → 0,80 a 8 px/frame (tope 0,97). Salidas MRT: post_hdr
+  (+ capa de reflejos como el resolve), post_depth, post_object_velocity, historia siguiente (HDR plano RGBA16F + distancia).
+- Historias: `taa_history_[4]` por juego de objetivos (columna = ojo & 1, ×2 turnos), ranuras 56–59
+  (`kImgTaaHistory..3`; `kImageSlots` 60, `images[60]`), dueño por imagen `taa_owner_` (en el stash). `upscaled_` no se crea
+  en el visor. Log: `vpktaa: on RxR -> OxO view N`, `vpktaa: view N history starts again (motivo)`, etiqueta GPU `vpktaa`.
+- Resolución interna (TAAU) 100/90/85/80 %: render al %, fases de jitter max(8, 8/r²), mip bias −0,5 + log2(r), confianza por
+  distancia a la muestra más cercana. Periferia: VPKTAA también en las vistas anchas (a su tamaño, sin afilado).
+- Ajustes (agente): `HeadsetSettings::aa` 5 VPKTAA (def.) / 0 FXAA; `taa_res` (100), `taa_sharpness` (50), `taa_periphery`
+  (sí). Env `PT_VP_AA`, `PT_VP_TAA_RES`, `PT_VP_TAA_SHARPNESS`, `PT_VP_TAA_PERIPHERY`; claves `aa`, `taa_res`,
+  `taa_sharpness`, `taa_periphery`; Swift `aa` (`sharpZoneAntialiasingV3`), `taaRes`, `taaSharpness`, `taaPeriphery`.
+  Menú: filas `kVpAa` (VPKTAA/FXAA), `kVpTaaRes`, `kVpTaaSharp`, `kVpTaaPeriphery`. `SetVrTaa(on, scale, sharpness, periphery)`.
+  Sin pipeline → FXAA en la sesión. Con VRR activo VPKTAA no corre (FXAA).
+- MetalFX fuera: `metalfx_upscaler.mm`, `tbdr_probe.mm`, `-framework MetalFX`, camino MetalFX espacial del host,
+  `aa_jitter`/`aa_debug`/`AaScale`, `SetVrNoJitter`/`SetVrUpscaleBypass`. Quedan sin uso (inofensivos): `UpscalerKind::MetalFx`
+  en el motor y el parche MoltenVK 0002.
 
 ## Pendiente (en orden)
 
-Resultado build 49 (logs pt (35) y pt (36)): sin fallos visibles. TAA 0,8–1,0 ms/inset ("taa resolve") + copia/resolve
-≈1,5–1,8 ms/inset (FXAA 0,07). Luces por teselas SIN ganancia (pasillo 23 luces: ~11 por tesela; lights 3,5–3,6 ms/inset
-con y sin). Centro (pt (35), M2): 100 % → 22–30 fps (GPU 32–40 ms); 80 % → 29–36 fps (GPU 28–32); térmico fair desde 287 s.
-Para 45 fps hace falta GPU < 22 ms: el centro no basta; coste fijo: sombras 2,5–3 ms (pasillo), vistas anchas ~5, composición ~2.
-
-**Build 50 (decidido con el usuario):**
-1. **Quitar MetalFX y FXAA** (decisión del usuario: solo nuestro TAA). MetalFX: `visionos/core/metalfx_upscaler.mm`,
-   `UpscalerKind::MetalFx` en VR, aa 1–4, `aa_jitter`/`aa_debug` (filas de menú, Swift `aaJitter`, textos
-   `pc_vp_aa_jitter*`/`pc_vp_aa_debug*`), `SetVrNoJitter`/`SetVrUpscaleBypass`; parche MoltenVK 0002 y `tbdr_probe.mm` si nada
-   más usa `vkCmdEncodeMetalMVK`. FXAA: en VR sin FXAA (`toggles.fxaa` off en las vistas del visor; las anchas siguen sin AA
-   como ahora: periferia). Fila «Antialiasing» del menú y picker del launcher fuera; `HeadsetSettings::aa` se elimina (o fijo
-   TAA). Si el pipeline TAA falla: resolve sin AA + aviso en el log.
-2. **Un solo TAA** con opción «Resolución interna del TAA: 100/90/85/80 %» (def. 100 % = build 49); <100 % = reconstrucción
-   (TAAU): render al %, salida al tamaño del inset, jitter en píxeles de render, filtro evaluado en píxeles de salida,
-   historia a tamaño de salida; fases de jitter 8·(salida/render)².
-3. **Rendimiento del TAA** (objetivo ≤0,7 ms/inset, hoy ~1,6): fusionar en el resolve (`upscale_resolve.frag` escribe
-   post_hdr/post_depth/post_velocity + historia por MRT; sin `upscaled_` ni copia); afilado en el tonemap; movimiento de
-   cámara calculado en el TAA desde la profundidad (pasada `upscale_motion` solo para objetos móviles); lecturas con
-   textureGather; aritmética en float16 (mediump; ALU fp16 al doble en Apple GPU).
-4. **Calidad del TAA:** (a) rechazo de historia por profundidad previa (disoclusión: sin estelas al aparecer algo);
-   (b) recorte adaptativo según bordes: discontinuidad de profundidad/luma en el 3x3 → caja más estrecha (bordes nítidos
-   sin fantasmas), zonas planas → caja más ancha (menos parpadeo); (c) antiparpadeo de Lottes (peso por diferencia de luma
-   historia/actual) para detalles finos y especulares (rejillas, marcos, brillo del suelo mojado); (d) filtro de
-   reconstrucción más nítido en quieto (lóbulo negativo tipo Mitchell/Lanczos recortado) y Blackman-Harris al moverse;
-   (e) afilado que sube con la velocidad (compensa el desenfoque al girar); (f) máscara reactiva barata de partículas/
-   transparentes a partir de `particles_` (menos historia ahí, sin estelas); (g) opción de menú «Nitidez del TAA».
-5. Después: sombras (caché de mapas estáticos y redibujo solo de los objetos que se mueven, misma calidad PS4) y vistas anchas.
-6. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos.
-7. 45→90 de verdad (spacewarp propio) si la reproyección con profundidad convence.
+1. Log de la build 50: líneas `vpktaa:`, coste `vpktaa` en `gpu labels` (objetivo ≤ 0,7 ms/inset), fps con 100/90/85/80 %
+   y periferia sí/no. Preguntar: nitidez, estelas (partículas, objetos), parpadeo en suelos lejanos, aspecto de la periferia.
+2. Afinar constantes de `vpktaa.frag` (KEEP_*, SIGMA_*, DISOCCLUSION, factor de afilado) según lo que vea.
+3. Conocido menor: `taa_valid_` no caduca si una vista se salta frames con otra vista usando la misma columna (raro).
+   `kResVrrMap` (35) pisa la tesela 1 del desenfoque de movimiento (solo con VRR, apagado).
+4. Rendimiento: sombras (caché de mapas estáticos, redibujo solo de lo que se mueve), vistas anchas, bloom, composición.
+5. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos.
+6. 45→90 de verdad (spacewarp propio) si la reproyección con profundidad convence.
 
 ## Funciones vigentes (dónde está cada cosa)
 
@@ -80,12 +64,9 @@ Para 45 fps hace falta GPU < 22 ms: el centro no basta; coste fijo: sombras 2,5�
   Compartido: sombras (atlas estable + caché de teselas), exposición (vista 0), partículas (ancha → inset),
   bloom (uno por frame: `SetVrBloomShare`, `Stereo::bloom_place`; `PT_BLOOM_PER_EYE=1` lo desactiva).
   Composición: `inset_fragment` (círculo con fundido 15 %, aro rojo opcional).
-- **AA de la zona nítida** (`HeadsetSettings.aa`, def. 5 TAA): 0 FXAA; 1–4 MetalFX temporal 100/85/75/67 % (`AaScale`); 5 TAA propio.
-  `metalfx_upscaler.mm`: `UpscalerKind::MetalFx`, clase por `NSClassFromString` + `objc_msgSend` (el SDK de visionOS la
-  marca no disponible), un scaler por vista, encode dentro del command buffer de Vulkan con `vkCmdEncodeMetalMVK`
-  (parche MoltenVK 0002). Motor: historia por vista (`vr_last_camera_[4]`, `vr_jitter_index_[4]`, `vr_reset_[4]`,
-  objetos avanzan en la vista 0), anchas sin reescalado (`VrSkipsUpscale`), SSR/espejo temporal off en VR.
-  Si falla: `aa = 0` en la sesión (main.cpp).
+- **AA del visor** (`HeadsetSettings.aa`, def. 5): 5 VPKTAA (`vpktaa.frag`, ver build 50), 0 FXAA (post, sin upscaler).
+  Motor: historia por vista (`vr_last_camera_[4]`, `vr_jitter_index_[4]`, `vr_reset_[4]`, objetos avanzan en la vista 0),
+  SSR/espejo temporal off en VR. Sin pipeline VPKTAA: `aa = 0` en la sesión (main.cpp).
 - **Profundidad al compositor** (`scene_depth`, def. sí): imágenes R32F gemelas de ojos/insets (`CreateDepthImages`),
   `xr_depth.frag` (`RecordVrDepth`) escribe distancias; composición `[[depth(any)]]` vía `SceneDepth`.
 - **45 fps**: `SetFrameDivisor(2)` + `cp_layer_renderer_set_minimum_frame_repeat_count`; la app no puede elegir los Hz.

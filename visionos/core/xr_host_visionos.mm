@@ -38,7 +38,6 @@
 #import <CompositorServices/CompositorServices.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#import <MetalFX/MetalFX.h>
 #import <simd/simd.h>
 
 #include <algorithm>
@@ -62,19 +61,13 @@
 #include "engine/platform/apple_host.h"
 #include "engine/platform/graphics_presets.h"
 
-namespace pt {
-void RegisterMetalFxUpscaler();  // metalfx_upscaler.mm
-}
-
 // The game loop's last turn (steady clock, ns) and its thread: the watchdog's view of it.
 namespace pt::visionos {
 std::atomic<int64_t> g_loop_ns{0};
 std::atomic<unsigned> g_game_thread{0};
-// The GPU time of the last composition (our Metal pass onto the headset's drawable, MetalFX
-// included), for the log: it is GPU work besides the game's views.
+// The GPU time of the last composition (our Metal pass onto the headset's drawable), for the
+// log: it is GPU work besides the game's views.
 std::atomic<float> g_composite_ms{0.0f};
-// TBDR probe (tbdr_probe.mm): once per session start, results in the log.
-void RunTbdrProbe(vk::Context& ctx, id<MTLDevice> device, id<MTLCommandQueue> queue);
 inline void LoopTick() {
     g_loop_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(),
                     std::memory_order_relaxed);
@@ -485,7 +478,7 @@ PFN_vkExportMetalObjectsEXT ExportMetalObjects(VkDevice device) {
 bool Available() { return true; }
 
 static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, const FrameLayers& layers, const simd_float4x4& origin_from_device,
-                         bool render, id<MTLCommandBuffer> cb, bool enlarge = true, const uint32_t* indices = nullptr);
+                         bool render, id<MTLCommandBuffer> cb, const uint32_t* indices = nullptr);
 
 // A frame's drawables (visionOS 26): the headset's own first, and while a high-quality video is
 // being recorded a second one for the recording. False when the frame was cancelled: it has no
@@ -654,10 +647,7 @@ struct Host::Impl {
     double rate_error[4] = {};
     int rate_samples = 0;
 
-    // MetalFX: each eye image enlarged to the size the headset's views have, before composing.
-    bool metalfx = false;
-    id<MTLFXSpatialScaler> scalers[2] = {nil, nil};
-    id<MTLTexture> enlarged[2] = {nil, nil};
+    // The views' pixels the eye images cover.
     uint32_t view_width = 0;
     uint32_t view_height = 0;
     // The part of each view's field of view the game draws (0.7 to 1, the launcher's "field of
@@ -669,12 +659,10 @@ struct Host::Impl {
     uint32_t eye_width = 0;
     uint32_t eye_height = 0;
     float scale = 1.0f;
-    // The drawable's view size (what the image size and field of view are fractions of), whether
-    // MetalFX is wanted (the setting; `metalfx` is whether it runs), and the eyes' memory, for
-    // making the eye images again when those settings change in the menu.
+    // The drawable's view size (what the image size and field of view are fractions of), and the
+    // eyes' memory, for making the eye images again when those settings change in the menu.
     uint32_t drawable_width = 0;
     uint32_t drawable_height = 0;
-    bool metalfx_wanted = true;
     // With the game's foveation the eye images are the wide views, at `eye_factor` of the image
     // size (the periphery setting); the insets have their own images, at their own size.
     float eye_factor = 1.0f;
@@ -685,7 +673,6 @@ struct Host::Impl {
     // size slider steps through many values; the images are made once, for the last one).
     float pending_scale = 0.0f;
     float pending_fov = 0.0f;
-    bool pending_metalfx = true;
     float pending_factor = 0.0f;
     std::chrono::steady_clock::time_point pending_since;
     uint32_t next_image[6] = {0, 0, 0, 0, 0, 0};
@@ -886,7 +873,7 @@ static void PresentBlank(Host& host, Host::Impl& x, cp_drawable_t drawable) {
     }
     id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
     cb.label = @"P.T. blank";
-    ComposeFrame(host, x, drawable, FrameLayers{}, matrix_identity_float4x4, false, cb, false);
+    ComposeFrame(host, x, drawable, FrameLayers{}, matrix_identity_float4x4, false, cb);
     cp_drawable_encode_present(drawable, cb);
     [cb commit];
 }
@@ -940,8 +927,7 @@ static void ShowHeld(Host& host, Host::Impl& x, cp_drawable_t drawable) {
     cp_drawable_set_device_anchor(drawable, x.last_anchor);
     id<MTLCommandBuffer> cb = [x.mtl_queue commandBuffer];
     cb.label = @"P.T. held";
-    // enlarge=false: MetalFX's images still hold the last picture enlarged.
-    ComposeFrame(host, x, drawable, x.last_layers, x.last_origin_from_device, true, cb, false, x.last_index);
+    ComposeFrame(host, x, drawable, x.last_layers, x.last_origin_from_device, true, cb, x.last_index);
     cp_drawable_encode_present(drawable, cb);
     [cb commit];
 }
@@ -1023,8 +1009,8 @@ static void KeepPresenting(Host& host, Host::Impl& x) {
     }
 }
 
-// The eyes' images (and MetalFX's) for an image size, a field of view and the MetalFX setting:
-// made at the start, and again between frames when one of them changes in the game's menu.
+// The eyes' images for an image size and a field of view: made at the start, and again between
+// frames when one of them changes in the game's menu.
 // The eye images' size relative to the image size: the periphery setting with the game's
 // foveation (the eye images are then the wide views), the whole of it without.
 // The sharp zone's half width as a tangent (its degrees across, around the forward axis).
@@ -1194,7 +1180,7 @@ bool Host::Impl::BuildVrr(Host& host) {
     return true;
 }
 
-static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, bool metalfx, float eye_factor) {
+static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, float eye_factor) {
     vk::Context& ctx = *x.ctx;
     if (!x.textures[0].empty()) {
         // Everything that used the old images finished: the game's work, then the composition's
@@ -1217,15 +1203,11 @@ static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, b
             x.eye_memory[eye].clear();
             x.textures[eye].clear();
             x.next_image[eye] = 0;
-            x.scalers[eye] = nil;
-            x.enlarged[eye] = nil;
         }
-        x.metalfx = false;
         x.have_last = false;  // its images are gone
     }
     x.scale = std::clamp(scale, 0.5f, 2.0f);
     x.fov_scale = std::clamp(fov_scale, 0.7f, 1.0f);
-    x.metalfx_wanted = metalfx;
     // (The same range as EyeFactor: a narrower one here made the images again at every check.)
     x.eye_factor = std::clamp(eye_factor, 0.1f, 1.0f);
     // The views' pixels the eyes cover, and the eyes' own size.
@@ -1255,42 +1237,6 @@ static bool SetupEyes(Host& host, Host::Impl& x, float scale, float fov_scale, b
     x.CreateDepthImages(ctx, host.EyeSwapchain(1), 1, "right eye depth", &x.eye_memory[1]);
     x.view_width = covered_width;
     x.view_height = covered_height;
-    if (metalfx && !host.Vrr().active && (x.eye_width + 8 < covered_width || x.eye_height + 8 < covered_height)) {
-        if ([MTLFXSpatialScalerDescriptor supportsDevice:x.mtl_device]) {
-            bool ok = true;
-            for (int eye = 0; eye < 2 && ok; ++eye) {
-                MTLFXSpatialScalerDescriptor* d = [MTLFXSpatialScalerDescriptor new];
-                d.inputWidth = x.eye_width;
-                d.inputHeight = x.eye_height;
-                d.outputWidth = covered_width;
-                d.outputHeight = covered_height;
-                d.colorTextureFormat = x.textures[eye][0].pixelFormat;
-                d.outputTextureFormat = x.textures[eye][0].pixelFormat;
-                // sRGB images: the scaler works on the encoded (perceptual) values.
-                d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
-                x.scalers[eye] = [d newSpatialScalerWithDevice:x.mtl_device];
-                if (!x.scalers[eye]) {
-                    ok = false;
-                    break;
-                }
-                MTLTextureDescriptor* t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:d.outputTextureFormat
-                                                                                              width:covered_width
-                                                                                             height:covered_height
-                                                                                          mipmapped:NO];
-                t.usage = x.scalers[eye].outputTextureUsage | MTLTextureUsageShaderRead;
-                t.storageMode = MTLStorageModePrivate;
-                x.enlarged[eye] = [x.mtl_device newTextureWithDescriptor:t];
-                ok = x.enlarged[eye] != nil;
-            }
-            x.metalfx = ok;
-            LogInfo("vr: MetalFX {} ({}x{} -> {}x{} per eye)", ok ? "on" : "could not be set up", x.eye_width, x.eye_height, covered_width,
-                    covered_height);
-        } else {
-            LogInfo("vr: MetalFX spatial scaling is not supported on this device");
-        }
-    } else {
-        LogInfo("vr: MetalFX {}", metalfx ? "not needed (the eyes are drawn at the views' size)" : "off");
-    }
     return true;
 }
 
@@ -1409,7 +1355,7 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
     x.drawable_width = width;
     x.drawable_height = height;
     const pt::visionos::HeadsetSettings& headset = pt::visionos::Headset();
-    if (!SetupEyes(*this, x, x.scale, static_cast<float>(headset.fov) / 100.0f, headset.metalfx, EyeFactor(headset))) {
+    if (!SetupEyes(*this, x, x.scale, static_cast<float>(headset.fov) / 100.0f, EyeFactor(headset))) {
         error_ = "cannot create the eye images";
         return false;
     }
@@ -1440,7 +1386,6 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
     x.game_call_ns.store(SteadyNs());
     x.keeper_stop.store(false);
     x.keeper = std::thread([this] { KeepPresenting(*this, *impl_); });
-    // (The TBDR probe, tbdr_probe.mm, ran here in build 48; its answer is in, so no longer called.)
     LogInfo("vr: session created");
     return true;
 }
@@ -1541,7 +1486,7 @@ void Host::PollEvents() {
             forget_frame(false);
         }
     }
-    // The image size, field of view or MetalFX changed in the game's menu: the eye images again,
+    // The image size, field of view or periphery changed in the game's menu: the eye images again,
     // now, between frames (the game draws at the new size from the next frame).
     if (x.running && x.ctx && !x.textures[0].empty()) {
         pt::visionos::HeadsetSettings& h = pt::visionos::Headset();
@@ -1549,27 +1494,24 @@ void Host::PollEvents() {
         const float scale = std::clamp(h.resolution_scale, 0.5f, 2.0f);
         const float factor = EyeFactor(h);
         const auto now = std::chrono::steady_clock::now();
-        if (std::fabs(scale - x.scale) > 0.01f || std::fabs(fov - x.fov_scale) > 0.005f || h.metalfx != x.metalfx_wanted ||
+        if (std::fabs(scale - x.scale) > 0.01f || std::fabs(fov - x.fov_scale) > 0.005f ||
             std::fabs(factor - x.eye_factor) > 0.005f) {
-            if (std::fabs(scale - x.pending_scale) > 0.001f || std::fabs(fov - x.pending_fov) > 0.001f || h.metalfx != x.pending_metalfx ||
+            if (std::fabs(scale - x.pending_scale) > 0.001f || std::fabs(fov - x.pending_fov) > 0.001f ||
                 std::fabs(factor - x.pending_factor) > 0.001f) {
                 x.pending_scale = scale;
                 x.pending_fov = fov;
-                x.pending_metalfx = h.metalfx;
                 x.pending_factor = factor;
                 x.pending_since = now;
             } else if (now - x.pending_since >= std::chrono::milliseconds(400)) {
                 x.pending_scale = -1.0f;
                 const float old_scale = x.scale;
                 const float old_fov = x.fov_scale;
-                const bool old_metalfx = x.metalfx_wanted;
                 const float old_factor = x.eye_factor;
-                if (!SetupEyes(*this, x, scale, fov, h.metalfx, factor)) {
+                if (!SetupEyes(*this, x, scale, fov, factor)) {
                     // Back to what worked, and the menu with it.
                     LogError("vr: the eye images could not be made at the new size; back to the previous one");
                     h.resolution_scale = old_scale;
                     h.fov = static_cast<int>(std::lround(old_fov * 100.0f));
-                    h.metalfx = old_metalfx;
                     pt::visionos::SettingChanged("resolution_scale", std::format("{:.2f}", old_scale));
                     if (old_factor >= 0.999f) {
                         h.game_foveation = false;
@@ -1579,7 +1521,7 @@ void Host::PollEvents() {
                         h.periphery = static_cast<int>(std::lround(old_factor * 100.0f));
                         pt::visionos::SettingChanged("periphery", std::to_string(h.periphery));
                     }
-                    if (!SetupEyes(*this, x, old_scale, old_fov, old_metalfx, old_factor)) {
+                    if (!SetupEyes(*this, x, old_scale, old_fov, old_factor)) {
                         LogError("vr: the eye images could not be made again; ending");
                         x.exit_requested = true;
                         x.running = false;
@@ -1712,10 +1654,10 @@ void Host::LocateViews() {
         bool stale = !vrr_.active || std::fabs(center - x.vrr_center) > 1.0e-3f;
         // (Only a real change of the fields: the composition follows small drifts on its own.)
         for (int i = 0; i < 2; ++i) stale = stale || glm::distance(eyes_[i].tangents, x.vrr_tangents[i]) > 2.0e-2f;
-        if (stale && !SetupEyes(*this, x, x.scale, x.fov_scale, x.metalfx_wanted, x.eye_factor)) {
+        if (stale && !SetupEyes(*this, x, x.scale, x.fov_scale, x.eye_factor)) {
             LogError("vr: the eye images for the rate maps could not be made; back to the insets");
             x.vrr_failed = true;
-            if (!SetupEyes(*this, x, x.scale, x.fov_scale, x.metalfx_wanted, x.eye_factor)) {
+            if (!SetupEyes(*this, x, x.scale, x.fov_scale, x.eye_factor)) {
                 x.exit_requested = true;
                 x.running = false;
             }
@@ -1953,7 +1895,7 @@ void Host::Release(Swapchain& swapchain) { swapchain.acquired = false; }
 // HUD as quads in the world. `origin_from_device` is the head pose the drawable is set to (the
 // one the eye images were drawn for). Encoded into `cb`; the caller presents.
 static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, const FrameLayers& layers, const simd_float4x4& origin_from_device,
-                         bool render, id<MTLCommandBuffer> cb, bool enlarge, const uint32_t* indices) {
+                         bool render, id<MTLCommandBuffer> cb, const uint32_t* indices) {
     // The image of each swapchain to show: this frame's, or given (a picture shown again).
     const auto image = [&](int which) -> uint32_t {
         if (indices) return indices[which];
@@ -1962,18 +1904,6 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                : which == 3 ? host.ScreenSwapchain().index
                             : host.InsetSwapchain(which - 4).index;
     };
-    // MetalFX first: the eye images enlarged (a recording's drawable reuses the enlarged images).
-    const bool use_enlarged = x.metalfx && layers.projection;
-    if (use_enlarged && enlarge && render) {
-        for (int eye = 0; eye < 2; ++eye) {
-            id<MTLFXSpatialScaler> scaler = x.scalers[eye];
-            scaler.colorTexture = x.textures[eye][image(eye)];
-            scaler.outputTexture = x.enlarged[eye];
-            scaler.inputContentWidth = x.eye_width;
-            scaler.inputContentHeight = x.eye_height;
-            [scaler encodeToCommandBuffer:cb];
-        }
-    }
     const bool anything = render && (layers.projection || layers.screen || layers.hud);
     // What "far" is in the drawable's depth convention: a distant point through its projection.
     float far_depth = 0.0f;
@@ -2041,8 +1971,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 u.alpha = 1.0f;
                 u.opaque = 1.0f;
                 u.pad[0] = x.sharpen;
-                // (A MetalFX-enlarged eye has no gain in its alpha.)
-                u.grade = use_enlarged ? simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f) : GameGrade();
+                u.grade = GameGrade();
                 // Where the field of view the eye image covers falls in this view (the headset's
                 // own views: the view's, narrowed by the setting; a recording's: placed by it).
                 const simd_float4x4 proj = cp_drawable_compute_projection(drawable, cp_axis_direction_convention_right_up_back, v);
@@ -2055,7 +1984,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 u.p0 = simd_make_float4(m00 * e.x - m20, m11 * e.z - m21, m00 * e.y - m20, m11 * e.w - m21);
                 // The scene's depth for the compositor's reprojection (the setting; images beside the eyes').
                 const bool has_depth_target = cp_drawable_get_depth_texture(drawable, texture_index) != nil;
-                const bool scene_depth = pt::visionos::Headset().scene_depth && has_depth_target && !use_enlarged;
+                const bool scene_depth = pt::visionos::Headset().scene_depth && has_depth_target;
                 u.depthp = simd_make_float4(0.0f, proj.columns[2][2], proj.columns[3][2], 0.0f);
                 u.depthq = simd_make_float4(proj.columns[2][3], proj.columns[3][3], far_depth, 0.0f);
                 auto distances = [&](int which) -> id<MTLTexture> {
@@ -2066,7 +1995,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 // (as the game frames it, OwnFrustumFor at the logical size); the part shown is this
                 // view's field, unwarped through the tables.
                 const Host::VrrInfo& vrr = host.Vrr();
-                const bool unwarp = vrr.active && !use_enlarged && x.vrr_texture && x.eye_vrr_pipeline && x.have_tangents;
+                const bool unwarp = vrr.active && x.vrr_texture && x.eye_vrr_pipeline && x.have_tangents;
                 if (unwarp) {
                     const glm::uvec2 logical(vrr.logical.width, vrr.logical.height);
                     const xr::EyeFrustum f = xr::OwnFrustumFor(glm::vec4(e.x, e.y, e.w, e.z), logical);
@@ -2077,7 +2006,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
                 [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
                 if (unwarp) [enc setFragmentTexture:x.vrr_texture atIndex:1];
-                id<MTLTexture> eye_picture = use_enlarged ? x.enlarged[v] : x.textures[v][image(static_cast<int>(v))];
+                id<MTLTexture> eye_picture = x.textures[v][image(static_cast<int>(v))];
                 id<MTLTexture> eye_distances = unwarp ? nil : distances(static_cast<int>(v));
                 if (eye_distances) {
                     u.depthp.x = 1.0f;
@@ -2099,7 +2028,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     w.pad[1] = 0.15f;  // the fade, as a fraction of the circle's radius
                     // The menu's "show the sharp zone's edge": a red frame where it ends.
                     w.color = pt::visionos::Headset().show_border ? simd_make_float4(1.0f, 0.1f, 0.1f, 1.0f) : simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-                    w.grade = u.grade;  // as its wide view (none with MetalFX: no seam)
+                    w.grade = u.grade;  // as its wide view (no seam)
                     id<MTLTexture> inset_picture = x.textures[4 + v][image(4 + static_cast<int>(v))];
                     id<MTLTexture> inset_distances = distances(4 + static_cast<int>(v));
                     w.depthp.x = inset_distances ? 1.0f : 0.0f;
@@ -2234,11 +2163,10 @@ void Host::EndFrame(const FrameLayers& layers) {
     cp_drawable_encode_present(x.drawable, cb);
     [cb commit];
     if (x.capture) {
-        // The recording's drawable after the headset's (which comes first), with the images
-        // MetalFX already enlarged.
+        // The recording's drawable after the headset's (which comes first).
         id<MTLCommandBuffer> capture_cb = [x.mtl_queue commandBuffer];
         capture_cb.label = @"P.T. capture";
-        ComposeFrame(*this, x, x.capture, layers, x.origin_from_device, should_render_, capture_cb, false);
+        ComposeFrame(*this, x, x.capture, layers, x.origin_from_device, should_render_, capture_cb);
         cp_drawable_encode_present(x.capture, capture_cb);
         [capture_cb commit];
     }
@@ -2409,16 +2337,21 @@ struct Preset {
     bool ssao;
     bool bloom;
     bool reflections;
-    bool metalfx;
     int fps;  // 45: a picture every other refresh (half the display's rate)
     int anisotropy;  // the textures' anisotropic filtering (0 off, 2, 4, 8, 16)
     // The game's foveation: sharp zone degrees, its height, its resolution, the periphery's.
     int center_deg, center_up, center_res, periphery;
 };
 constexpr Preset kPresets[2] = {
-    {0.50f, 3, true, true, true, false, 45, 8, 70, -10, 100, 10},     // Vision Pro M2 (the tester's settings; shadows as on PS4)
-    {0.85f, 3, true, true, true, false, 90, 16, 70, -10, 100, 15},    // Vision Pro M5
+    {0.50f, 3, true, true, true, 45, 8, 70, -10, 100, 10},     // Vision Pro M2 (the tester's settings; shadows as on PS4)
+    {0.85f, 3, true, true, true, 90, 16, 70, -10, 100, 15},    // Vision Pro M5
 };
+
+// The sharp zone's antialiasing as the log names it.
+std::string AaName(const HeadsetSettings& h) {
+    return h.aa == 5 ? std::format("VPKTAA {} %, sharpness {} %, periphery {}", h.taa_res, h.taa_sharpness, h.taa_periphery ? "on" : "off")
+                     : std::string("FXAA");
+}
 
 const char* ShadowName(int quality) {
     switch (quality) {
@@ -2432,7 +2365,7 @@ const char* ShadowName(int quality) {
 bool MatchesPreset(int preset, const AppSettings& s, const HeadsetSettings& h) {
     if (preset < 0 || preset > 1) return false;
     const Preset& p = kPresets[preset];
-    return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == p.fps && h.foveation && h.metalfx == p.metalfx && h.fov == 100 &&
+    return std::fabs(h.resolution_scale - p.resolution_scale) < 0.01f && h.target_fps == p.fps && h.foveation && h.fov == 100 &&
            !h.dynamic_resolution && h.game_foveation && h.center_deg == p.center_deg && h.center_up == p.center_up &&
            h.center_res == p.center_res && h.periphery == p.periphery &&
            s.graphics.shadow_quality == p.shadow_quality && s.graphics.ambient_occlusion == p.ssao && s.graphics.bloom == p.bloom &&
@@ -2487,7 +2420,6 @@ void ApplyPreset(int preset, AppSettings& s) {
     h.resolution_scale = p.resolution_scale;
     h.target_fps = p.fps;
     h.foveation = true;
-    h.metalfx = p.metalfx;
     h.fov = 100;
     h.dynamic_resolution = false;
     h.game_foveation = true;
@@ -2505,7 +2437,6 @@ void ApplyPreset(int preset, AppSettings& s) {
     SettingChanged("resolution_scale", std::format("{:.2f}", p.resolution_scale));
     SettingChanged("target_fps", std::to_string(p.fps));
     SettingChanged("foveation", "1");
-    SettingChanged("metalfx", p.metalfx ? "1" : "0");
     SettingChanged("fov", "100");
     SettingChanged("dynamic_resolution", "0");
     SettingChanged("game_foveation", "1");
@@ -2522,7 +2453,6 @@ void ApplyPreset(int preset, AppSettings& s) {
 
 void ApplySettings(AppSettings& s) {
     HeadsetSettings& h = Headset();
-    pt::RegisterMetalFxUpscaler();  // (before the game makes its device)
     if (const char* device = Env("PT_VP_DEVICE")) h.device_m5 = std::string(device) == "m5";
     if (const char* preset = Env("PT_VP_PRESET")) {
         const std::string v = preset;
@@ -2534,12 +2464,11 @@ void ApplySettings(AppSettings& s) {
     h.resolution_scale = std::clamp(Number("PT_VP_RESOLUTION_SCALE", 0.6f), 0.5f, 2.0f);
     h.target_fps = static_cast<int>(Number("PT_VP_TARGET_FPS", 90.0f)) == 45 ? 45 : 90;
     h.foveation = Flag("PT_VP_FOVEATION", true);
-    // MetalFX spatial over the whole eye is gone: it enlarged the low-density periphery to the
-    // drawable's full size (6-7 ms a frame for nothing). MetalFX is now the sharp views' temporal
-    // antialiasing (`aa`), inside the game's frame.
-    h.metalfx = false;
-    h.aa = std::clamp(static_cast<int>(Number("PT_VP_AA", 5.0f)), 0, 5);
-    h.aa_jitter = std::clamp(static_cast<int>(Number("PT_VP_AA_JITTER", 0.0f)), 0, 2);
+    // The sharp views' antialiasing: VPKTAA (5) or FXAA (0); older values (MetalFX) become VPKTAA.
+    h.aa = SanitizeAa(static_cast<int>(Number("PT_VP_AA", 5.0f)));
+    h.taa_res = SanitizeTaaRes(static_cast<int>(std::lround(Number("PT_VP_TAA_RES", 100.0f))));
+    h.taa_sharpness = SanitizeTaaSharpness(static_cast<int>(std::lround(Number("PT_VP_TAA_SHARPNESS", 50.0f))));
+    h.taa_periphery = Flag("PT_VP_TAA_PERIPHERY", true);
     h.subtitle_size = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_SIZE", 175.0f)), 100, 250);
     h.subtitle_height = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_HEIGHT", 20.0f)), 0, 40);
     h.scene_depth = Flag("PT_VP_SCENE_DEPTH", true);
@@ -2601,7 +2530,7 @@ void ApplySettings(AppSettings& s) {
             "reflections {}, anisotropic filtering {}x",
             h.device_m5 ? "M5" : "M2", h.preset == 0 ? "M2" : h.preset == 1 ? "M5" : "custom", h.resolution_scale * 100.0f, h.target_fps,
             h.dynamic_resolution ? "on" : "off", h.foveation ? "on" : "off",
-            h.aa == 0 ? std::string("FXAA") : h.aa == 5 ? std::string("TAA") : std::format("MetalFX temporal {:.0f} %", AaScale(h.aa) * 100.0f),
+            AaName(h),
             ShadowName(s.graphics.shadow_quality), s.graphics.ambient_occlusion, s.graphics.bloom, s.graphics.reflections, s.graphics.anisotropy);
 }
 
@@ -2685,9 +2614,9 @@ void ReportEye(int view, int views, float gpu_ms, const float pass_ms[6], float 
     };
     std::string detail = std::format("left: {}; right: {}", passes(0), passes(1));
     if (views == 4) detail += std::format("; left inset: {}; right inset: {}", passes(2), passes(3));
-    LogInfo("vr pace: {:.1f} frames shown/s, GPU {} views {:.2f} ms + composition {:.2f} ms ({}), CPU recording {:.2f} ms, eyes {}x{}, MetalFX {}, "
+    LogInfo("vr pace: {:.1f} frames shown/s, GPU {} views {:.2f} ms + composition {:.2f} ms ({}), CPU recording {:.2f} ms, eyes {}x{}, antialiasing {}, "
             "thermal {}",
-            fps, views, t.sum_gpu / n, t.sum_composite / n, detail, t.sum_cpu / n, width, height, Headset().metalfx ? "on" : "off",
+            fps, views, t.sum_gpu / n, t.sum_composite / n, detail, t.sum_cpu / n, width, height, AaName(Headset()),
             pt_apple_thermal_state());
     t.sum_gpu = t.sum_cpu = t.sum_composite = 0.0;
     for (auto& e : t.sum_pass) for (double& v : e) v = 0.0;
