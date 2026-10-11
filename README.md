@@ -1,14 +1,26 @@
 # PTVisionPro
 
-P.T. on Apple Vision Pro, played in full immersive VR.
+P.T. on Apple Vision Pro, played in full immersive VR with a controller.
 
 A native ARM64 build of the reconstructed P.T. engine for visionOS: the game's own C++ code
 (no emulation, no JIT), Vulkan translated to Metal by MoltenVK, both eyes drawn by the engine's
-VR mode and composed straight into the headset's Compositor Services drawables. The launcher
-is a visionOS app with every setting inside it, including whole presets for the Vision Pro M2,
-the Vision Pro M5 or a custom one.
+VR mode and composed straight into the headset's Compositor Services drawables. On top of the
+engine's VR mode it adds what the headset needs:
 
-**Status: in development, first builds.** See `bitacora.md` for the exact state.
+- **Game-side foveation**: each eye drawn whole at a low density, plus a sharp circle where you
+  look at its own resolution, independent of the rest.
+- **VPKTAA**: the port's own temporal antialiasing, built for stereo and for that foveation
+  (optional internal resolution below 100 %, adjustable sharpness, also on the periphery). FXAA
+  stays as an option to compare.
+- **Native HDR** (the scene's light above white goes to the headset's extended range), the
+  scene's depth handed to the compositor for its reprojection, and immersive cutscenes from the
+  scene's own camera.
+
+The launcher is a visionOS app with every setting inside it (no text files to edit), including
+whole presets for the Vision Pro M2, the Vision Pro M5 (offered only on an M5) or a custom one.
+
+**Status: in development.** The whole game is playable from start to end; current work is
+performance and image quality. See `bitacora.md` for the exact state.
 
 ## What it is built on
 
@@ -47,20 +59,21 @@ Konami or Kojima Productions.
 
 ## Playing
 
-- **Controllers**: any controller visionOS knows (DualSense, DualShock 4, Xbox, Switch Pro), or
-  a pair of PlayStation VR2 Sense controllers, tracked in space: with them the flashlight can be
-  held in your hand (Settings › VR › Flashlight).
+- **Controllers**: any gamepad visionOS knows (DualSense, DualShock 4, Xbox, Switch Pro). The
+  flashlight follows your head. What the original asks for with R3 (zoom) or by staring at a spot
+  is done by looking at it and pressing X.
 - **Menus with your hands**: while a menu is open a ray comes out of each hand; pinch thumb and
-  index finger to choose. Without a controller, a long pinch of the left hand opens the pause
-  menu. With Sense controllers, point and pull the trigger.
+  index finger to choose (or look and pinch). Without a controller, a long pinch of the left hand
+  opens the pause menu.
 - **Leaving and coming back**: closing the game's space (the Digital Crown) pauses the game;
   **Continue in VR** in the launcher goes back where you were. Settings › VR › Recentre view puts
   you back in the corridor where you stand (also done by itself after recentring with a long
   press of the Digital Crown).
 - **Settings**: everything is in the launcher and in the game's own menu (its PC page becomes a
   Vision Pro page): presets for the Vision Pro M2 and M5 or custom, 90 or 45 frames a second,
-  image size, sharp zone antialiasing (VPKTAA, the engine's own temporal antialiasing, or FXAA), field
-  of view, foveation, graphics, turning and comfort.
+  image size, foveation (sharp circle size, height and resolution, periphery density),
+  antialiasing (VPKTAA or FXAA), HDR, field of view, graphics, subtitle size and height, turning
+  and comfort.
   Both places stay in step.
 
 ## Layout
