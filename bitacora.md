@@ -60,6 +60,11 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
    (máx. ~0,5 ms/frame con 2 insets) → no reestructurar a TBDR ni justificar VPEngine por esto. Sonda: quitar en la próxima build.
    Coste real (pt (34), M2 con AA = MetalFX 100 %): inset/upscale 3,35 + inputs 0,46 ms ×2 insets (≈7,6 ms/frame), lighting
    2,25 (luces 2,05), compose+forward 1,79, reflections 1,44, occlusion 0,68, gbuffer 0,95; GPU 28–30 ms, 28–31 fps.
+   **Siguiente: build 49** = SMAA en la zona nítida (opción de menú «Antialiasing: FXAA / SMAA / MetalFX», `HeadsetSettings.aa`,
+   textos en `pc_settings.cpp`, presets en `kPresets` y `PTSettings.defaults` iguales), SMAA por defecto en M2; quitar la
+   llamada a `RunTbdrProbe` (o `PT_VP_TBDR_PROBE` apagado por defecto). FXAA descartado por el usuario (demasiado borroso).
+   Las cifras de pt (34) son de la habitación inicial, no del pasillo: pedir medición en el pasillo con SMAA y con MetalFX.
+   Si SMAA no basta en nitidez → TAA propio con afilado (punto 1).
    **Plan TBDR (contexto de la sonda).** Diagnóstico: 11 draws por vista y 28–37 ms de GPU
    → coste en pasadas de pantalla completa y ancho de banda (G-buffer escrito/leído de memoria en cada pasada, ×4 vistas).
    Plan: (a) build sonda: microbenchmark al arrancar a 1384² con el formato del G-buffer del motor, 3 variantes con
