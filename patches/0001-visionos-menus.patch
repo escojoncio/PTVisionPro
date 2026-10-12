@@ -87,20 +87,204 @@ index 669c207..1395df9 100644
 +    // The alpha carries a headset's HDR gain (screen_fx.frag; 1 = none): a fade takes it to none.
 +    out_color = vec4(mix(color, params.fade.rgb, params.fade.a), mix(texture(scene_color, in_uv).a, 1.0, params.fade.a));
  }
+diff --git a/shaders/kawase_sum.frag b/shaders/kawase_sum.frag
+index 34717a5..8c33f13 100644
+--- a/shaders/kawase_sum.frag
++++ b/shaders/kawase_sum.frag
+@@ -13,15 +13,169 @@ layout(location = 0) in vec2 in_uv;
+ layout(location = 0) out vec4 out_blur;
+ layout(location = 1) out vec4 out_sum;
+ 
++// One bloom round (the Kawase pair: two passes of 4 diagonal taps at +-o texels, o = i + 0.5) in a
++// single pass, f0.w the mode:
++//   0: one of the pair (the original second pass).
++//   1: round 0 with the bright pass (bright.frag) folded in: reads IMG_HDR, f2 the polynomial,
++//      f1.zw the bloom's size.
++//   2: both passes of a round, exactly (36 taps): per axis the pair is the original's 4 middle
++//      texels (clamped at the edge, as the first pass's target is) each blurred again.
++//   3: both passes with the middle texels' own 2-texel tent left out (9 taps, 16 near an edge),
++//      for the wide rounds (i >= 3), where it is under 0.2 % of the bloom's peak.
++// f0.y scales the blur (the bloom weight in round 0), f1.x weighs the round into the sum.
++
++const float kTent[3] = float[](0.25, 0.5, 0.25);
++
++vec3 BrightAt(ivec2 q, vec2 block) {
++    vec4 t = ImgFetch(IMG_HDR, ivec2(floor(vec2(q) * block + 0.5 * block)));
++    vec3 x = clamp(t.rgb, 0.0, 1.0);
++    float l1 = Luma709(x);
++    float l2 = l1 * l1;
++    float l3 = l2 * l1;
++    float w = pass.f2.x * min(l1, 32.0) + pass.f2.y * min(l2, 32.0) + pass.f2.z * min(l3, 32.0) + pass.f2.w * min(l3 * l1, 32.0);
++    return clamp(x * w, 0.0, 1.0);
++}
++
++// The weight of texel p + d (d -2..2) in the tent of the clamped texel p + i (i -1..1), itself
++// over its clamped neighbours (the first pass reads its source clamped at the edge too).
++float FoldWeight(int p, int n, int i, int d) {
++    int q = clamp(p + i, 0, n - 1);
++    float w = 0.0;
++    for (int k = -1; k <= 1; ++k) {
++        w += clamp(q + k, 0, n - 1) == p + d ? kTent[k + 1] : 0.0;
++    }
++    return w;
++}
++
++vec3 RoundZero() {
++    ivec2 size = ivec2(pass.f1.zw);
++    vec2 block = ImgSize(IMG_HDR) / pass.f1.zw;
++    ivec2 p = ivec2(gl_FragCoord.xy);
++    float scale = pass.f0.y;
++    // (At o = 0.5 the 4 bilinear taps are the 3x3 tent of texels; the bright texels p +- 2.)
++    float wx[15];
++    float wy[15];
++    for (int i = 0; i < 3; ++i) {
++        for (int d = 0; d < 5; ++d) {
++            wx[i * 5 + d] = FoldWeight(p.x, size.x, i - 1, d - 2);
++            wy[i * 5 + d] = FoldWeight(p.y, size.y, i - 1, d - 2);
++        }
++    }
++    // Rows first: r[i * 5 + y], row y under the middle texel column i.
++    vec3 r[15];
++    for (int y = 0; y < 5; ++y) {
++        vec3 r0 = vec3(0.0);
++        vec3 r1 = vec3(0.0);
++        vec3 r2 = vec3(0.0);
++        for (int x = 0; x < 5; ++x) {
++            vec3 b = BrightAt(clamp(p + ivec2(x - 2, y - 2), ivec2(0), size - 1), block);
++            r0 += wx[x] * b;
++            r1 += wx[5 + x] * b;
++            r2 += wx[10 + x] * b;
++        }
++        r[y] = r0;
++        r[5 + y] = r1;
++        r[10 + y] = r2;
++    }
++    vec3 c = vec3(0.0);
++    for (int j = 0; j < 3; ++j) {
++        for (int i = 0; i < 3; ++i) {
++            vec3 m = vec3(0.0);
++            for (int y = 0; y < 5; ++y) {
++                m += wy[j * 5 + y] * r[i * 5 + y];
++            }
++            // (The first pass's output, clamped as its target stores it.)
++            c += (kTent[i] * kTent[j]) * clamp(m * scale, 0.0, 1.0);
++        }
++    }
++    return c * scale;
++}
++
++// One axis of mode 2 (texel units, c the pixel's centre): 6 taps.
++void AxisExact(float c, float n, float o, out float pos[6], out float w[6]) {
++    float l = c - o;
++    float r = c + o;
++    float lc = clamp(l, 0.5, n - 0.5);
++    float rc = clamp(r, 0.5, n - 0.5);
++    bool lf = lc == l;
++    bool rf = rc == r;
++    pos[0] = lf ? l - o - 0.5 : lc - o;
++    pos[1] = lf ? l - o + 0.5 : lc + o;
++    w[0] = lf ? 0.125 : 0.25;
++    w[1] = w[0];
++    pos[2] = c - 0.5;
++    pos[3] = c + 0.5;
++    w[2] = (lf ? 0.125 : 0.0) + (rf ? 0.125 : 0.0);
++    w[3] = w[2];
++    pos[4] = rf ? r + o - 0.5 : rc - o;
++    pos[5] = rf ? r + o + 0.5 : rc + o;
++    w[4] = rf ? 0.125 : 0.25;
++    w[5] = w[4];
++}
++
++// One axis of mode 3: 4 taps; `inside`: the middle two are the same point (no edge near).
++void AxisWide(float c, float n, float o, out float pos[4], out bool inside) {
++    float lc = clamp(c - o, 0.5, n - 0.5);
++    float rc = clamp(c + o, 0.5, n - 0.5);
++    inside = lc == c - o && rc == c + o;
++    pos[0] = lc - o;
++    pos[1] = lc + o;
++    pos[2] = rc - o;
++    pos[3] = rc + o;
++}
++
+ void main() {
+     uint source = pass.ids.x;
+-    vec2 texel = 1.0 / ImgSize(source);
+-    vec2 o = texel * pass.f0.x;
+-    vec4 c = Img(source, SMP_LINEAR_CLAMP, in_uv + vec2(-o.x, -o.y));
+-    c += Img(source, SMP_LINEAR_CLAMP, in_uv + vec2(o.x, -o.y));
+-    c += Img(source, SMP_LINEAR_CLAMP, in_uv + vec2(-o.x, o.y));
+-    c += Img(source, SMP_LINEAR_CLAMP, in_uv + vec2(o.x, o.y));
+-    c *= 0.25 * pass.f0.y;
++    vec4 c;
++    if (pass.f0.w == 1.0) {
++        c = vec4(RoundZero(), 1.0);
++    } else if (pass.f0.w == 2.0) {
++        vec2 size = ImgSize(source);
++        float px[6], wx[6], py[6], wy[6];
++        AxisExact(gl_FragCoord.x, size.x, pass.f0.x, px, wx);
++        AxisExact(gl_FragCoord.y, size.y, pass.f0.x, py, wy);
++        c = vec4(0.0);
++        for (int j = 0; j < 6; ++j) {
++            for (int i = 0; i < 6; ++i) {
++                c += (wx[i] * wy[j]) * Img(source, SMP_LINEAR_CLAMP, vec2(px[i], py[j]) / size);
++            }
++        }
++        c *= pass.f0.y;
++    } else if (pass.f0.w == 3.0) {
++        vec2 size = ImgSize(source);
++        float px[4], py[4];
++        bool ix, iy;
++        AxisWide(gl_FragCoord.x, size.x, pass.f0.x, px, ix);
++        AxisWide(gl_FragCoord.y, size.y, pass.f0.x, py, iy);
++        c = vec4(0.0);
++        if (ix && iy) {
++            // Texel centres p - 2o, p, p + 2o: weights 1/4, 1/2, 1/4 per axis.
++            const float k[3] = float[](0.25, 0.5, 0.25);
++            float qx[3] = float[](px[0], px[1], px[3]);
++            float qy[3] = float[](py[0], py[1], py[3]);
++            for (int j = 0; j < 3; ++j) {
++                for (int i = 0; i < 3; ++i) {
++                    c += (k[i] * k[j]) * Img(source, SMP_LINEAR_CLAMP, vec2(qx[i], qy[j]) / size);
++                }
++            }
++        } else {
++            for (int j = 0; j < 4; ++j) {
++                for (int i = 0; i < 4; ++i) {
++                    c += Img(source, SMP_LINEAR_CLAMP, vec2(px[i], py[j]) / size);
++                }
++            }
++            c *= 0.0625;
++        }
++        c *= pass.f0.y;
++    } else {
++        vec2 texel = 1.0 / ImgSize(source);
++        vec2 o = texel * pass.f0.x;
++        c = Img(source, SMP_LINEAR_CLAMP, in_uv + vec2(-o.x, -o.y));
++        c += Img(source, SMP_LINEAR_CLAMP, in_uv + vec2(o.x, -o.y));
++        c += Img(source, SMP_LINEAR_CLAMP, in_uv + vec2(-o.x, o.y));
++        c += Img(source, SMP_LINEAR_CLAMP, in_uv + vec2(o.x, o.y));
++        c *= 0.25 * pass.f0.y;
++    }
+     out_blur = clamp(c, 0.0, 1.0);
+     vec4 stored = vec4(SrgbDecode(round(SrgbEncode(out_blur.rgb) * 255.0) / 255.0), round(out_blur.a * 255.0) / 255.0);
+     vec4 sum = stored;
 diff --git a/shaders/light_all.frag b/shaders/light_all.frag
 new file mode 100644
-index 0000000..2105e30
+index 0000000..ccd7ab3
 --- /dev/null
 +++ b/shaders/light_all.frag
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,97 @@
 +#version 460
 +// All of a view's lights in one full-screen pass (the deferred lights without their volumes):
 +// the G-buffer is read once per pixel instead of once per light, and the light targets are
 +// written once. Each light is the same EvaluateLight as light.frag's; a light whose volume would
 +// not have covered the pixel gives nothing there (out of range, outside its area box), so the sum
 +// is the one the volumes add up. Tiled (f0.z = 1): a pixel evaluates only the lights its tile
-+// lists (frame.light_tiles, built on the CPU from each volume's screen rectangle).
++// lists (frame.light_tiles, built on the CPU from each volume's screen rectangle and each tile's
++// view cone against the light's reach). EvaluateLight's first test reads only position, range and
++// colour (the falloff), so a listed light that misses the pixel costs three loads, not a Light copy.
 +#include "common.glsl"
++#define PT_LIGHT_SURFACE_CONSTANTS
 +#include "lighting.glsl"
 +
 +layout(push_constant) uniform PassPush {
@@ -157,7 +341,7 @@ index 0000000..2105e30
 +                bits &= bits - 1u;
 +                vec3 diffuse;
 +                vec3 specular;
-+                if (EvaluateLight(frame.lights[w * 32u + uint(b)], v, s, (shadowed & (1u << uint(b))) != 0u, gl_FragCoord.xy, diffuse, specular)) {
++                if (EvaluateLight(w * 32u + uint(b), v, s, (shadowed & (1u << uint(b))) != 0u, gl_FragCoord.xy, diffuse, specular)) {
 +                    diffuse_sum += diffuse;
 +                    specular_sum += specular;
 +                    lit += 1.0;
@@ -173,7 +357,7 @@ index 0000000..2105e30
 +            }
 +            vec3 diffuse;
 +            vec3 specular;
-+            if (EvaluateLight(frame.lights[i], v, s, (pass.ids.w & bit) != 0u, gl_FragCoord.xy, diffuse, specular)) {
++            if (EvaluateLight(i, v, s, (pass.ids.w & bit) != 0u, gl_FragCoord.xy, diffuse, specular)) {
 +                diffuse_sum += diffuse;
 +                specular_sum += specular;
 +                lit += 1.0;
@@ -188,34 +372,47 @@ index 0000000..2105e30
 +    out_specular = vec4(specular_sum, 1.0);
 +}
 diff --git a/shaders/light_main.glsl b/shaders/light_main.glsl
-index 66d5d0c..0207546 100644
+index 66d5d0c..5a0f884 100644
 --- a/shaders/light_main.glsl
 +++ b/shaders/light_main.glsl
-@@ -26,6 +26,31 @@ void main() {
+@@ -17,7 +17,7 @@ layout(location = 1) out vec4 out_specular;
+ 
+ void main() {
+     View v = frame.views[pass.ids.x];
+-    Light l = frame.lights[pass.ids.y];
++    uint li = pass.ids.y;
+     ivec2 pixel = ivec2(gl_FragCoord.xy);
+     float depth = ImgFetch(IMG_DEPTH, pixel).x;
+     if (depth <= 0.0) {
+@@ -26,6 +26,35 @@ void main() {
      Surface s;
      s.P = ViewPosition(v, PixelNdc(v, gl_FragCoord.xy), depth);
      s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
 +    // Out of the light's reach (area box, range, spot cone): the tests EvaluateLight makes, before
 +    // the G-buffer's normal and material are fetched. Volumes drawn from the front pass every pixel
 +    // behind them (the far wall, the sky), so those leave here cheaply.
-+    if (l.info.z != 0) {
-+        vec3 q = (l.area * vec4(s.world, 1.0)).xyz;
++    // (Field by field from frame.lights: a whole Light would be copied for these few vectors.)
++    if (frame.lights[li].info.z != 0) {
++        vec3 q = (frame.lights[li].area * vec4(s.world, 1.0)).xyz;
 +        if (1.0 - max(abs(q.z), max(abs(q.x), abs(q.y))) < 0.0) {
 +            discard;
 +        }
 +    }
 +    {
-+        bool spot = l.position.w > 0.5;
-+        vec3 to_light = l.position.xyz - s.world;
++        vec4 position = frame.lights[li].position;
++        vec4 range = frame.lights[li].range;
++        vec4 cone = frame.lights[li].cone;
++        bool spot = position.w > 0.5;
++        vec3 to_light = position.xyz - s.world;
 +        float dist = length(to_light);
-+        float d = spot ? max(l.range.y, dist + l.range.x) : max(l.range.y, dist) + l.range.x;
++        float d = spot ? max(range.y, dist + range.x) : max(range.y, dist) + range.x;
 +        float d2 = d * d;
-+        if (1.0 / d2 - d2 * l.range.z <= 0.0) {
++        if (1.0 / d2 - d2 * range.z <= 0.0) {
 +            discard;
 +        }
-+        if (spot && l.cone.z > 0.0) {
-+            float cos_a = dot(l.direction.xyz, -to_light / max(dist, 1.0e-6));
-+            if ((cos_a - l.cone.x) * l.cone.y <= 0.0) {
++        if (spot && cone.z > 0.0) {
++            float cos_a = dot(frame.lights[li].direction.xyz, -to_light / max(dist, 1.0e-6));
++            if ((cos_a - cone.x) * cone.y <= 0.0) {
 +                discard;
 +            }
 +        }
@@ -223,22 +420,300 @@ index 66d5d0c..0207546 100644
      vec4 g_normal = ImgFetch(IMG_NORMAL, pixel);
      vec4 g_material = ImgFetch(IMG_MATERIAL, pixel);
      s.N = DecodeNormal(g_normal.xyz);
+@@ -39,7 +68,7 @@ void main() {
+     g_contact_reach = pass.f0.x;
+     g_contact_legacy = pass.f0.y > 0.5;
+ #endif
+-    if (!EvaluateLight(l, v, s, pass.ids.z != 0u, gl_FragCoord.xy, diffuse, specular)) {
++    if (!EvaluateLight(li, v, s, pass.ids.z != 0u, gl_FragCoord.xy, diffuse, specular)) {
+         discard;
+     }
+     out_diffuse = vec4(diffuse, 1.0);
 diff --git a/shaders/lighting.glsl b/shaders/lighting.glsl
-index abc3da2..7d19b0b 100644
+index abc3da2..2b727d8 100644
 --- a/shaders/lighting.glsl
 +++ b/shaders/lighting.glsl
-@@ -112,6 +112,11 @@ bool EvaluateLight(Light l, View v, Surface s, bool shadows, vec2 frag, out vec3
-     if (length(radiance) <= 1.0e-4) {
-         return false;
+@@ -6,7 +6,18 @@ vec2 Dither2x2(vec3 frag) {
+     return vec2(fract(0.5 * (frag.x - 0.5)) >= 0.3 ? 1.0 : -1.0, fract(0.5 * (frag.y - 0.5)) >= 0.3 ? 1.0 : -1.0);
+ }
+ 
++#ifdef PT_LIGHT_SURFACE_CONSTANTS
++// The four taps' offsets depend on the pixel and the frame alone (not the light): worked out at the
++// pixel's first shadowed light and kept for the others (light_all.frag), the same expressions.
++bool g_pcf_ready = false;
++vec2 g_pcf_taps[4];
++#endif
++
+ float ShadowPcf(vec2 uv, float zref, vec2 lo, vec2 hi, vec2 texel, vec3 frag, float rotate, float frame_time, vec4 temporal) {
++#ifdef PT_LIGHT_SURFACE_CONSTANTS
++    if (!g_pcf_ready) {
++        g_pcf_ready = true;
++#endif
+     vec2 d = temporal.w > 0.5 && rotate <= 0.5 ? temporal.yz : Dither2x2(frag);
+     mat2 rot = mat2(1.0);
+     if (rotate > 0.5) {
+@@ -21,6 +32,14 @@ float ShadowPcf(vec2 uv, float zref, vec2 lo, vec2 hi, vec2 texel, vec3 frag, fl
+     vec2 t1 = rot * vec2(-0.5, -0.5) + 0.125 * d;
+     vec2 t2 = rot * vec2(-0.5,  0.5) + 0.125 * d;
+     vec2 t3 = rot * vec2( 0.5,  0.5) + 0.125 * d;
++#ifdef PT_LIGHT_SURFACE_CONSTANTS
++        g_pcf_taps = vec2[4](t0, t1, t2, t3);
++    }
++    vec2 t0 = g_pcf_taps[0];
++    vec2 t1 = g_pcf_taps[1];
++    vec2 t2 = g_pcf_taps[2];
++    vec2 t3 = g_pcf_taps[3];
++#endif
+     float sum = 0.0;
+     sum += ShadowTap(clamp(uv + t0 * texel, lo, hi), zref);
+     sum += ShadowTap(clamp(uv + t1 * texel, lo, hi), zref);
+@@ -29,9 +48,14 @@ float ShadowPcf(vec2 uv, float zref, vec2 lo, vec2 hi, vec2 texel, vec3 frag, fl
+     return sum;
+ }
+ 
+-float SpotShadow(Light l, View v, vec3 world, float shadow_cone, vec3 frag) {
+-    vec3 receiver = world + v.inv_view[2].xyz * l.range.w + normalize(l.direction.xyz) * l.direction.w;
+-    vec4 c = l.shadow * vec4(receiver, 1.0);
++// The shadow functions and EvaluateLight take the light's index and read only the fields they use
++// from frame.lights (a Light by value copies all of its 432 bytes, three matrices included, into
++// registers for every call, also for lights that leave at the first test).
++float SpotShadow(uint li, View v, vec3 world, float shadow_cone, vec3 frag) {
++    vec4 direction = frame.lights[li].direction;
++    vec4 rect = frame.lights[li].shadow_rect;
++    vec3 receiver = world + v.inv_view[2].xyz * frame.lights[li].range.w + normalize(direction.xyz) * direction.w;
++    vec4 c = frame.lights[li].shadow * vec4(receiver, 1.0);
+     if (c.w <= 0.0) {
+         return 1.0;
      }
-+    // Facing away and not translucent: both terms below come out zero (diff and spec scale with
-+    // NdotL), so leave before the shadow taps and the material/LUT fetches. Same picture.
-+    if (dot(s.N, L) <= 0.0 && !(s.translucency > 0.0)) {
+@@ -41,27 +65,29 @@ float SpotShadow(Light l, View v, vec3 world, float shadow_cone, vec3 frag) {
+         return 1.0;
+     }
+     vec2 texel = 1.0 / ImgSize(IMG_SHADOW);
+-    vec2 lo = l.shadow_rect.xy + texel;
+-    vec2 hi = l.shadow_rect.xy + l.shadow_rect.zw - texel;
+-    vec2 uv = l.shadow_rect.xy + local * l.shadow_rect.zw;
++    vec2 lo = rect.xy + texel;
++    vec2 hi = rect.xy + rect.zw - texel;
++    vec2 uv = rect.xy + local * rect.zw;
+     float s = 1.0 - 0.25 * shadow_cone * ShadowPcf(uv, ndc.z, lo, hi, texel, frag, v.jitter.w, v.exposure.w, v.temporal);
+     return s * s;
+ }
+ 
+-float PointShadow(Light l, View v, vec3 view_pos, vec3 frag) {
+-    vec3 biased = vec3(view_pos.xy, view_pos.z + l.direction.w * l.cone.w);
++float PointShadow(uint li, View v, vec3 view_pos, vec3 frag) {
++    vec4 cone = frame.lights[li].cone;
++    vec4 rect = frame.lights[li].shadow_rect;
++    vec3 biased = vec3(view_pos.xy, view_pos.z + frame.lights[li].direction.w * cone.w);
+     vec3 world = (v.inv_view * vec4(biased, 1.0)).xyz;
+-    vec3 d = (l.shadow * vec4(world, 1.0)).xyz;
++    vec3 d = (frame.lights[li].shadow * vec4(world, 1.0)).xyz;
+     float len = max(length(d), 1.0e-5);
+     float s = d.z <= 0.0 ? -1.0 : 1.0;
+     vec2 p = vec2(-d.x, d.y) / (len + abs(d.z));
+     vec2 local = vec2(0.5 * ((p.x * 0.99902344 + s) * 0.5) + 0.5, 0.5 - 0.5 * p.y * 0.99902344);
+-    float zref = 1.0 - len * l.cone.z;
++    float zref = 1.0 - len * cone.z;
+     vec2 texel = 1.0 / ImgSize(IMG_SHADOW);
+-    vec2 uv = l.shadow_rect.xy + local * l.shadow_rect.zw;
+-    float half_width = l.shadow_rect.z * 0.5;
+-    vec2 lo = vec2(l.shadow_rect.x + (s > 0.0 ? half_width : 0.0), l.shadow_rect.y) + texel;
+-    vec2 hi = vec2(l.shadow_rect.x + (s > 0.0 ? l.shadow_rect.z : half_width), l.shadow_rect.y + l.shadow_rect.w) - texel;
++    vec2 uv = rect.xy + local * rect.zw;
++    float half_width = rect.z * 0.5;
++    vec2 lo = vec2(rect.x + (s > 0.0 ? half_width : 0.0), rect.y) + texel;
++    vec2 hi = vec2(rect.x + (s > 0.0 ? rect.z : half_width), rect.y + rect.w) - texel;
+     float sh = 1.0 - 0.25 * ShadowPcf(uv, zref, lo, hi, texel, frag, v.jitter.w, v.exposure.w, v.temporal);
+     return sh * sh;
+ }
+@@ -76,101 +102,152 @@ struct Surface {
+     float translucency;
+ };
+ 
++#ifdef PT_LIGHT_SURFACE_CONSTANTS
++// What EvaluateLight works out from the pixel alone (view and reflection vectors, the material's
++// two rows, the NDF table's roughness and gloss coordinates), worked out at the first light that
++// gets that far and kept for the pixel's other lights (light_all.frag evaluates many per pixel):
++// the same expressions, once per pixel instead of once per light. A pixel no light reaches pays nothing.
++bool g_surface_ready = false;
++vec3 g_surface_V;
++vec3 g_surface_R;
++vec4 g_surface_mat0;
++vec4 g_surface_mat1;
++vec2 g_surface_lut_yz;
++#endif
++
+ #if defined(PT_RT_SHADOWS) || defined(PT_RT_CONTACT)
+ float g_contact_reach = 0.0;
+ bool g_contact_legacy = false;
+ #endif
+ 
+-bool EvaluateLight(Light l, View v, Surface s, bool shadows, vec2 frag, out vec3 diffuse, out vec3 specular) {
++// Light li at surface s: false (and zero) where it gives nothing. The tests go cheapest first, each
++// reading only the fields it needs: the falloff (position, range, colour: past it the radiance
++// check fails whatever the cone, which is at most 1), the area box, facing away, then the cone.
++// Each early out returns what the full order returned there (false, zero), so the picture is the same.
++bool EvaluateLight(uint li, View v, Surface s, bool shadows, vec2 frag, out vec3 diffuse, out vec3 specular) {
+     const vec3 dither_frag = vec3(frag, v.exposure.w);
+     diffuse = vec3(0.0);
+     specular = vec3(0.0);
+-    if (l.info.z != 0) {
+-        vec3 q = (l.area * vec4(s.world, 1.0)).xyz;
+-        if (1.0 - max(abs(q.z), max(abs(q.x), abs(q.y))) < 0.0) {
+-            return false;
+-        }
+-    }
+-    bool spot = l.position.w > 0.5;
+-    vec3 light_pos = (v.view * vec4(l.position.xyz, 1.0)).xyz;
++    vec4 position = frame.lights[li].position;
++    vec4 range = frame.lights[li].range;
++    vec4 color = frame.lights[li].color;
++    bool spot = position.w > 0.5;
++    vec3 light_pos = (v.view * vec4(position.xyz, 1.0)).xyz;
+     vec3 lv = light_pos - s.P;
+     float dist = length(lv);
+     vec3 L = lv / max(dist, 1.0e-6);
+-    float d = spot ? max(l.range.y, dist + l.range.x) : max(l.range.y, dist) + l.range.x;
++    float d = spot ? max(range.y, dist + range.x) : max(range.y, dist) + range.x;
+     float d2 = d * d;
+-    float att = max(0.0, 1.0 / d2 - d2 * l.range.z);
+-    vec3 radiance = l.color.rgb * att * v.exposure.x;
++    float att = max(0.0, 1.0 / d2 - d2 * range.z);
++    vec3 radiance = color.rgb * att * v.exposure.x;
++    if (length(radiance) <= 1.0e-4) {
 +        return false;
 +    }
++    ivec4 info = frame.lights[li].info;
++    if (info.z != 0) {
++        vec3 q = (frame.lights[li].area * vec4(s.world, 1.0)).xyz;
++        if (1.0 - max(abs(q.z), max(abs(q.x), abs(q.y))) < 0.0) {
++            return false;
++        }
++    }
++    // Facing away and not translucent: both terms below come out zero (diff and spec scale with
++    // NdotL), so leave before the cone, the shadow taps and the material/LUT fetches.
++    float NdotL = dot(s.N, L);
++    if (NdotL <= 0.0 && !(s.translucency > 0.0)) {
++        return false;
++    }
+     float shadow_cone = 1.0;
+     if (spot) {
+-        vec3 axis = mat3(v.view) * l.direction.xyz;
++        vec4 cone_k = frame.lights[li].cone;
++        vec4 shadow_k = frame.lights[li].shadow_cone;
++        vec3 axis = mat3(v.view) * frame.lights[li].direction.xyz;
+         float cos_a = dot(axis, -L);
+-        float cone = pow(abs(Saturate((cos_a - l.cone.x) * l.cone.y)), l.cone.z);
++        float cone = pow(abs(Saturate((cos_a - cone_k.x) * cone_k.y)), cone_k.z);
+         radiance *= cone;
+-        float sc = Saturate((cos_a - l.shadow_cone.x) * l.shadow_cone.y);
++        float sc = Saturate((cos_a - shadow_k.x) * shadow_k.y);
+         shadow_cone = sc * sc;
++        if (length(radiance) <= 1.0e-4) {
++            return false;
++        }
+     }
+-    if (length(radiance) <= 1.0e-4) {
+-        return false;
+-    }
++    vec4 scales = frame.lights[li].scales;
      float shadow = 1.0;
-     if (l.info.x >= 0 && shadows) {
+-    if (l.info.x >= 0 && shadows) {
++    if (info.x >= 0 && shadows) {
  #ifdef PT_RT_SHADOWS
+-        if (dot(s.N, L) > 0.0 || s.translucency > 0.0) {
++        if (NdotL > 0.0 || s.translucency > 0.0) {
+             vec3 n = s.translucency > 0.0 ? vec3(0.0) : normalize(mat3(v.inv_view) * s.N);
+-            shadow = RtShadow(l, s.world, n, spot, shadow_cone, frag, v.exposure.w);
++            shadow = RtShadow(frame.lights[li], s.world, n, spot, shadow_cone, frag, v.exposure.w);
+         }
+ #else
+-        shadow = spot ? SpotShadow(l, v, s.world, shadow_cone, dither_frag) : PointShadow(l, v, s.P, dither_frag);
++        shadow = spot ? SpotShadow(li, v, s.world, shadow_cone, dither_frag) : PointShadow(li, v, s.P, dither_frag);
+ #endif
+     }
+-    float vis = 1.0 + l.scales.z * (shadow - 1.0);
++    float vis = 1.0 + scales.z * (shadow - 1.0);
+ #if defined(PT_RT_SHADOWS) || defined(PT_RT_CONTACT)
+-    if (g_contact_reach > 0.0 && l.scales.w > 0.0 && (g_contact_legacy || l.scales.z > 0.0) && (dot(s.N, L) > 0.0 || s.translucency > 0.0)) {
+-        float t = RtContactDistance(l, s.world, normalize(mat3(v.inv_view) * s.N), g_contact_reach);
++    if (g_contact_reach > 0.0 && scales.w > 0.0 && (g_contact_legacy || scales.z > 0.0) && (NdotL > 0.0 || s.translucency > 0.0)) {
++        float t = RtContactDistance(frame.lights[li], s.world, normalize(mat3(v.inv_view) * s.N), g_contact_reach);
+         if (t >= 0.0) {
+             if (g_contact_legacy) {
+                 vis *= 1.0 - Saturate(2.0 * (1.0 - t / g_contact_reach));
+             } else {
+                 float contact = 1.0 - shadow_cone * (1.0 - smoothstep(0.0, g_contact_reach, t));
+-                vis = 1.0 + l.scales.z * (min(shadow, contact * contact) - 1.0);
++                vis = 1.0 + scales.z * (min(shadow, contact * contact) - 1.0);
+             }
+         }
+     }
+ #endif
+     vec3 mask = vec3(1.0);
+-    if (l.info.y >= 0 || l.info.w > 0) {
+-        vec4 c = l.mask * vec4(s.world, 1.0);
++    if (info.y >= 0 || info.w > 0) {
++        vec4 c = frame.lights[li].mask * vec4(s.world, 1.0);
+         if (c.w > 0.0) {
+             vec2 uv = vec2(0.5 * c.x / c.w + 0.5, 1.0 - (0.5 * c.y / c.w + 0.5));
+-            if (l.info.w > 0) {
+-                mask = textureLod(PT_TEXTURE(uint(l.info.w - 1)), uv, 0.0).rgb;
++            if (info.w > 0) {
++                mask = textureLod(PT_TEXTURE(uint(info.w - 1)), uv, 0.0).rgb;
+             } else {
+-                mask = ImgLod(uint(l.info.y), SMP_LINEAR_WRAP, uv, 0.0).rgb;
++                mask = ImgLod(uint(info.y), SMP_LINEAR_WRAP, uv, 0.0).rgb;
+             }
+         } else {
+             mask = vec3(0.0);
+         }
+     }
+     vec3 N = s.N;
++#ifdef PT_LIGHT_SURFACE_CONSTANTS
++    if (!g_surface_ready) {
++        g_surface_ready = true;
++        g_surface_V = -normalize(s.P);
++        g_surface_R = reflect(-g_surface_V, N);
++        g_surface_mat0 = Img(RES_MATERIAL, SMP_POINT_CLAMP, vec2(s.material_u, 0.25));
++        g_surface_mat1 = Img(RES_MATERIAL, SMP_POINT_CLAMP, vec2(s.material_u, 0.75));
++        g_surface_lut_yz = vec2(s.roughness * s.roughness * 0.9375 + 0.03125, g_surface_mat1.w * g_surface_mat1.w * 0.9375 + 0.03125);
++    }
++    vec3 V = g_surface_V;
++    vec3 R = g_surface_R;
++#else
+     vec3 V = -normalize(s.P);
+     vec3 R = reflect(-V, N);
++#endif
+     vec3 to_ray = R - L;
+-    float k = Saturate(Saturate(0.9 * l.color.w / d) / max(length(to_ray), 1.0e-6));
++    float k = Saturate(Saturate(0.9 * color.w / d) / max(length(to_ray), 1.0e-6));
+     vec3 Ls = normalize(L + to_ray * k);
+     vec3 H = normalize(Ls + V);
+     float NdotH = Saturate(dot(N, H));
+-    float NdotL = dot(N, L);
+     float LdotH = dot(H, L);
++#ifdef PT_LIGHT_SURFACE_CONSTANTS
++    vec4 mat0 = g_surface_mat0;
++    vec4 mat1 = g_surface_mat1;
++    vec3 lut_uv = vec3(NdotH * NdotH * 0.984375 + 0.0078125, g_surface_lut_yz);
++#else
+     vec4 mat0 = Img(RES_MATERIAL, SMP_POINT_CLAMP, vec2(s.material_u, 0.25));
+     vec4 mat1 = Img(RES_MATERIAL, SMP_POINT_CLAMP, vec2(s.material_u, 0.75));
+     vec3 lut_uv = vec3(NdotH * NdotH * 0.984375 + 0.0078125, s.roughness * s.roughness * 0.9375 + 0.03125, mat1.w * mat1.w * 0.9375 + 0.03125);
++#endif
+     vec2 ndf = texture(sampler3D(lut2_image, samplers[SMP_LINEAR_CLAMP]), lut_uv).xy;
+     float D = ndf.x * ndf.x / max(ndf.y * ndf.y, 1.0e-8);
+     float F = Img(RES_LUT1, SMP_LINEAR_CLAMP, vec2(LdotH, mat1.x)).x;
+     float spec = Saturate(4.0 * NdotL) * F * D;
+     float w = s.translucency;
+     float diff = Saturate(max(NdotL + w * (1.0 - NdotL * NdotL), w * mat0.w));
+-    diffuse = radiance * l.scales.y * diff * vis * mask;
+-    specular = radiance * l.scales.x * s.specular * mat0.rgb * spec * vis * mask;
++    diffuse = radiance * scales.y * diff * vis * mask;
++    specular = radiance * scales.x * s.specular * mat0.rgb * spec * vis * mask;
+     return true;
+ }
 diff --git a/shaders/probe_main.glsl b/shaders/probe_main.glsl
 index bb2e1d6..2ac5fcd 100644
 --- a/shaders/probe_main.glsl
@@ -449,10 +924,10 @@ index 35ad849..144f24f 100644
 +    out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), alpha);
  }
 diff --git a/shaders/tonemap.frag b/shaders/tonemap.frag
-index d39d6a6..4c2b603 100644
+index d39d6a6..0d965e8 100644
 --- a/shaders/tonemap.frag
 +++ b/shaders/tonemap.frag
-@@ -29,7 +29,10 @@ void main() {
+@@ -29,12 +29,19 @@ void main() {
      } else {
          vec3 hdr = ImgFetch(IMG_HDR, pixel).rgb * pass.f0.z;
          vec3 x = min(SrgbEncode(clamp(hdr, 0.0, 1.0)) + max(ImgFetch(IMG_FLARE, pixel).rgb, vec3(0.0)), vec3(1.0));
@@ -464,6 +939,66 @@ index d39d6a6..4c2b603 100644
          vec3 b = pass.f0.x > 0.0 ? min(vec3(0.5), Img(IMG_BLOOM_SUM, SMP_LINEAR_CLAMP, bloom_uv).rgb) : vec3(0.0);
          vec3 x2 = x * x;
          vec3 r = clamp(x2 + b - x2 * b, 0.0, 1.0);
+         c = clamp(r * inversesqrt(max(vec3(1.0 / 512.0), r)), 0.0, 1.0);
+     }
++    // f1.x > 0: the colour LUT pass fused in (as if `c` went through the 8-bit LDR target first).
++    if (pass.f1.x > 0.0) {
++        c = round(c * 255.0) / 255.0;
++    }
+     vec3 graded = c;
+     if (pass.f0.w > 0.0) {
+         graded = Lut16(RES_COLOR_LUT, c);
+@@ -42,5 +49,29 @@ void main() {
+             graded = mix(Lut16(RES_COLOR_LUT_PREV, c), graded, pass.f0.y);
+         }
+     }
++    if (pass.f1.y > 0.0) {
++        // The screen pass fused in (screen_fx.frag with no distortion or clarity: its pixel as
++        // the 8-bit LDR target holds it, its noise and its HDR alpha; f1.z its f0.y, the peak).
++        vec3 color = round(clamp(graded, 0.0, 1.0) * 255.0) / 255.0;
++        vec3 seed = fract(vec3(gl_FragCoord.xyx) * vec3(0.1031, 0.1030, 0.0973));
++        seed += dot(seed, seed.yxz + 33.33);
++        float noise = fract((seed.x + seed.y) * seed.z) - 0.5;
++        float alpha = 1.0;
++        if (pass.f1.z > 1.0) {
++            ivec2 hdr_size = ivec2(ImgSize(IMG_HDR));
++            ivec2 p = clamp(ivec2(in_uv * vec2(hdr_size)), ivec2(0), hdr_size - 1);
++            vec3 scene = max(ImgFetch(IMG_HDR, p).rgb * pass.f0.z, vec3(0.0));
++            float clipped = Luma709(min(scene, vec3(1.0)));
++            float y = Luma709(scene);
++            if (y > clipped + 1.0e-4 && clipped > 1.0e-3) {
++                float peak = min(pass.f1.z, 2.0);
++                float over = max(y - 1.0, 0.0);
++                float shown = min(y, 1.0) + (peak - 1.0) * (1.0 - exp(-over / (peak - 1.0)));
++                alpha = 2.0 - clamp(shown / clipped, 1.0, peak);
++            }
++        }
++        out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), alpha);
++        return;
++    }
+     out_color = vec4(graded, Luma601(graded));
+ }
+diff --git a/shaders/upscale_demod.frag b/shaders/upscale_demod.frag
+index 7355148..f35de2a 100644
+--- a/shaders/upscale_demod.frag
++++ b/shaders/upscale_demod.frag
+@@ -21,7 +21,6 @@ void main() {
+     float depth = ImgFetch(IMG_DEPTH, pixel).x;
+     if (depth > 0.0 && hdr.a < 1.0 && pass.ids.y != 0xFFFFFFFFu) {
+         View v = frame.views[pass.ids.x];
+-        Light l = frame.lights[pass.ids.y];
+         Surface s;
+         s.P = ViewPosition(v, PixelNdc(v, gl_FragCoord.xy), depth);
+         s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
+@@ -33,7 +32,7 @@ void main() {
+         s.translucency = g_material.w;
+         vec3 dh;
+         vec3 sh;
+-        if (EvaluateLight(l, v, s, pass.ids.z != 0u, gl_FragCoord.xy, dh, sh)) {
++        if (EvaluateLight(pass.ids.y, v, s, pass.ids.z != 0u, gl_FragCoord.xy, dh, sh)) {
+             float whole = Luma709(max(ImgFetch(IMG_DIFFUSE, pixel).rgb, vec3(0.0)));
+             float handy = clamp(Luma709(max(dh, vec3(0.0))), 0.0, whole);
+             factor = (whole + pass.f0.x) / (whole - handy + pass.f0.x);
 diff --git a/shaders/upscale_motion.frag b/shaders/upscale_motion.frag
 index 00687d9..f352904 100644
 --- a/shaders/upscale_motion.frag
@@ -547,12 +1082,43 @@ index 1be202c..25df602 100644
      if (particles.a >= 1.0 && all(equal(particles.rgb, vec3(0.0)))) {
          out_color = scene;
          return;
+diff --git a/shaders/vfx_particle.vert b/shaders/vfx_particle.vert
+index c9c8551..ad12caa 100644
+--- a/shaders/vfx_particle.vert
++++ b/shaders/vfx_particle.vert
+@@ -38,6 +38,7 @@ layout(location = 11) flat out vec4 out_rain_rotation;
+ 
+ const uint kCorners[6] = uint[6](0u, 2u, 1u, 1u, 2u, 3u);
+ const uint kLiquid = 8u;
++const uint kFlare = 64u;
+ const uint kTriangle = 512u;
+ 
+ void main() {
+@@ -72,6 +73,18 @@ void main() {
+     if (push.ids.y != 1u) {
+         gl_Position = push.view_projection * vec4(p.xyz, 1.0);
+         out_view_depth = gl_Position.w;
++    } else if ((q.info.y & kFlare) != 0u && q.info.w == 1u) {
++        // A headset flare: a billboard at its light (world corners), seen by this view; the
++        // light's pixel and distance for the occlusion taps are this view's too.
++        gl_Position = push.view_projection * vec4(p.xyz, 1.0);
++        gl_Position.z = 0.5 * gl_Position.w;
++        vec4 c = push.view_projection * vec4(q.extra.xyz, 1.0);
++        vec2 ndc = c.w > 1.0e-6 ? c.xy / c.w : vec2(2.0);
++        // A light a little outside this view (an inset's edge) still tests the depth at the
++        // view's border (clamped taps), not "visible": no glow through walls along the inset seam.
++        out_params = c.w > 1.0e-6 && all(lessThanEqual(abs(ndc), vec2(1.5))) ? vec4(clamp(ndc * 0.5 + 0.5, 0.0, 1.0), c.w, q.params.w)
++                                                                             : vec4(0.5, 0.5, 0.0, q.params.w);
++        out_view_depth = 0.0;
+     } else {
+         gl_Position = vec4(p.xy, 0.0, 1.0);
+         out_view_depth = 0.0;
 diff --git a/shaders/vpktaa.frag b/shaders/vpktaa.frag
 new file mode 100644
-index 0000000..ab6faa0
+index 0000000..99b369b
 --- /dev/null
 +++ b/shaders/vpktaa.frag
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,344 @@
 +#version 460
 +// VPKTAA: the headset's temporal antialiasing, in the pass that hands the scene to the post chain
 +// (it replaces the upscale resolve for a headset view). For each output pixel, in one pass:
@@ -582,6 +1148,8 @@ index 0000000..ab6faa0
 +#define SIGMA_FLAT 1.25
 +#define SIGMA_EDGE 0.85
 +#define DISOCCLUSION 0.05
++// 1: the 3x3's depths with 3 gathers + 1 fetch (the same values as 9 fetches); 0: 9 fetches.
++#define DEPTH_GATHER 1
 +
 +layout(push_constant) uniform PassPush {
 +    uvec4 ids;  // x the history to read (image slot), y flags (1 history valid, 2 the TAA is on the
@@ -696,41 +1264,88 @@ index 0000000..ab6faa0
 +    vec2 render_point = uv * pass.f1.xy + jitter_px;
 +    ivec2 base = ivec2(floor(render_point));
 +
-+    vec3 samples[9];
-+    float distance2[9];
++    // The 3x3's depths: 3 gathers + 1 fetch instead of 9 fetches. A gather at the corner shared by
++    // texels (x - 1, y - 1) and (x, y) returns them as (x-1,y), (x,y), (x,y-1), (x-1,y-1) (w is the
++    // top-left); clamp to edge at the texture's own size, as the fetches' clamp to render size - 1.
++    float depths[9];
++    {
++#if DEPTH_GATHER
++        vec2 depth_size = ImgSize(IMG_DEPTH);
++        vec2 texel = 1.0 / depth_size;
++        ivec2 last = ivec2(depth_size) - 1;
++        vec4 g0 = textureGather(sampler2D(images[IMG_DEPTH], samplers[SMP_POINT_CLAMP]), vec2(base) * texel, 0);
++        vec4 g1 = textureGather(sampler2D(images[IMG_DEPTH], samplers[SMP_POINT_CLAMP]), vec2(base + ivec2(1, 0)) * texel, 0);
++        vec4 g2 = textureGather(sampler2D(images[IMG_DEPTH], samplers[SMP_POINT_CLAMP]), vec2(base + ivec2(0, 1)) * texel, 0);
++        depths[0] = g0.w;
++        depths[1] = g0.z;
++        depths[2] = g1.z;
++        depths[3] = g0.x;
++        depths[4] = g0.y;
++        depths[5] = g1.y;
++        depths[6] = g2.x;
++        depths[7] = g2.y;
++        depths[8] = ImgFetch(IMG_DEPTH, clamp(base + 1, ivec2(0), last)).x;
++#else
++        for (int i = 0; i < 9; ++i) {
++            depths[i] = ImgFetch(IMG_DEPTH, clamp(base + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), render_size - 1)).x;
++        }
++#endif
++    }
++
++    // Distance of the samples to this output pixel's centre, in output pixels, per axis: the
++    // Gaussian weight is separable (exp(a + b) = exp(a) exp(b): 6 exps, not 9) and the nearest
++    // sample is the nearest column with the nearest row (first one on a tie, as a scan in order).
++    vec2 offset = vec2(base) + 0.5 - render_point;
++    vec3 dx = (vec3(-1.0, 0.0, 1.0) + offset.x) / ratio.x;
++    vec3 dy = (vec3(-1.0, 0.0, 1.0) + offset.y) / ratio.y;
++    dx *= dx;
++    dy *= dy;
++    vec3 wx = exp(-2.29 * dx);
++    vec3 wy = exp(-2.29 * dy);
++    int nx = dx.y < dx.x ? (dx.z < dx.y ? 2 : 1) : (dx.z < dx.x ? 2 : 0);
++    int ny = dy.y < dy.x ? (dy.z < dy.y ? 2 : 1) : (dy.z < dy.x ? 2 : 0);
++    int nearest_index = ny * 3 + nx;
++    ivec2 nearest_pixel = clamp(base + ivec2(nx, ny) - 1, ivec2(0), render_size - 1);
++
 +    vec3 m1 = vec3(0.0);
 +    vec3 m2 = vec3(0.0);
 +    vec3 box_lo = vec3(1.0e9);
 +    vec3 box_hi = vec3(-1.0e9);
++    vec3 gauss = vec3(0.0);
++    // The nearest sample's alpha (out_color.a), depth (out_depth) and weight (exp(-2.29 * its
++    // distance squared)): picked in the loop (no dynamic index into the arrays).
++    float own_alpha = 0.0;
++    float own_depth = 0.0;
++    float nearest_weight = 0.0;
 +    float closest = -1.0;
 +    float farthest = 1.0e9;
-+    ivec2 closest_pixel = clamp(base, ivec2(0), render_size - 1);
-+    float nearest2 = 1.0e9;
-+    ivec2 nearest_pixel = closest_pixel;
++    int closest_index = 4;
 +    for (int i = 0; i < 9; ++i) {
 +        ivec2 o = ivec2(i % 3 - 1, i / 3 - 1);
 +        ivec2 p = clamp(base + o, ivec2(0), render_size - 1);
-+        vec3 s = ToYCoCg(Compress(Sane(ImgFetch(IMG_HDR, p).rgb)));
-+        samples[i] = s;
++        vec4 raw = ImgFetch(IMG_HDR, p);
++        vec3 s = ToYCoCg(Compress(Sane(raw.rgb)));
 +        m1 += s;
 +        m2 += s * s;
 +        box_lo = min(box_lo, s);
 +        box_hi = max(box_hi, s);
-+        // Distance to this output pixel's centre, in output pixels.
-+        vec2 d = (vec2(base + o) + 0.5 - render_point) / ratio;
-+        distance2[i] = dot(d, d);
-+        if (distance2[i] < nearest2) {
-+            nearest2 = distance2[i];
-+            nearest_pixel = p;
-+        }
++        // The current frame at this pixel: a Gaussian fit of Blackman-Harris over the samples.
++        float w = wx[o.x + 1] * wy[o.y + 1];
++        gauss += s * w;
 +        // Reverse depth: the larger, the nearer (0: nothing drawn).
-+        float depth = ImgFetch(IMG_DEPTH, p).x;
++        float depth = depths[i];
++        if (i == nearest_index) {
++            own_alpha = raw.a;
++            own_depth = depth;
++            nearest_weight = w;
++        }
 +        if (depth > closest) {
 +            closest = depth;
-+            closest_pixel = p;
++            closest_index = i;
 +        }
 +        farthest = min(farthest, depth);
 +    }
++    ivec2 closest_pixel = clamp(base + ivec2(closest_index % 3, closest_index / 3) - 1, ivec2(0), render_size - 1);
 +
 +    // Motion of the nearest surface around (an edge moves with what is in front: no trail).
 +    // previous uv - current uv, unjittered.
@@ -762,18 +1377,10 @@ index 0000000..ab6faa0
 +    float speed = min(length(motion * output_size), 64.0);  // output pixels a frame
 +    float still = 1.0 - clamp(speed * 0.5, 0.0, 1.0);
 +
-+    // The current frame at this pixel: a Gaussian fit of Blackman-Harris over the samples, then
-+    // sharpened against the 3x3's mean (the accumulation converges on the sharpened value, so
-+    // the picture comes out sharp without a separate pass, and the history is never sharpened
-+    // twice).
-+    vec3 gauss = vec3(0.0);
-+    float gauss_weight = 0.0;
-+    for (int i = 0; i < 9; ++i) {
-+        float w = exp(-2.29 * distance2[i]);
-+        gauss += samples[i] * w;
-+        gauss_weight += w;
-+    }
-+    gauss /= max(gauss_weight, 1.0e-5);
++    // The current frame at this pixel: the Gaussian fit summed in the loop, then sharpened against
++    // the 3x3's mean (the accumulation converges on the sharpened value, so the picture comes out
++    // sharp without a separate pass, and the history is never sharpened twice).
++    gauss /= max(dot(wx, vec3(1.0)) * dot(wy, vec3(1.0)), 1.0e-5);
 +    vec3 mean = m1 / 9.0;
 +    vec3 current = gauss;
 +    bool periphery = (pass.ids.y & 2u) != 0u;
@@ -810,8 +1417,7 @@ index 0000000..ab6faa0
 +        reactive = clamp(max(1.0 - particles.a, MaxOf(particles.rgb) * 4.0), 0.0, 1.0);
 +    }
 +
-+    // The nearest render sample: this pixel's depth, distance and velocity.
-+    float own_depth = ImgFetch(IMG_DEPTH, nearest_pixel).x;
++    // The nearest render sample: this pixel's depth (read in the 3x3), distance and velocity.
 +    float own_distance = own_depth > 0.0 ? ViewZ(v, own_depth) : 60000.0;
 +    vec3 result = current;
 +    vec2 previous_uv = uv + motion;
@@ -829,7 +1435,8 @@ index 0000000..ab6faa0
 +        keep = mix(keep - 0.12, keep, agree * agree);
 +        // Disocclusion: the history held something nearer there (this surface was hidden).
 +        if (expected_distance > 0.0) {
-+            float held = HistoryTap(floor(previous_pixel) + 0.5, output_size).a;
++            // (The texel under it, read directly: what a bilinear tap at its centre returns.)
++            float held = ImgFetch(pass.ids.x, clamp(ivec2(previous_pixel), ivec2(0), ivec2(output_size) - 1)).a;
 +            float nearer = (expected_distance - held) / expected_distance;
 +            // (Wider where the surface itself spans depth across the 3x3: a floor at a grazing
 +            // angle must not lose its history.)
@@ -839,7 +1446,7 @@ index 0000000..ab6faa0
 +        keep *= 1.0 - 0.75 * reactive;
 +        // Below 100 %: where no sample falls near this pixel, the history knows it better.
 +        if (ratio.x < 0.999) {
-+            float confidence = exp(-2.29 * nearest2);
++            float confidence = nearest_weight;
 +            keep = 1.0 - (1.0 - keep) * mix(0.35, 1.0, confidence);
 +        }
 +        result = mix(current, history, clamp(keep, 0.0, 0.97));
@@ -852,7 +1459,7 @@ index 0000000..ab6faa0
 +            color = min(color, vec3(1.0)) * (1.0 - reflection.a) + reflection.rgb;
 +        }
 +    }
-+    out_color = vec4(color, ImgFetch(IMG_HDR, nearest_pixel).a);
++    out_color = vec4(color, own_alpha);
 +    out_depth = vec4(own_depth, 0.0, 0.0, 0.0);
 +    out_velocity = ImgFetch(IMG_OBJECT_VELOCITY_, nearest_pixel);
 +}
@@ -1249,7 +1856,7 @@ index 9bb3b5d..d9886c0 100644
      XrFrame xr_frame_;
      bool xr_pending_ = false;
 diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
-index 40d339d..99682d2 100644
+index 40d339d..3c58237 100644
 --- a/src/engine/render/scene_frame.cpp
 +++ b/src/engine/render/scene_frame.cpp
 @@ -306,7 +306,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
@@ -1311,7 +1918,15 @@ index 40d339d..99682d2 100644
      DrawPairKeys pair_keys;
      for (const DrawItem& item : items) {
          if (!item.mesh) {
-@@ -451,8 +473,15 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -443,6 +465,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+             d.tint = item.tint;
+             d.material = item.material_override >= 0 ? static_cast<uint32_t>(item.material_override) : sub.material;
+             d.skin_base = skin_base;
++            d.skin_count = skin_base != gpu::kInvalid ? static_cast<uint32_t>(item.skin.size()) : 0u;
+             d.previous_model = previous_model;
+             d.previous_skin = previous_skin;
+             d.center = center;
+@@ -451,8 +474,15 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
              draws_.push_back(d);
          }
      }
@@ -1329,7 +1944,7 @@ index 40d339d..99682d2 100644
      if (dump_requested_) {
          for (const Draw& d : draws_) {
              if (glm::distance(d.center, camera.position) < d.radius + 0.3f) {
-@@ -474,7 +503,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -474,7 +504,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
  
      mirror_active_ = false;
      mirror_stale_active_ = false;
@@ -1339,7 +1954,7 @@ index 40d339d..99682d2 100644
      mirrors_.clear();
      static const bool trace_active = std::getenv("PT_MIRROR_TRACE") != nullptr;
      if (trace_active) {
-@@ -610,6 +640,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -610,6 +641,18 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          }
      }
  
@@ -1358,7 +1973,7 @@ index 40d339d..99682d2 100644
      static const bool legacy_cull = [] {
          const char* s = std::getenv("PT_LIGHT_CULL_LEGACY");
          return s && std::string_view(s) == "1";
-@@ -624,8 +666,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -624,8 +667,8 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
      mirror_occluders_ = {};
      if (!legacy_cull) {
          const lightcull::OccluderLimits& limits = lightcull::LimitsFromEnv();
@@ -1369,7 +1984,7 @@ index 40d339d..99682d2 100644
          if (mirror_active_) {
              mirror_occluders_ = lightcull::BuildOccluderVolumes(lighting.occluders, mirror_current_view_projection_, mirror_view_.eye, limits);
          }
-@@ -664,7 +706,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -664,7 +707,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
                  drop = "box outside the view planes";
              } else if (!mirror_active_) {
                  for (size_t oi = 0; oi < lighting.occluders.size(); ++oi) {
@@ -1378,7 +1993,7 @@ index 40d339d..99682d2 100644
                          const glm::vec3 q = lighting.occluders[oi].points[0];
                          drop = explain ? std::format("occluder {} at ({:.2f} {:.2f} {:.2f}) hides box ({:.2f} {:.2f} {:.2f})-({:.2f} {:.2f} {:.2f})", oi, q.x,
                                                       q.y, q.z, box.lo.x, box.lo.y, box.lo.z, box.hi.x, box.hi.y, box.hi.z)
-@@ -698,7 +740,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -698,7 +741,7 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
              }
          }
          const glm::vec3 cull_rank = l.has_rank_point ? l.rank_point : (box.lo + box.hi) * 0.5f;
@@ -1387,7 +2002,7 @@ index 40d339d..99682d2 100644
          const float cull_gate = glm::pi<float>() * (l.intensity.x + l.intensity.y + l.intensity.z) * exposure_;
          if (trace_cull_frame) {
              std::string reason = drop;
-@@ -796,7 +838,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
+@@ -796,7 +839,9 @@ void SceneRenderer::PrepareFrame(const Camera& camera, const std::vector<DrawIte
          }
          LogInfo("probe at: blend ({:.4f} {:.4f} {:.4f})", blend.x, blend.y, blend.z);
      }
@@ -1398,7 +2013,7 @@ index 40d339d..99682d2 100644
      if (static const bool light_changes = std::getenv("PT_LIGHT_CHANGES") != nullptr; light_changes) {
          std::map<std::string, std::pair<bool, float>> now;
          for (uint32_t i = 0; i < light_count_; ++i) {
-@@ -984,18 +1028,108 @@ void SceneRenderer::BuildShadowViews(const SceneLighting& lighting, const glm::v
+@@ -984,18 +1029,108 @@ void SceneRenderer::BuildShadowViews(const SceneLighting& lighting, const glm::v
          }
          return false;
      };
@@ -1511,7 +2126,7 @@ index 40d339d..99682d2 100644
          const float tile_uv = static_cast<float>(shadow_tile) / static_cast<float>(shadow_size);
          const glm::vec3 pos = glm::vec3(g.position);
          if (spot) {
-@@ -1134,6 +1268,40 @@ void SceneRenderer::PushConstants(VkCommandBuffer cmd, const void* data, uint32_
+@@ -1134,6 +1269,40 @@ void SceneRenderer::PushConstants(VkCommandBuffer cmd, const void* data, uint32_
      vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT, 0, size, data);
  }
  
@@ -1552,7 +2167,7 @@ index 40d339d..99682d2 100644
  void SceneRenderer::Fullscreen(VkCommandBuffer cmd, VkPipeline pipeline, const gpu::PassPush& push) {
      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
      PushConstants(cmd, &push, sizeof(push));
-@@ -1232,14 +1400,99 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+@@ -1232,21 +1401,205 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
      if (shadow_views_.empty()) {
          return;
      }
@@ -1576,9 +2191,35 @@ index 40d339d..99682d2 100644
 +        for (size_t i = 0; i < size; ++i) h = (h ^ bytes[i]) * 1099511628211ull;
 +        return h;
 +    };
++    // Each caster's own hash, once a frame (mesh, material, place, and a skinned caster's pose:
++    // a skinned object standing still — a door at rest — keeps its tiles like any other).
++    std::vector<uint64_t> caster_hash(draws_.size(), 0);
++    std::vector<bool> skinned(draws_.size(), false);
++    for (size_t j = 0; j < draws_.size(); ++j) {
++        const Draw& d = draws_[j];
++        if (!d.sub->shadow) continue;
++        uint64_t c = 1469598103934665603ull;
++        c = mix(c, &d.mesh, sizeof(d.mesh));
++        c = mix(c, &d.sub, sizeof(d.sub));
++        c = mix(c, &d.material, sizeof(d.material));
++        c = mix(c, &d.transform, sizeof(d.transform));
++        if (d.skin_base != gpu::kInvalid && d.skin_count > 0 && d.skin_base + d.skin_count <= skin_matrices_.size()) {
++            skinned[j] = true;
++            // (Word by word: a pose is a few kilobytes.)
++            const auto* words = reinterpret_cast<const uint64_t*>(skin_matrices_.data() + d.skin_base);
++            const size_t count = d.skin_count * sizeof(glm::mat4) / sizeof(uint64_t);
++            for (size_t w = 0; w < count; ++w) c = (c ^ words[w]) * 1099511628211ull;
++        }
++        caster_hash[j] = c;
++    }
 +    std::vector<ShadowTileKey> keys(shadow_views_.size());
-+    std::vector<bool> redraw(shadow_views_.size(), true);
++    std::vector<ShadowTileKey> static_keys(shadow_views_.size());
++    // 0 kept, 1 drawn whole, 2 drawn as the kept static depths plus the skinned casters,
++    // 3 as 2 after drawing the static depths again.
++    std::vector<uint8_t> plan(shadow_views_.size(), 1);
++    std::vector<int> static_slot(shadow_views_.size(), -1);
 +    bool any_redraw = false;
++    const uint32_t shadow_tile = shadow_.Extent().width / kShadowTiles;
 +    for (size_t i = 0; i < shadow_views_.size(); ++i) {
 +        const ShadowView& sv = shadow_views_[i];
 +        const gpu::View& v = frame_->views[sv.view];
@@ -1595,80 +2236,206 @@ index 40d339d..99682d2 100644
 +        h = mix(h, &sv.bias_constant, sizeof(sv.bias_constant));
 +        h = mix(h, &sv.bias_slope, sizeof(sv.bias_slope));
 +        h = mix(h, &sv.cull, sizeof(sv.cull));
-+        bool animated = false;
 +        // The casters as a set: the draw list's order changes with the camera (sorting), not
-+        // the tile's depths, so each caster's own hash is summed.
++        // the tile's depths, so each caster's own hash is summed. The static set (no skinned
++        // casters) separately: what a split tile keeps.
 +        uint64_t set = 0;
++        uint64_t static_set = 0;
 +        uint32_t count = 0;
-+        for (const Draw& d : draws_) {
-+            if (!casts(sv, d)) continue;
-+            if (d.skin_base != gpu::kInvalid || d.sub->skinned) animated = true;
-+            uint64_t c = 1469598103934665603ull;
-+            c = mix(c, &d.mesh, sizeof(d.mesh));
-+            c = mix(c, &d.sub, sizeof(d.sub));
-+            c = mix(c, &d.material, sizeof(d.material));
-+            c = mix(c, &d.transform, sizeof(d.transform));
-+            set += c;
++        uint32_t static_count = 0;
++        bool has_skinned = false;
++        for (size_t j = 0; j < draws_.size(); ++j) {
++            if (!casts(sv, draws_[j])) continue;
++            set += caster_hash[j];
 +            ++count;
++            if (skinned[j]) {
++                has_skinned = true;
++            } else {
++                static_set += caster_hash[j];
++                ++static_count;
++            }
 +        }
++        const uint64_t header = h;
 +        h = mix(h, &set, sizeof(set));
 +        h = mix(h, &count, sizeof(count));
++        uint64_t sh = mix(header, &static_set, sizeof(static_set));
++        sh = mix(sh, &static_count, sizeof(static_count));
 +        keys[i].rect = sv.rect;
 +        keys[i].key = h;
++        static_keys[i].rect = sv.rect;
++        static_keys[i].key = sh;
++        auto same_rect = [](const VkRect2D& a, const VkRect2D& b) {
++            return a.offset.x == b.offset.x && a.offset.y == b.offset.y && a.extent.width == b.extent.width && a.extent.height == b.extent.height;
++        };
 +        bool kept = false;
-+        if (!cache_off && !animated) {
++        if (!cache_off) {
 +            for (const ShadowTileKey& k : shadow_tiles_) {
-+                if (k.key == h && k.rect.offset.x == sv.rect.offset.x && k.rect.offset.y == sv.rect.offset.y &&
-+                    k.rect.extent.width == sv.rect.extent.width && k.rect.extent.height == sv.rect.extent.height) {
++                if (k.key == h && same_rect(k.rect, sv.rect)) {
 +                    kept = true;
 +                    break;
 +                }
 +            }
 +        }
-+        // An animated tile gets a key no frame can match.
-+        if (animated) keys[i].key = 0;
-+        redraw[i] = !kept;
-+        any_redraw = any_redraw || !kept;
-+        ++(kept ? shadow_tiles_kept_ : shadow_tiles_drawn_);
++        if (kept) {
++            plan[i] = 0;
++            ++shadow_tiles_kept_;
++            continue;
++        }
++        any_redraw = true;
++        ++shadow_tiles_drawn_;
++        if (cache_off || !has_skinned || sv.rect.extent.width != shadow_tile || sv.rect.extent.height != shadow_tile) {
++            ++shadow_full_moved_;
++            continue;
++        }
++        // Skinned casters changed: split, if the static part stands still (as it was last frame,
++        // so a moving light — the flashlight — does not pay for a copy every frame).
++        int slot = -1;
++        for (size_t s = 0; s < kShadowStatics; ++s) {
++            if (shadow_static_[s].image.Valid() && same_rect(shadow_static_[s].rect, sv.rect)) slot = static_cast<int>(s);
++        }
++        if (slot >= 0 && shadow_static_[slot].key == sh) {
++            plan[i] = 2;
++        } else {
++            bool steady = false;
++            for (const ShadowTileKey& k : shadow_static_last_) {
++                steady = steady || (k.key == sh && same_rect(k.rect, sv.rect));
++            }
++            if (!steady) {
++                ++shadow_full_moved_;
++                continue;
++            }
++            if (slot < 0) {
++                // A free slot, else the one used longest ago (never one this frame uses).
++                uint32_t oldest = ~0u;
++                for (size_t s = 0; s < kShadowStatics; ++s) {
++                    const ShadowStatic& st = shadow_static_[s];
++                    // (Only a slot idle for two frames: more moving tiles than slots must not evict each other
++                    // every frame; the extra tiles are drawn whole instead.)
++                    if (st.image.Valid() && st.used + 1u >= frame_counter_) continue;
++                    const uint32_t age = st.image.Valid() ? st.used : 0u;
++                    if (!st.image.Valid() || age < oldest) {
++                        oldest = age;
++                        slot = static_cast<int>(s);
++                        if (!st.image.Valid()) break;
++                    }
++                }
++            }
++            if (slot < 0) {
++                ++shadow_full_moved_;
++                continue;
++            }
++            ShadowStatic& st = shadow_static_[slot];
++            if (!st.image.Valid() &&
++                !CreateTarget(st.image, kDepthTargetFormat, {shadow_tile, shadow_tile},
++                              VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_DEPTH_BIT)) {
++                st = ShadowStatic{};
++                ++shadow_full_moved_;
++                continue;
++            }
++            st.rect = sv.rect;
++            st.key = sh;
++            plan[i] = 3;
++            ++shadow_static_builds_;
++        }
++        shadow_static_[slot].used = frame_counter_;
++        static_slot[i] = slot;
++        ++shadow_tiles_split_;
 +    }
 +    shadow_tiles_ = std::move(keys);
++    shadow_static_last_ = std::move(static_keys);
 +    if (const auto now = std::chrono::steady_clock::now(); now - shadow_tiles_logged_ >= std::chrono::seconds(10)) {
 +        if (shadow_tiles_logged_ != std::chrono::steady_clock::time_point{}) {
-+            LogInfo("shadows: {} tiles kept, {} drawn in the last 10 s", shadow_tiles_kept_, shadow_tiles_drawn_);
++            LogInfo("shadows: {} tiles kept, {} drawn in the last 10 s ({} whole: light or static casters changed; {} static depths + "
++                    "moving skinned casters, {} of them drawing the static depths again)",
++                    shadow_tiles_kept_, shadow_tiles_drawn_, shadow_full_moved_, shadow_tiles_split_, shadow_static_builds_);
 +        }
 +        shadow_tiles_logged_ = now;
 +        shadow_tiles_kept_ = 0;
 +        shadow_tiles_drawn_ = 0;
++        shadow_full_moved_ = 0;
++        shadow_tiles_split_ = 0;
++        shadow_static_builds_ = 0;
 +    }
 +    if (!any_redraw) {
 +        UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
 +        return;
      }
-     UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}});
+-    UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}});
 -    BeginPass(cmd, {shadow_.Extent().width, rows}, {}, &shadow_, false, true);
 -    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_);
 -    for (const ShadowView& sv : shadow_views_) {
-+    for (size_t i = 0; i < shadow_views_.size(); ++i) {
-+        if (!redraw[i]) continue;
-+        const ShadowView& sv = shadow_views_[i];
-+        // A pass over the tile alone, cleared to far (0, reverse Z): the rest of the atlas is
-+        // neither loaded nor touched (a tile GPU would otherwise read and write it all).
-+        BeginPass(cmd, sv.rect, std::span<const ColorOutput>{}, &shadow_, false, true);
+-        SetViewport(cmd, sv.rect);
++    // which: 0 every caster, 1 the static ones, 2 the skinned ones.
++    auto draw_casters = [&](const ShadowView& sv, int which) {
 +        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline_);
-         SetViewport(cmd, sv.rect);
          vkCmdSetDepthBias(cmd, sv.bias_constant, 0.0f, sv.bias_slope);
          const uint8_t casters = sv.casters;
-@@ -1264,8 +1517,8 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
+-        for (const Draw& d : draws_) {
++        for (size_t j = 0; j < draws_.size(); ++j) {
++            const Draw& d = draws_[j];
+             if (!d.sub->shadow || (d.hidden_views & casters) != 0) {
+                 continue;
+             }
++            if ((which == 1 && skinned[j]) || (which == 2 && !skinned[j])) {
++                continue;
++            }
+             if (static const char* exclude = std::getenv("PT_SHADOW_EXCLUDE"); exclude && d.mesh->name.find(exclude) != std::string::npos) {
+                 continue;
+             }
+@@ -1264,8 +1617,51 @@ void SceneRenderer::RecordShadows(VkCommandBuffer cmd) {
              }
              DrawMesh(cmd, d, sv.view, 0, false, false, nullptr, sv.cull, true);
          }
++    };
++    // The static depths first, each into its own tile (the light's view at the tile's origin).
++    for (size_t i = 0; i < shadow_views_.size(); ++i) {
++        if (plan[i] != 3) continue;
++        ShadowStatic& st = shadow_static_[static_slot[i]];
++        const VkRect2D local{{0, 0}, st.image.Extent()};
++        UseTargets(cmd, {{&st.image, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}});
++        BeginPass(cmd, local, std::span<const ColorOutput>{}, &st.image, false, true);
++        SetViewport(cmd, local);
++        draw_casters(shadow_views_[i], 1);
++        vkCmdEndRendering(cmd);
++    }
++    // Then the kept static depths into the atlas, in one batch per source.
++    bool copies = false;
++    for (size_t i = 0; i < shadow_views_.size(); ++i) {
++        copies = copies || plan[i] == 2 || plan[i] == 3;
++    }
++    if (copies) {
++        UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
++        for (size_t i = 0; i < shadow_views_.size(); ++i) {
++            if (plan[i] != 2 && plan[i] != 3) continue;
++            ShadowStatic& st = shadow_static_[static_slot[i]];
++            UseTargets(cmd, {{&st.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}});
++            VkImageCopy copy{};
++            copy.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
++            copy.dstSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
++            copy.dstOffset = {shadow_views_[i].rect.offset.x, shadow_views_[i].rect.offset.y, 0};
++            copy.extent = {st.image.Extent().width, st.image.Extent().height, 1};
++            vkCmdCopyImage(cmd, st.image.image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, shadow_.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++                           1, &copy);
++        }
++    }
++    UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}});
++    for (size_t i = 0; i < shadow_views_.size(); ++i) {
++        if (plan[i] == 0) continue;
++        const ShadowView& sv = shadow_views_[i];
++        // A pass over the tile alone (the rest of the atlas is neither loaded nor touched: a tile
++        // GPU would otherwise read and write it all): cleared to far (0, reverse Z), or over the
++        // static depths just copied in, with the skinned casters only.
++        const bool whole = plan[i] == 1;
++        BeginPass(cmd, sv.rect, std::span<const ColorOutput>{}, &shadow_, false, whole);
++        SetViewport(cmd, sv.rect);
++        draw_casters(sv, whole ? 0 : 2);
 +        vkCmdEndRendering(cmd);
      }
 -    vkCmdEndRendering(cmd);
      UseTargets(cmd, {{&shadow_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
  }
  
-@@ -1282,6 +1535,7 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1282,6 +1678,7 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
          debug_flags = 3;
      }
      const glm::vec4 aux[2] = {glm::vec4(0.0f), glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(reflection_cube_))};
@@ -1676,7 +2443,7 @@ index 40d339d..99682d2 100644
      for (int pass = 0; pass < 2; ++pass) {
          vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 0 ? gbuffer_ : decal_);
          if (pass == 1) {
-@@ -1293,9 +1547,13 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1293,9 +1690,13 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
                  continue;
              }
              DrawMesh(cmd, d, view.index, debug_flags, view.mirrored, false, aux);
@@ -1690,7 +2457,7 @@ index 40d339d..99682d2 100644
  }
  
  void SceneRenderer::RecordOcclusion(VkCommandBuffer cmd, const ViewSetup& view) {
-@@ -1401,8 +1659,15 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1401,8 +1802,15 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          return v && std::string_view(v) == "legacy";
      }();
      const bool ao = rt_ao_ready_ && view.index == main_view_.index;
@@ -1708,7 +2475,7 @@ index 40d339d..99682d2 100644
      auto draw_probes = [&](uint32_t shrink_flag) {
          if (ao) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, probe_ao_);
-@@ -1422,16 +1687,20 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1422,16 +1830,20 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          }
      };
      if (probes) {
@@ -1729,7 +2496,7 @@ index 40d339d..99682d2 100644
      UseTargets(cmd, {{&albedo_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&normal_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&material_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-@@ -1447,7 +1716,140 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1447,7 +1859,204 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          vkCmdDraw(cmd, 3, 1, 0, 0);
      }
      const bool contact = rt_contact_active_ && view.index == main_view_.index;
@@ -1774,6 +2541,33 @@ index 40d339d..99682d2 100644
 +        uint32_t drawn = 0;
 +        uint64_t bits = 0;
 +        const float near_z = gv.projection_param.z * 1.5f;
++        // Each tile's bounding cone in view space (apex at the eye, z forward): axis through the
++        // tile, half angle out to its farthest corner ray, the corners placed as the shaders place
++        // pixels (view xy = (frag * 2 / viewport - 1 - jitter) * projection xy * z). A light whose
++        // reach (a sphere) misses a tile's cone lights none of its pixels: the per-tile test below,
++        // tighter than the screen rectangle (its corners, lights around the eye or near plane).
++        static glm::vec3 tile_axis[4096];
++        static glm::vec2 tile_cs[4096];  // cos, sin of the half angle (widened a little)
++        {
++            const auto ray = [&](float fx, float fy) {
++                const glm::vec2 ndc = glm::vec2(fx, fy) * 2.0f / glm::vec2(gv.viewport.x, gv.viewport.y) - 1.0f -
++                                      glm::vec2(gv.jitter.x, gv.jitter.y);
++                return glm::normalize(glm::vec3(ndc.x * gv.projection_param.x, ndc.y * gv.projection_param.y, 1.0f));
++            };
++            for (uint32_t y = 0; y < grid_h; ++y) {
++                for (uint32_t x = 0; x < grid_w; ++x) {
++                    const float fx0 = static_cast<float>(x * tile), fx1 = static_cast<float>((x + 1) * tile);
++                    const float fy0 = static_cast<float>(y * tile), fy1 = static_cast<float>((y + 1) * tile);
++                    const glm::vec3 c[4] = {ray(fx0, fy0), ray(fx1, fy0), ray(fx0, fy1), ray(fx1, fy1)};
++                    const glm::vec3 axis = glm::normalize(c[0] + c[1] + c[2] + c[3]);
++                    float cos_a = 1.0f;
++                    for (const glm::vec3& r : c) cos_a = std::min(cos_a, glm::dot(axis, r));
++                    cos_a = std::max(cos_a - 1.0e-3f, 0.0f);
++                    tile_axis[y * grid_w + x] = axis;
++                    tile_cs[y * grid_w + x] = glm::vec2(cos_a, std::sqrt(std::max(1.0f - cos_a * cos_a, 0.0f)));
++                }
++            }
++        }
 +        for (uint32_t i = 0; i < light_count_; ++i) {
 +            const SceneLight& l = *light_sources_[i];
 +            if (const char* only = std::getenv("PT_LIGHT_DRAW_ONLY"); only && l.name.find(only) == std::string::npos) {
@@ -1823,16 +2617,53 @@ index 40d339d..99682d2 100644
 +                x1 = std::min(static_cast<int>(fx1) / static_cast<int>(tile), static_cast<int>(grid_w) - 1);
 +                y1 = std::min(static_cast<int>(fy1) / static_cast<int>(tile), static_cast<int>(grid_h) - 1);
 +            }
-+            ++drawn;
-+            if (shadow) shadowed |= uint64_t{1} << i;
++            // The light's reach as a sphere: past outer_range from it the falloff is zero (the
++            // shaders' d < outer_range + dimmer), with the volume's margin. A spot whose cone is
++            // narrower than a half turn lights only its sector of that ball (cos_a <= cone.x gives
++            // a zero cone, cone.z > 0), whose bounding sphere is smaller (widened a little).
++            const gpu::Light& gl = frame_->lights[i];
++            const float reach = l.outer_range * 1.02f + 0.05f;
++            glm::vec3 center = glm::vec3(gl.position);
++            float radius = reach;
++            const float cos_t = gl.cone.x - 0.02f;
++            if (gl.position.w > 0.5f && gl.cone.z > 0.0f && gl.cone.y > 0.0f && cos_t > 0.0f) {
++                const glm::vec3 axis = glm::normalize(glm::vec3(gl.direction));
++                const float sin_t = std::sqrt(std::max(1.0f - cos_t * cos_t, 0.0f));
++                if (cos_t > sin_t) {
++                    radius = reach / (2.0f * cos_t);  // under 45 degrees: the sphere through the apex and the rim
++                } else {
++                    radius = reach * sin_t;  // the rim's circle
++                }
++                center += axis * (cos_t > sin_t ? radius : reach * cos_t);
++                radius = std::min(radius * 1.01f + 0.01f, reach);
++                if (radius >= reach) center = glm::vec3(gl.position);
++            }
++            const glm::vec3 c_view = glm::vec3(gv.view * glm::vec4(center, 1.0f));
++            const float c_len = glm::length(c_view);
++            const bool around_eye = c_len <= radius * 1.001f + 1.0e-3f;
++            const glm::vec3 c_dir = around_eye ? glm::vec3(0.0f) : c_view / c_len;
++            const float sin_g = around_eye ? 1.0f : radius / c_len;
++            const float cos_g = std::sqrt(std::max(1.0f - sin_g * sin_g, 0.0f));
 +            const uint32_t word = i >> 5;
 +            const uint32_t bit = 1u << (i & 31u);
++            uint64_t covered = 0;
 +            for (int y = y0; y <= y1; ++y) {
 +                for (int x = x0; x <= x1; ++x) {
-+                    masks[(static_cast<uint32_t>(y) * grid_w + static_cast<uint32_t>(x)) * 2 + word] |= bit;
++                    const uint32_t t = static_cast<uint32_t>(y) * grid_w + static_cast<uint32_t>(x);
++                    // The sphere's angular disc (radius asin(r / |c|)) meets the tile's cone.
++                    if (!around_eye && glm::dot(c_dir, tile_axis[t]) < tile_cs[t].x * cos_g - tile_cs[t].y * sin_g) {
++                        continue;
++                    }
++                    masks[t * 2 + word] |= bit;
++                    ++covered;
 +                }
 +            }
-+            bits += static_cast<uint64_t>(x1 - x0 + 1) * static_cast<uint64_t>(y1 - y0 + 1);
++            if (covered == 0) {
++                continue;
++            }
++            ++drawn;
++            if (shadow) shadowed |= uint64_t{1} << i;
++            bits += covered;
 +        }
 +        // Straight into this slot's frame data (UploadFrame ran before recording; the command
 +        // buffer is not submitted yet).
@@ -1871,7 +2702,7 @@ index 40d339d..99682d2 100644
          if (rt_active_ || contact) {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, rt_active_ ? light_rt_ : light_contact_);
              const VkDescriptorSet rt_set = rt_->Set(renderer_->FrameIndex());
-@@ -1455,8 +1857,49 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1455,8 +2064,49 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
          } else {
              vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, light_);
          }
@@ -1922,7 +2753,7 @@ index 40d339d..99682d2 100644
              const SceneLight& l = *light_sources_[i];
              if (const char* only = std::getenv("PT_LIGHT_DRAW_ONLY"); only && l.name.find(only) == std::string::npos) {
                  continue;
-@@ -1464,15 +1907,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1464,15 +2114,24 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              if ((l.hidden_views & view.view_bit) != 0) {
                  continue;
              }
@@ -1954,7 +2785,7 @@ index 40d339d..99682d2 100644
              gpu::PassPush push;
              const uint32_t mirror_light = mirror_shadow_lights_[i];
              const bool has_shadow = view.view_bit == 2 ? mirror_light != gpu::kInvalid : (light_shadow_views_[i] & view.view_bit) != 0;
-@@ -1486,10 +1938,58 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
+@@ -1486,10 +2145,58 @@ void SceneRenderer::RecordLighting(VkCommandBuffer cmd, const ViewSetup& view) {
              push.m = volume;
              PushConstants(cmd, &push, sizeof(push));
              vkCmdDraw(cmd, 36, 1, 0, 0);
@@ -2013,7 +2844,7 @@ index 40d339d..99682d2 100644
  }
  
  void SceneRenderer::RecordLuminance(VkCommandBuffer cmd) {
-@@ -1782,9 +2282,84 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
+@@ -1782,9 +2489,84 @@ void SceneRenderer::RecordForward(VkCommandBuffer cmd, const ViewSetup& view, Re
  
  void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context) {
      vkCmdEndRendering(cmd);
@@ -2099,7 +2930,7 @@ index 40d339d..99682d2 100644
      context.subset = kVfxOffscreen;
      context.recorded = &recorded;
      bool copied = false;
-@@ -1796,6 +2371,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1796,6 +2578,7 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              }
              copied = true;
              vkCmdEndRendering(cmd);
@@ -2107,7 +2938,7 @@ index 40d339d..99682d2 100644
              UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
              VkImageCopy copy{};
              copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1806,34 +2382,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
+@@ -1806,34 +2589,21 @@ void SceneRenderer::RecordEffects(VkCommandBuffer cmd, RenderTarget& output, Sce
              UseTargets(cmd, {{&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                               {&particles_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                               {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -2147,7 +2978,7 @@ index 40d339d..99682d2 100644
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&hdr_copy_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
      VkImageCopy copy{};
      copy.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-@@ -1844,6 +2407,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
+@@ -1844,6 +2614,7 @@ void SceneRenderer::RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output) {
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
                       {&hdr_copy_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
                       {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -2155,7 +2986,7 @@ index 40d339d..99682d2 100644
      BeginPass(cmd, extent_, {{&output, false, {}}}, &depth_, true, false);
  }
  
-@@ -1908,7 +2472,8 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
+@@ -1908,7 +2679,8 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
      push.f2 = glm::vec4(1.0f / static_cast<float>(refmap_.Extent().width), 1.0f / static_cast<float>(refmap_.Extent().height), 0.0f, 0.0f);
      static const bool march_fixed = std::getenv("PT_REFLECT_MARCH_FIXED") != nullptr;
      static const bool temporal_off_march = std::getenv("PT_REFLECT_TEMPORAL_OFF") != nullptr;
@@ -2165,7 +2996,7 @@ index 40d339d..99682d2 100644
          push.f2.z = 1.0f;
          push.f2.w = static_cast<float>(frame_counter_ % 64u);
      }
-@@ -1956,7 +2521,7 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
+@@ -1956,7 +2728,7 @@ void SceneRenderer::RecordReflections(VkCommandBuffer cmd, const ViewSetup& view
      push.f1 = glm::vec4(1.0f, 1.0f, screen.reflect_scale, screen.reflect_bias);
      push.f2 = glm::vec4(horizontal, screen.reflect_edge ? 1.0f : 0.0f);
      static const bool temporal_off = std::getenv("PT_REFLECT_TEMPORAL_OFF") != nullptr;
@@ -2174,7 +3005,7 @@ index 40d339d..99682d2 100644
          (rt_reflections_ ? reflect_layer_rt_ : reflect_layer_pipeline_)) {
          RecordReflectionTemporal(cmd, view, push);
          return;
-@@ -2099,9 +2664,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2099,9 +2871,11 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      if (main_view) {
          Stamp(cmd, 4);
@@ -2189,7 +3020,7 @@ index 40d339d..99682d2 100644
      }
      BeginLabel(cmd, main_view ? "compose and forward" : "mirror compose and forward");
      UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-@@ -2110,6 +2677,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2110,6 +2884,8 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view && mirror_active_) {
          UseTargets(cmd, {{&mirror_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
      }
@@ -2198,7 +3029,7 @@ index 40d339d..99682d2 100644
      BeginPass(cmd, ViewArea(view), {{&output, false, {}}}, &depth_, true, false);
      gpu::PassPush push;
      push.ids = glm::uvec4(view.index, occlusion ? 1u : 0u, 0, 0);
-@@ -2133,13 +2702,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2133,13 +2909,16 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      }
      Fullscreen(cmd, compose_, push);
      vkCmdEndRendering(cmd);
@@ -2215,7 +3046,7 @@ index 40d339d..99682d2 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_forward_);
      }
-@@ -2147,8 +2719,9 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+@@ -2147,10 +2926,15 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
      if (main_view) {
          Stamp(cmd, 7);
      }
@@ -2225,8 +3056,14 @@ index 40d339d..99682d2 100644
 +    if (main_view && up_.enabled && !taa_active_) {  // (the snapshot feeds the reactive mask; the TAA has none)
          RecordOpaqueSnapshot(cmd, output);
      }
++    if (main_view && &output == &hdr_) {
++        post_view_projection_ = view.projection * view.view;
++        post_near_plane_ = view.projection[3][2];
++    }
      if (vfx_forward) {
-@@ -2181,6 +2754,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
+         SceneVfxContext context;
+         context.cmd = cmd;
+@@ -2181,6 +2965,7 @@ void SceneRenderer::RecordView(VkCommandBuffer cmd, const ViewSetup& view, Rende
          }
      }
      vkCmdEndRendering(cmd);
@@ -2234,7 +3071,7 @@ index 40d339d..99682d2 100644
      if (main_view && dump_requested_ && &output == &hdr_) {
          RecordDumpCopy(cmd, output, dump_scene_);
          dump_recorded_ = true;
-@@ -2238,6 +2812,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2238,6 +3023,12 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
  
  void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& items, const SceneLighting& lighting, float dt) {
      const auto cpu_start = std::chrono::steady_clock::now();
@@ -2247,7 +3084,7 @@ index 40d339d..99682d2 100644
      struct ToggleGuard {
          RenderToggles& toggles;
          RenderToggles saved;
-@@ -2249,6 +2829,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2249,6 +3040,15 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          toggles.film_grain = false;
          toggles.distortion = false;
          toggles.full_screen_blur = false;
@@ -2263,7 +3100,7 @@ index 40d339d..99682d2 100644
      }
      if (frame_counter_ == 0) {
          ApplyEnvironmentOverrides();
-@@ -2260,6 +2849,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2260,6 +3060,11 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          return;
      }
      FrameSlot& slot = slots_[renderer_->FrameIndex()];
@@ -2275,7 +3112,7 @@ index 40d339d..99682d2 100644
      textures_->FlushMaterials();
      textures_->ReportCounts("scene");
      if (has_last_eye_ && glm::distance(camera.position, last_eye_) > kCameraCutDistance) {
-@@ -2325,15 +2919,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2325,15 +3130,77 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          SettleExposure(lighting_->exposure);
      }
      VkCommandBuffer cmd = renderer_->Cmd();
@@ -2354,7 +3191,7 @@ index 40d339d..99682d2 100644
      EndLabel(cmd);
      Stamp(cmd, 1);
      if (mirror_active_) {
-@@ -2417,6 +3073,7 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2417,6 +3284,7 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          mirror_history_valid_ = false;
      }
      Stamp(cmd, 2);
@@ -2362,7 +3199,7 @@ index 40d339d..99682d2 100644
      RecordView(cmd, main_view_, hdr_, true);
      RecordReflectionSample(cmd, *lighting_);
      BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
-@@ -2454,15 +3111,25 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
+@@ -2454,15 +3322,25 @@ void SceneRenderer::Render(const Camera& camera, const std::vector<DrawItem>& it
          RecordDebug(cmd);
          EndLabel(cmd);
      }
@@ -2391,7 +3228,7 @@ index 40d339d..99682d2 100644
      }
      stats_.cpu_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - cpu_start).count();
 diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
-index 19dd1a8..eb32220 100644
+index 19dd1a8..756cba0 100644
 --- a/src/engine/render/scene_post.cpp
 +++ b/src/engine/render/scene_post.cpp
 @@ -5,6 +5,7 @@
@@ -2402,11 +3239,17 @@ index 19dd1a8..eb32220 100644
  #include "engine/render/scene_renderer.h"
  
  namespace pt {
-@@ -88,7 +89,21 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -88,14 +89,54 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
      }
  
      const bool bloom = toggles.bloom && lighting.valid && std::abs(exposure.bloom_size) >= 1.0e-5f;
 -    if (bloom) {
+-        UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+-        BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[0], false, {}}});
+-        push.f0 = BloomPolynomial(exposure.bloom_extraction);
+-        push.f1 = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
+-        Fullscreen(cmd, bright_, push);
+-        vkCmdEndRendering(cmd);
 +    // Stereo with the game's foveation: an inset (views 2, 3) takes the bloom its eye's wide view
 +    // (0, 1) worked out just before it (main.cpp draws them in that order), still in bloom_[2],
 +    // instead of working it out again. The bloom is a wide blur of a 270-line image, the same
@@ -2422,25 +3265,101 @@ index 19dd1a8..eb32220 100644
 +    }
 +    if (bloom && !reuse) {
 +        BeginLabel(cmd, "bloom");
-         UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
-         BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[0], false, {}}});
-         push.f0 = BloomPolynomial(exposure.bloom_extraction);
-@@ -111,6 +126,11 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
-             blur(1, 2, gaussian_, glm::vec4(0.0f, 1.0f, 0.0f, 0.0f), false);
-         } else {
-             const int passes = std::clamp(static_cast<int>(std::floor(size * 10.0f)), 1, 64);
+         static const uint32_t kSlots[3] = {gpu::kImgBloomA, gpu::kImgBloomB, gpu::kImgBloomSum};
++        const float size = exposure.bloom_size;
++        const float weight = exposure.bloom_weight;
++        const bool gaussian = size >= 0.1f && size < 0.2f;
++        const int passes = std::clamp(static_cast<int>(std::floor(size * 10.0f)), 1, 64);
++        static const bool separate_add = std::getenv("PT_BLOOM_SEPARATE_ADD") != nullptr;
++        // PT_BLOOM_PASSES=2: the original two passes a round after a bright pass (2 * rounds + 1
++        // passes); default: one pass a round (kawase_sum.frag modes 1-3), the bright pass folded
++        // into round 0; "exact": that with every round exact.
++        static const int bloom_mode = [] {
++            const char* env = std::getenv("PT_BLOOM_PASSES");
++            const int mode = !env ? 1 : std::string(env) == "2" ? 2 : std::string(env) == "exact" ? 3 : 1;
++            LogInfo("bloom: {}", mode == 2 ? "two passes a round (PT_BLOOM_PASSES=2)"
++                                 : mode == 3 ? "one pass a round, all exact (PT_BLOOM_PASSES=exact)"
++                                             : "one pass a round");
++            return mode;
++        }();
++        const bool one_pass = !gaussian && !separate_add && bloom_mode != 2;
++        if (!gaussian) {
 +            if (static int logged_passes = -1; logged_passes != passes) {
 +                logged_passes = passes;
-+                LogInfo("bloom: size {:.3f} weight {:.3f}: {} blur rounds (2 passes each) at {}x{}", size, weight, passes,
-+                        bloom_[0].Extent().width, bloom_[0].Extent().height);
++                LogInfo("bloom: size {:.3f} weight {:.3f}: {} blur rounds ({} passes) at {}x{}", size, weight, passes,
++                        one_pass ? passes : 2 * passes + 1, bloom_[0].Extent().width, bloom_[0].Extent().height);
 +            }
-             static const bool separate_add = std::getenv("PT_BLOOM_SEPARATE_ADD") != nullptr;
++        }
++        if (!one_pass) {
++            UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
++            BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[0], false, {}}});
++            push.f0 = BloomPolynomial(exposure.bloom_extraction);
++            push.f1 = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);
++            Fullscreen(cmd, bright_, push);
++            vkCmdEndRendering(cmd);
++        }
+         auto blur = [&](int src, int dst, VkPipeline pipeline, const glm::vec4& f0, bool clear) {
+             UseTargets(cmd, {{&bloom_[src], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[dst], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+             BeginPass(cmd, bloom_[dst].Extent(), {{&bloom_[dst], clear, {}}});
+@@ -104,14 +145,44 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+             Fullscreen(cmd, pipeline, push);
+             vkCmdEndRendering(cmd);
+         };
+-        const float size = exposure.bloom_size;
+-        const float weight = exposure.bloom_weight;
+-        if (size >= 0.1f && size < 0.2f) {
++        if (gaussian) {
+             blur(0, 1, gaussian_, glm::vec4(1.0f, 0.0f, 0.0f, 0.0f), false);
+             blur(1, 2, gaussian_, glm::vec4(0.0f, 1.0f, 0.0f, 0.0f), false);
++        } else if (one_pass) {
++            // Each round is the Kawase pair below (two blurs at i + 0.5 texels, the first clamped
++            // at the edge and stored) in one pass (kawase_sum.frag): round 0 with the bright pass
++            // (its 5x5 texels of IMG_HDR) and rounds 1-2 exactly, the wider rounds with the stored
++            // middle texels' own 2-texel tent left out (under 0.2 % of the bloom's peak; the 8-bit
++            // targets alone differ from exact maths by 1-10 %). The rounds go bloom_[0] ->
++            // bloom_[1] -> bloom_[0]...; their sum into bloom_[2] as below.
++            const glm::vec4 saved_f1 = push.f1;
++            const VkExtent2D bloom_size = bloom_[0].Extent();
++            push.f1 = glm::vec4(weight / static_cast<float>(passes), 0.0f, static_cast<float>(bloom_size.width), static_cast<float>(bloom_size.height));
++            push.f2 = BloomPolynomial(exposure.bloom_extraction);
++            int src = 0;
++            for (int i = 0; i < passes; ++i) {
++                const int dst = i == 0 ? 0 : 1 - src;
++                if (i == 0) {
++                    UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                                     {&bloom_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
++                                     {&bloom_[2], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
++                } else {
++                    UseTargets(cmd, {{&bloom_[src], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                                     {&bloom_[dst], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
++                                     {&bloom_[2], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
++                }
++                // (dst is all overwritten: cleared, not loaded, on a tile-based GPU.)
++                BeginPass(cmd, bloom_[0].Extent(), {{&bloom_[dst], true, {}}, {&bloom_[2], i == 0, {}}});
++                push.ids.x = kSlots[src];
++                const float mode = i == 0 ? 1.0f : (i <= 2 || bloom_mode == 3) ? 2.0f : 3.0f;
++                push.f0 = glm::vec4(static_cast<float>(i) + 0.5f, i == 0 ? weight : 1.0f, 0.0f, mode);
++                Fullscreen(cmd, kawase_sum_, push);
++                vkCmdEndRendering(cmd);
++                src = dst;
++            }
++            push.f1 = saved_f1;
++            push.f2 = glm::vec4(0.0f);
+         } else {
+-            const int passes = std::clamp(static_cast<int>(std::floor(size * 10.0f)), 1, 64);
+-            static const bool separate_add = std::getenv("PT_BLOOM_SEPARATE_ADD") != nullptr;
              const glm::vec4 saved_f1 = push.f1;
              for (int i = 0; i < passes; ++i) {
-@@ -134,19 +154,30 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+                 const glm::vec4 kawase(static_cast<float>(i) + 0.5f, i == 0 ? weight : 1.0f, 1.0f, 0.0f);
+@@ -133,37 +204,110 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+             }
              push.f1 = saved_f1;
          }
-         UseTargets(cmd, {{&bloom_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
+-        UseTargets(cmd, {{&bloom_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&bloom_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++        // (bloom_[1] too: one pass a round can end with it drawn.)
++        UseTargets(cmd, {{&bloom_[2], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                         {&bloom_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++                         {&bloom_[1], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
 +        SharedByInset(shared_bloom_frame_);
 +        EndLabel(cmd);
      }
@@ -2451,15 +3370,21 @@ index 19dd1a8..eb32220 100644
 -    if (vfx_filter && vr_eye_ < 0) {
 -        vfx_filter(FilterContext(cmd, 1u));
 -        BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
-+    // The lens flares' layer: in the headset nothing draws into it (vr_eye_ >= 0), so once
-+    // cleared it is left as it is instead of being cleared again for every view.
-+    const bool flares = vfx_filter && vr_eye_ < 0;
++    // The lens flares' layer. In the headset the flares are billboards at their lights, drawn
++    // with each view's projection (vfx::SetFlareStereo); before, the layer stayed empty there and
++    // the lamps did not glow.
++    const bool flares = static_cast<bool>(vfx_filter);
 +    if (flares || !flare_clean_) {
 +        BeginLabel(cmd, "flare");
 +        UseTargets(cmd, {{&flare_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
 +        BeginPass(cmd, output_extent_, {{&flare_, true, {}}});
 +        if (flares) {
-+            vfx_filter(FilterContext(cmd, 1u));
++            SceneFilterContext flare_context = FilterContext(cmd, 1u);
++            if (vr_eye_ >= 0) {
++                flare_context.view_projection = post_view_projection_;
++                flare_context.near_plane = post_near_plane_;
++            }
++            vfx_filter(flare_context);
 +            BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
 +        }
 +        vkCmdEndRendering(cmd);
@@ -2470,20 +3395,76 @@ index 19dd1a8..eb32220 100644
      UseTargets(cmd, {{&flare_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
  
      int current = 0;
-+    BeginLabel(cmd, "tonemap");
-     UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&ldr_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
-     BeginPass(cmd, output_extent_, {{&ldr_[0], false, {}}});
-     push.ids.x = 0;
-@@ -158,12 +189,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+-    UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&ldr_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+-    BeginPass(cmd, output_extent_, {{&ldr_[0], false, {}}});
+-    push.ids.x = 0;
+     const float lut_blend = std::clamp(screen.lut_blend, 0.0f, 1.0f);
+-    push.f0 = glm::vec4(bloom ? 1.0f : 0.0f, lut_blend, lighting.valid ? 1.0f : renderer_->exposure, 0.0f);
+     static const bool tonemap_test = std::getenv("PT_TONEMAP_TEST") != nullptr;
++    const bool grain = toggles.film_grain && screen.film_grain && lighting.valid;
++    const bool distortion = toggles.distortion && screen.screen_distortion && lighting.valid;
++    // Native HDR in the headset's views (SetVrHdrPeak): the scene's light above white, for the
++    // composition. The scene was scaled by this before its clip (tonemap's f0.z).
++    const float hdr_peak = vr_eye_ >= 0 && lighting.valid ? vr_hdr_peak_ : 0.0f;
++    const bool fxaa = toggles.fxaa && !up_.enabled && !native_aa_order;
++    const bool dof = toggles.depth_of_field && screen.depth_of_field && lighting.valid;
++    const bool motion_blur = toggles.motion_blur && screen.motion_blur && lighting.valid;
++    const bool blur = toggles.full_screen_blur && screen.full_screen_blur && lighting.valid;
++    const bool banding = screen.colour_banding_canceller && lighting.valid;
++    // The colour LUT straight after the tonemap (no FXAA, depth of field or motion blur between):
++    // both in one pass (tonemap.frag f1.x: the 8-bit LDR step between them rounded in the shader).
++    // A headset view with nothing else before the screen pass either (no screen blur, banding,
++    // distortion or clarity): the screen pass too (f1.y), straight into the scene colour, as the
++    // separate passes would leave it. PT_POST_FUSE=0: separate passes.
++    static const bool fuse_allowed = [] {
++        const char* env = std::getenv("PT_POST_FUSE");
++        return !(env && std::string(env) == "0");
++    }();
++    const bool fuse_lut = fuse_allowed && toggles.color_lut && !tonemap_test && !fxaa && !dof && !motion_blur;
++    // (tonemap_ is built for the 8-bit LDR format; the scene colour has the same.)
++    const bool fuse = fuse_allowed && Renderer::kSceneColorFormat == VK_FORMAT_R8G8B8A8_UNORM && vr_eye_ >= 0 && !tonemap_test && !fxaa &&
++                      !dof && !motion_blur && !blur && !banding && !distortion && !(graphics.clarity > 0.0f);
++    BeginLabel(cmd, fuse ? "tonemap+screen" : "tonemap");
++    RenderTarget output;
++    output.image = renderer_->SceneColor();
++    output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++    if (fuse) {
++        UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
++        BeginPass(cmd, output_extent_, {{&output, false, {}}});
++    } else {
++        UseTargets(cmd, {{&hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&ldr_[0], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
++        BeginPass(cmd, output_extent_, {{&ldr_[0], false, {}}});
++    }
++    push.ids.x = 0;
++    push.f0 = glm::vec4(bloom ? 1.0f : 0.0f, lut_blend, lighting.valid ? 1.0f : renderer_->exposure, 0.0f);
+     if (tonemap_test) {
+         push.f0.x = 0.0f;
          push.f0.y = 0.0f;
          push.f0.w = 0.0f;
      }
 +    // The shared bloom read under the view's field (0: the view's own, all of it).
 +    push.f2 = bloom_place;
++    // (Set in full: the bloom's bright pass leaves f1.x at 1.)
++    push.f1 = glm::vec4(fuse_lut ? 1.0f : 0.0f, fuse ? 1.0f : 0.0f, hdr_peak, 0.0f);
++    if (fuse_lut) {
++        push.f0.w = 1.0f;
++    }
      Fullscreen(cmd, tonemap_, push);
      vkCmdEndRendering(cmd);
-     UseTargets(cmd, {{&ldr_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    push.f1 = glm::vec4(0.0f);
 +    push.f2 = glm::vec4(0.0f);
++    if (fuse) {
++        renderer_->grain[0] = grain ? 1.0f : 0.0f;
++        renderer_->grain[1] = screen.grain_alt ? 1.0f : 0.0f;
++        renderer_->grain[2] = screen.grain_strength * graphics.film_grain;
++        renderer_->grain_offset[0] = screen.grain_offset.x;
++        renderer_->grain_offset[1] = screen.grain_offset.y;
++        history_valid_ = false;  // (no screen blur: as below)
++        EndLabel(cmd);
++        (void)dt;
++        return;
++    }
+     UseTargets(cmd, {{&ldr_[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
 +    EndLabel(cmd);
  
      auto ldr_index = [](int i) { return i == 0 ? gpu::kImgLdrA : gpu::kImgLdrB; };
@@ -2493,21 +3474,29 @@ index 19dd1a8..eb32220 100644
          RenderTarget& dst = ldr_[1 - current];
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&dst, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
          BeginPass(cmd, output_extent_, {{&dst, false, {}}});
-@@ -171,11 +207,12 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -171,26 +315,26 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
          current = 1 - current;
 +        EndLabel(cmd);
      };
  
-     if (toggles.fxaa && !up_.enabled && !native_aa_order) {
+-    if (toggles.fxaa && !up_.enabled && !native_aa_order) {
++    if (fxaa) {
          push.ids.x = ldr_index(current);
 -        run(fxaa_, push);
 +        run("fxaa", fxaa_, push);
      }
-     if (toggles.depth_of_field && screen.depth_of_field && lighting.valid) {
+-    if (toggles.depth_of_field && screen.depth_of_field && lighting.valid) {
++    if (dof) {
          RecordDepthOfField(cmd, screen, current);
-@@ -187,7 +224,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+     }
+-    if (toggles.motion_blur && screen.motion_blur && lighting.valid) {
++    if (motion_blur) {
+         RecordMotionBlur(cmd, screen, current);
+     }
+-    if (toggles.color_lut) {
++    if (toggles.color_lut && !fuse_lut) {
          gpu::PassPush lut;
          lut.ids = glm::uvec4(ldr_index(current), 1, 0, post_view_);
          lut.f0 = glm::vec4(0.0f, lut_blend, 1.0f, 1.0f);
@@ -2515,8 +3504,11 @@ index 19dd1a8..eb32220 100644
 +        run("color lut", tonemap_, lut);
      }
  
-     const bool blur = toggles.full_screen_blur && screen.full_screen_blur && lighting.valid;
-@@ -203,7 +240,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+-    const bool blur = toggles.full_screen_blur && screen.full_screen_blur && lighting.valid;
+     if (blur) {
+         if (!history_valid_) {
+             UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
+@@ -203,7 +347,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          const float share = std::clamp(dt * 30.0f, 0.05f, 2.0f);
          const float rate = std::pow(std::clamp(screen.blur_blend_rate, 0.0f, 0.999f), share);
          push.f0 = glm::vec4(screen.blur_fetch_band * std::sqrt(share), rate, 0.0f, 0.0f);
@@ -2525,31 +3517,33 @@ index 19dd1a8..eb32220 100644
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL}});
          CopyToHistory(cmd, ldr_[current]);
          UseTargets(cmd, {{&ldr_[current], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&history_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
-@@ -214,9 +251,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
-     if (screen.colour_banding_canceller && lighting.valid) {
+@@ -211,21 +355,17 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+     } else {
+         history_valid_ = false;
+     }
+-    if (screen.colour_banding_canceller && lighting.valid) {
++    if (banding) {
          UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
          push.ids = glm::uvec4(ldr_index(current), 0, 0, main_view_.index);
 -        run(banding_, push);
 +        run("banding", banding_, push);
      }
  
+-    RenderTarget output;
+-    output.image = renderer_->SceneColor();
+-    output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 +    BeginLabel(cmd, "screen");
-     RenderTarget output;
-     output.image = renderer_->SceneColor();
-     output.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-@@ -225,7 +263,10 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+     UseTargets(cmd, {{&output, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}, {&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
+     BeginPass(cmd, output_extent_, {{&output, false, {}}});
      push.ids = glm::uvec4(ldr_index(current), 0, 0, post_view_);
-     const bool grain = toggles.film_grain && screen.film_grain && lighting.valid;
-     const bool distortion = toggles.distortion && screen.screen_distortion && lighting.valid;
+-    const bool grain = toggles.film_grain && screen.film_grain && lighting.valid;
+-    const bool distortion = toggles.distortion && screen.screen_distortion && lighting.valid;
 -    push.f0 = glm::vec4(distortion ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-+    // Native HDR in the headset's views (SetVrHdrPeak): the scene's light above white, for the
-+    // composition. The scene was scaled by this before its clip (tonemap's f0.z).
-+    const float hdr_peak = vr_eye_ >= 0 && lighting.valid ? vr_hdr_peak_ : 0.0f;
 +    push.f0 = glm::vec4(distortion ? 1.0f : 0.0f, hdr_peak, lighting.valid ? 1.0f : renderer_->exposure, 0.0f);
      push.f1 = glm::vec4(graphics.clarity, 0.0f, 0.0f, 0.0f);
      Fullscreen(cmd, screen_fx_, push);
      renderer_->grain[0] = grain ? 1.0f : 0.0f;
-@@ -240,6 +281,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+@@ -240,6 +380,7 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
          BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS);
      }
      vkCmdEndRendering(cmd);
@@ -2557,7 +3551,7 @@ index 19dd1a8..eb32220 100644
      (void)dt;
  }
  
-@@ -359,6 +401,19 @@ void SceneRenderer::UpdateMotion(const Camera& camera, float dt) {
+@@ -359,6 +500,19 @@ void SceneRenderer::UpdateMotion(const Camera& camera, float dt) {
          previous = last_camera_;
      }
      motion_reference_set_ = false;
@@ -2577,7 +3571,7 @@ index 19dd1a8..eb32220 100644
      last_camera_ = camera;
      has_last_camera_ = true;
      if (glm::distance(previous.position, camera.position) > kCameraCutDistance || glm::dot(previous.Forward(), camera.Forward()) < 0.7071f) {
-@@ -368,7 +423,10 @@ void SceneRenderer::UpdateMotion(const Camera& camera, float dt) {
+@@ -368,7 +522,10 @@ void SceneRenderer::UpdateMotion(const Camera& camera, float dt) {
      if (!motion_history_valid_) {
          up_.reset = true;
      }
@@ -2590,10 +3584,38 @@ index 19dd1a8..eb32220 100644
      const float step = std::clamp(interval, 1.0e-4f, 1.0f);
      frame_time_ = reference ? static_cast<double>(step) : static_cast<double>(step * 0.016666668f) + frame_time_ * 0.9833333333333333;
 diff --git a/src/engine/render/scene_renderer.cpp b/src/engine/render/scene_renderer.cpp
-index 1f96981..6f6cd20 100644
+index 1f96981..d1456f6 100644
 --- a/src/engine/render/scene_renderer.cpp
 +++ b/src/engine/render/scene_renderer.cpp
-@@ -151,6 +151,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
+@@ -89,10 +89,11 @@ bool SceneRenderer::EnsureShadowTarget() {
+     const uint32_t size=tile*4;
+     if(shadow_.Valid() && shadow_.Extent().width==size) return true;
+     RenderTarget replacement;
+-    if(!CreateTarget(replacement,kDepthFormat,{size,size},VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT))
++    if(!CreateTarget(replacement,kDepthFormat,{size,size},VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_DEPTH_BIT))
+         return shadow_.Valid();
+     auto& ctx=renderer_->Context();
+     vkDeviceWaitIdle(device_);
++    DestroyShadowStatics();
+     ctx.Submit([&](VkCommandBuffer cmd){
+         UseTargets(cmd,{{&replacement,VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}});
+         BeginPass(cmd,{size,size},{},&replacement,false,true);vkCmdEndRendering(cmd);
+@@ -104,6 +105,14 @@ bool SceneRenderer::EnsureShadowTarget() {
+     return true;
+ }
+ 
++void SceneRenderer::DestroyShadowStatics() {
++    for (ShadowStatic& s : shadow_static_) {
++        renderer_->Context().DestroyImage(s.image.image);
++        s = ShadowStatic{};
++    }
++    shadow_static_last_.clear();
++}
++
+ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
+     renderer_ = &renderer;
+     textures_ = &textures;
+@@ -151,6 +160,8 @@ bool SceneRenderer::Init(Renderer& renderer, TextureManager& textures) {
          vkCreateQueryPool(device_, &query, nullptr, &slot.queries);
          query.queryCount = 4;
          vkCreateQueryPool(device_, &query, nullptr, &slot.upscale_queries);
@@ -2602,7 +3624,7 @@ index 1f96981..6f6cd20 100644
      }
      frame_ = new gpu::FrameData();
      CreateBuiltinResources();
-@@ -314,6 +316,19 @@ bool SceneRenderer::CreatePipelines() {
+@@ -314,6 +325,19 @@ bool SceneRenderer::CreatePipelines() {
      volume.blend = BlendMode::Additive;
      volume.write_masks.clear();
      light_ = CreateGraphicsPipeline(device_, volume);
@@ -2622,7 +3644,7 @@ index 1f96981..6f6cd20 100644
  
      PipelineDesc full;
      full.layout = layout_;
-@@ -428,7 +443,7 @@ bool SceneRenderer::CreatePipelines() {
+@@ -428,7 +452,7 @@ bool SceneRenderer::CreatePipelines() {
      post.fragment = "vfx_composite.frag";
      vfx_composite_ = CreateGraphicsPipeline(device_, post);
  
@@ -2631,7 +3653,7 @@ index 1f96981..6f6cd20 100644
                                reflect_colour_, kawase_, bloom_add_, kawase_sum_, gaussian_, tonemap_, fxaa_, dof_ratio_, dof_down_, dof_blur_, dof_blend_, mb_velocity_,
                                mb_tile_pipeline_, mb_bake_pipeline_, mb_mcguire_, mb_composite_, velocity_pipeline_, fsblur_, banding_, screen_fx_,
                                debug_, occlusion_, occlusion_blur_, reflect_make_, reflect_blend_, vfx_composite_, mirror_temporal_pipeline_,
-@@ -443,7 +458,7 @@ bool SceneRenderer::CreatePipelines() {
+@@ -443,7 +467,7 @@ bool SceneRenderer::CreatePipelines() {
  }
  
  void SceneRenderer::DestroyPipelines() {
@@ -2640,7 +3662,7 @@ index 1f96981..6f6cd20 100644
                           &reflect_colour_, &kawase_, &bloom_add_, &kawase_sum_, &gaussian_, &tonemap_, &fxaa_, &dof_ratio_, &dof_down_, &dof_blur_, &dof_blend_,
                           &mb_velocity_, &mb_tile_pipeline_, &mb_bake_pipeline_, &mb_mcguire_, &mb_composite_, &velocity_pipeline_, &fsblur_,
                           &banding_, &screen_fx_, &debug_, &occlusion_, &occlusion_blur_, &reflect_make_, &reflect_blend_, &vfx_composite_,
-@@ -454,6 +469,10 @@ void SceneRenderer::DestroyPipelines() {
+@@ -454,6 +478,10 @@ void SceneRenderer::DestroyPipelines() {
              *p = VK_NULL_HANDLE;
          }
      }
@@ -2651,7 +3673,7 @@ index 1f96981..6f6cd20 100644
      DestroyUpscalePipelines();
  }
  
-@@ -539,13 +558,14 @@ void SceneRenderer::Shutdown() {
+@@ -539,13 +567,15 @@ void SceneRenderer::Shutdown() {
          }
      }
      DestroyPipelines();
@@ -2663,11 +3685,12 @@ index 1f96981..6f6cd20 100644
      ctx.DestroyBuffer(dump_mirror_);
      ctx.DestroyImage(shadow_.image);
 -    vk::Image* images[] = {&lut1_, &lut2_, &material_tex_, &dither_, &color_lut_, &color_lut_prev_, &noise_, &mask_, &white_};
++    DestroyShadowStatics();
 +    vk::Image* images[] = {&lut1_, &lut2_, &material_tex_, &dither_, &color_lut_, &color_lut_prev_, &noise_, &mask_, &white_, &vrr_tables_};
      for (vk::Image* image : images) {
          ctx.DestroyImage(*image);
      }
-@@ -555,6 +575,7 @@ void SceneRenderer::Shutdown() {
+@@ -555,6 +585,7 @@ void SceneRenderer::Shutdown() {
          ctx.DestroyBuffer(slot.luminance);
          vkDestroyQueryPool(device_, slot.queries, nullptr);
          vkDestroyQueryPool(device_, slot.upscale_queries, nullptr);
@@ -2675,7 +3698,7 @@ index 1f96981..6f6cd20 100644
      }
      vkDestroyPipelineLayout(device_, layout_, nullptr);
      vkDestroyDescriptorPool(device_, pool_, nullptr);
-@@ -573,10 +594,16 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
+@@ -573,10 +604,16 @@ bool SceneRenderer::CreateTarget(RenderTarget& target, VkFormat format, VkExtent
      return renderer_->Context().CreateImage(target.image, format, {std::max(extent.width, 1u), std::max(extent.height, 1u), 1}, usage, 1, 1, aspect);
  }
  
@@ -2695,7 +3718,7 @@ index 1f96981..6f6cd20 100644
                                 &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_,
                                 &mb_tile_[0], &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_,
                                 &mb_blur_[0], &mb_blur_[1], &mirror_history_, &mirror_temporal_, &reflect_layer_, &reflect_offset_,
-@@ -587,12 +614,15 @@ void SceneRenderer::DestroyTargets() {
+@@ -587,12 +624,15 @@ void SceneRenderer::DestroyTargets() {
      }
      ctx.DestroyImage(refmap_color_.image);
      refmap_color_ = RenderTarget{};
@@ -2716,7 +3739,7 @@ index 1f96981..6f6cd20 100644
      mirror_history_valid_ = false;
      mirror_history_size_ = 0;
      reflect_history_valid_ = false;
-@@ -610,13 +640,33 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -610,13 +650,33 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
          return true;
      }
      vkDeviceWaitIdle(device_);
@@ -2751,7 +3774,7 @@ index 1f96981..6f6cd20 100644
      bool ok = CreateTarget(albedo_, kAlbedoFormat, extent, dumped, c) && CreateTarget(normal_, kNormalFormat, extent, dumped, c) &&
                CreateTarget(material_, kMaterialFormat, extent, dumped, c) &&
                CreateTarget(depth_, kDepthFormat, extent,
-@@ -626,11 +676,12 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -626,11 +686,12 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
                CreateTarget(probe_acc_, kLightFormat, extent, dumped, c) &&
                CreateTarget(hdr_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(hdr_copy_, kHdrFormat, extent, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
@@ -2767,7 +3790,7 @@ index 1f96981..6f6cd20 100644
                CreateTarget(ldr_[0], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(ldr_[1], kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, c) &&
                CreateTarget(history_, kLdrFormat, output, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
-@@ -657,14 +708,14 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -657,14 +718,14 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
                   CreateTarget(reflect_history_[0], kHdrFormat, extent, color, c) &&
                   CreateTarget(reflect_history_[1], kHdrFormat, extent, color, c)));
      ok = ok && (!rt_ || CreateTarget(refmap_color_, kRefMapFormat, extent, color, c));
@@ -2784,7 +3807,7 @@ index 1f96981..6f6cd20 100644
                                    &dof_quarter_[0], &dof_quarter_[1], &dof_eighth_[0], &dof_eighth_[1], &velocity_, &object_velocity_, &mb_tile_[0],
                                    &mb_tile_[1], &mb_tile_[2], &mb_tile_[3], &mb_tile_[4], &mb_neighbour_, &mb_bake_, &mb_blur_[0],
                                    &mb_blur_[1]};
-@@ -678,7 +729,7 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -678,7 +739,7 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
          BeginPass(cmd, extent, {}, &depth_, false, true);
          vkCmdEndRendering(cmd);
          UseTargets(cmd, {{&depth_, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL}});
@@ -2793,7 +3816,7 @@ index 1f96981..6f6cd20 100644
                                           &mirror_history_, &mirror_temporal_, &reflect_layer_, &reflect_offset_, &reflect_history_[0],
                                           &reflect_history_[1]};
          for (RenderTarget* t : upscale_colors) {
-@@ -708,7 +759,96 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
+@@ -708,7 +769,96 @@ bool SceneRenderer::EnsureTargets(VkExtent2D extent, VkExtent2D output, bool ups
      return true;
  }
  
@@ -2891,7 +3914,7 @@ index 1f96981..6f6cd20 100644
      VkDescriptorImageInfo images[gpu::kImageSlots];
      for (VkDescriptorImageInfo& info : images) {
          info = {VK_NULL_HANDLE, white_.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-@@ -773,6 +913,7 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -773,6 +923,7 @@ void SceneRenderer::WriteImageDescriptors() {
      set_image(gpu::kResLut1, lut1_);
      set_image(gpu::kResMaterial, material_tex_);
      set_image(gpu::kResDither, dither_);
@@ -2899,7 +3922,7 @@ index 1f96981..6f6cd20 100644
      set_image(gpu::kResColorLut, color_lut_);
      set_image(gpu::kResColorLutPrev, color_lut_prev_);
      set_image(gpu::kResNoise, noise_);
-@@ -789,7 +930,9 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -789,7 +940,9 @@ void SceneRenderer::WriteImageDescriptors() {
      std::copy(std::begin(images), std::end(images), std::begin(post_images));
      WriteUpscaleDescriptors(post_images, true);
      for (int set_index = 0; set_index < 2 * static_cast<int>(Renderer::kFramesInFlight); ++set_index) {
@@ -2909,7 +3932,7 @@ index 1f96981..6f6cd20 100644
          const bool post = (set_index & 1) != 0;
          VkDescriptorBufferInfo frame_info{slot.frame_data.buffer, 0, VK_WHOLE_SIZE};
          VkDescriptorBufferInfo skin_info{slot.skin.buffer, 0, VK_WHOLE_SIZE};
-@@ -824,6 +967,19 @@ void SceneRenderer::WriteImageDescriptors() {
+@@ -824,6 +977,19 @@ void SceneRenderer::WriteImageDescriptors() {
      }
  }
  
@@ -2929,7 +3952,7 @@ index 1f96981..6f6cd20 100644
  bool SceneRenderer::UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size) {
      vk::Context& ctx = renderer_->Context();
      if (!image.image || image.format != format || image.extent.width != extent.width || image.extent.height != extent.height ||
-@@ -1083,7 +1239,13 @@ void SceneRenderer::UpdateColorLut(const ScreenSettings& screen) {
+@@ -1083,7 +1249,13 @@ void SceneRenderer::UpdateColorLut(const ScreenSettings& screen) {
      color_lut_prev_key_ = color_lut_key_;
      color_lut_key_ = key;
      if (extent_.width > 0) {
@@ -2944,7 +3967,7 @@ index 1f96981..6f6cd20 100644
      }
  }
  
-@@ -1174,10 +1336,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
+@@ -1174,10 +1346,85 @@ void SceneRenderer::ReadTimestamps(FrameSlot& slot) {
      stats_.gpu_ms = span(0, 6);
  }
  
@@ -3030,7 +4053,7 @@ index 1f96981..6f6cd20 100644
      if (slot.reflection_sampled) {
          vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
          const glm::vec2* entries = static_cast<const glm::vec2*>(slot.luminance.mapped);
-@@ -1189,7 +1426,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
+@@ -1189,7 +1436,9 @@ void SceneRenderer::ReadMeasurements(FrameSlot& slot, float dt, const ExposureSe
          }
          slot.reflection_sampled = false;
      }
@@ -3042,10 +4065,21 @@ index 1f96981..6f6cd20 100644
      }
      vmaInvalidateAllocation(renderer_->Context().allocator, slot.luminance.allocation, 0, VK_WHOLE_SIZE);
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 6c9b165..bfca5b5 100644
+index 6c9b165..705d57c 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
-@@ -133,6 +133,7 @@ struct RenderToggles {
+@@ -89,6 +89,10 @@ struct SceneFilterContext {
+     float exposure = 1.0f;
+     uint32_t frame_index = 0;
+     uint32_t layers = 3;
++    // The headset: the view's view-projection and near plane (flare billboards); identity / 0 on
++    // the screen.
++    glm::mat4 view_projection{1.0f};
++    float near_plane = 0.0f;
+ };
+ 
+ struct DrawItem {
+@@ -133,6 +137,7 @@ struct RenderToggles {
      bool local_reflections = true;
      bool motion_blur = true;
      bool subsurface_scatter = true;
@@ -3053,7 +4087,7 @@ index 6c9b165..bfca5b5 100644
  };
  
  struct LightBox {
-@@ -206,6 +207,82 @@ public:
+@@ -206,6 +211,82 @@ public:
      bool RayTracingReady() const { return rt_ != nullptr; }
      bool RayTracingSupported(std::string& reason) const;
      void SetVrEye(int eye) { vr_eye_ = eye; }
@@ -3136,7 +4170,7 @@ index 6c9b165..bfca5b5 100644
  
  private:
      struct FrameSlot {
-@@ -214,6 +291,7 @@ private:
+@@ -214,6 +295,7 @@ private:
          vk::Buffer luminance;
          VkDescriptorSet set = VK_NULL_HANDLE;
          VkDescriptorSet post_set = VK_NULL_HANDLE;
@@ -3144,7 +4178,7 @@ index 6c9b165..bfca5b5 100644
          VkQueryPool queries = VK_NULL_HANDLE;
          VkQueryPool upscale_queries = VK_NULL_HANDLE;
          bool upscale_timed = false;
-@@ -222,7 +300,30 @@ private:
+@@ -222,7 +304,30 @@ private:
          bool measured = false;
          bool timed = false;
          bool reflection_sampled = false;
@@ -3175,7 +4209,15 @@ index 6c9b165..bfca5b5 100644
  
      struct Draw {
          const GpuMesh* mesh = nullptr;
-@@ -274,8 +375,10 @@ private:
+@@ -231,6 +336,7 @@ private:
+         glm::vec4 tint{1.0f};
+         uint32_t material = 0;
+         uint32_t skin_base = gpu::kInvalid;
++        uint32_t skin_count = 0;  // matrices at skin_base (0: none)
+         uint32_t previous_model = gpu::kInvalid;
+         uint32_t previous_skin = gpu::kInvalid;
+         glm::vec3 center{0.0f};
+@@ -274,8 +380,10 @@ private:
      void DestroyPipelines();
      bool CreateDescriptors();
      bool EnsureTargets(VkExtent2D extent, VkExtent2D output, bool upscaling);
@@ -3188,7 +4230,7 @@ index 6c9b165..bfca5b5 100644
      bool CreateTarget(RenderTarget& target, VkFormat format, VkExtent2D extent, VkImageUsageFlags usage, VkImageAspectFlags aspect);
      bool UploadImage(vk::Image& image, VkFormat format, VkExtent3D extent, const void* data, size_t size);
      bool UploadImageMips(vk::Image& image, VkFormat format, VkExtent3D extent, const std::vector<std::vector<uint8_t>>& mips);
-@@ -301,6 +404,7 @@ private:
+@@ -301,6 +409,7 @@ private:
      bool EnsureShadowTarget();
      void RecordRtAmbientOcclusion(VkCommandBuffer cmd, const ViewSetup& view);
      void RecordLighting(VkCommandBuffer cmd, const ViewSetup& view);
@@ -3196,7 +4238,7 @@ index 6c9b165..bfca5b5 100644
      void RecordLuminance(VkCommandBuffer cmd);
      void RecordForward(VkCommandBuffer cmd, const ViewSetup& view, RenderTarget& output);
      void RecordPost(VkCommandBuffer cmd, const SceneLighting& lighting, float dt);
-@@ -342,7 +446,10 @@ private:
+@@ -342,7 +451,10 @@ private:
      void RecordSceneCopy(VkCommandBuffer cmd, RenderTarget& output);
      void RecordDumpCopy(VkCommandBuffer cmd, RenderTarget& target, vk::Buffer& buffer);
      void RecordEffects(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext context);
@@ -3207,7 +4249,7 @@ index 6c9b165..bfca5b5 100644
      void RecordUpscale(VkCommandBuffer cmd, float dt);
      void ReadUpscaleTimestamps(FrameSlot& slot);
  
-@@ -377,6 +484,34 @@ private:
+@@ -377,6 +489,34 @@ private:
      RenderTarget hdr_;
      RenderTarget bloom_[3];
      RenderTarget flare_;
@@ -3242,7 +4284,7 @@ index 6c9b165..bfca5b5 100644
      RenderTarget ldr_[2];
      RenderTarget history_;
      RenderTarget dof_half_;
-@@ -395,6 +530,24 @@ private:
+@@ -395,6 +535,40 @@ private:
      RenderTarget reflect_offset_;
      RenderTarget reflect_history_[2];
      RenderTarget shadow_;
@@ -3263,11 +4305,27 @@ index 6c9b165..bfca5b5 100644
 +    std::unordered_map<uint64_t, ShadowSlot> shadow_slots_;
 +    uint32_t shadow_tiles_kept_ = 0;
 +    uint32_t shadow_tiles_drawn_ = 0;
++    // Tiles whose skinned casters moved over unchanged static ones: the static casters' depths
++    // are kept in a tile of their own (one per such tile, up to four), copied into the atlas, and
++    // only the skinned casters are drawn over them (RecordShadows).
++    struct ShadowStatic {
++        RenderTarget image;
++        VkRect2D rect{};
++        uint64_t key = 0;
++        uint32_t used = 0;
++    };
++    static constexpr size_t kShadowStatics = 4;
++    ShadowStatic shadow_static_[kShadowStatics];
++    std::vector<ShadowTileKey> shadow_static_last_;  // each tile's static key last frame
++    uint32_t shadow_tiles_split_ = 0;   // drawn as static copy + skinned casters
++    uint32_t shadow_static_builds_ = 0; // static tiles drawn (cache filled)
++    uint32_t shadow_full_moved_ = 0;    // full redraws: the light or a static caster changed
++    void DestroyShadowStatics();
 +    std::chrono::steady_clock::time_point shadow_tiles_logged_{};
      RenderTarget ao_[2];
      RenderTarget refmap_;
      RenderTarget hdr_copy_;
-@@ -410,6 +563,18 @@ private:
+@@ -410,6 +584,18 @@ private:
      RenderTarget post_hdr_;
      RenderTarget post_depth_;
      RenderTarget post_object_velocity_;
@@ -3286,7 +4344,7 @@ index 6c9b165..bfca5b5 100644
      bool dump_requested_ = false;
      bool dump_recorded_ = false;
      vk::Buffer dump_compose_;
-@@ -418,6 +583,17 @@ private:
+@@ -418,6 +604,17 @@ private:
      vk::Buffer dump_mirror_;
      VkExtent2D output_extent_{0, 0};
      bool targets_upscaled_ = false;
@@ -3304,7 +4362,7 @@ index 6c9b165..bfca5b5 100644
      bool history_valid_ = false;
  
      vk::Image lut1_;
-@@ -441,6 +617,8 @@ private:
+@@ -441,6 +638,8 @@ private:
      VkPipeline probe_ = VK_NULL_HANDLE;
      VkPipeline probe_resolve_ = VK_NULL_HANDLE;
      VkPipeline light_ = VK_NULL_HANDLE;
@@ -3313,7 +4371,7 @@ index 6c9b165..bfca5b5 100644
      VkPipeline compose_ = VK_NULL_HANDLE;
      VkPipeline forward_ = VK_NULL_HANDLE;
      VkPipeline luminance_ = VK_NULL_HANDLE;
-@@ -482,6 +660,7 @@ private:
+@@ -482,6 +681,7 @@ private:
      VkPipeline up_reactive_ = VK_NULL_HANDLE;
      VkPipeline up_resolve_ = VK_NULL_HANDLE;
      VkPipeline up_demod_ = VK_NULL_HANDLE;
@@ -3321,7 +4379,7 @@ index 6c9b165..bfca5b5 100644
  
      std::unique_ptr<RayTracing> rt_;
      SubsurfacePass sss_;
-@@ -554,6 +733,36 @@ private:
+@@ -554,6 +754,36 @@ private:
          uint32_t size = 0;
      };
      MirrorStale mirror_stale_;
@@ -3358,10 +4416,13 @@ index 6c9b165..bfca5b5 100644
      bool mirror_stale_active_ = false;
      const SceneLighting* lighting_ = nullptr;
      SceneLighting fallback_;
-@@ -636,6 +845,51 @@ private:
+@@ -636,6 +866,54 @@ private:
      std::map<std::string, std::string> shadow_reasons_;
      std::chrono::steady_clock::time_point previous_frame_start_{};
      int vr_eye_ = -1;
++    // The view the post chain finishes (RecordView): the headset's flares are drawn with it.
++    glm::mat4 post_view_projection_{1.0f};
++    float post_near_plane_ = 0.0f;
 +    bool vr_taa_ = false;
 +    bool vr_taa_periphery_ = true;
 +    float vr_taa_scale_ = 1.0f;
@@ -3808,7 +4869,7 @@ index 8511811..6594797 100644
  std::unique_ptr<UpscaleBackend> CreateStreamlineDlssBackend(vk::Context& ctx);
  uint32_t DlssPresetHint(DlssModel model);
 diff --git a/src/engine/render/vfx_pass.cpp b/src/engine/render/vfx_pass.cpp
-index 1c8c44e..971aafc 100644
+index 1c8c44e..58e909f 100644
 --- a/src/engine/render/vfx_pass.cpp
 +++ b/src/engine/render/vfx_pass.cpp
 @@ -9,6 +9,7 @@
@@ -3832,6 +4893,19 @@ index 1c8c44e..971aafc 100644
              vkCmdSetViewport(cmd, 0, 1, &viewport);
              vkCmdSetScissor(cmd, 0, 1, &scissor);
              bound = true;
+@@ -475,8 +478,10 @@ void VfxPass::RecordFilter(const SceneFilterContext& context) {
+         if (!wanted(layer)) {
+             continue;
+         }
+-        DrawLayer(context.cmd, slot.filter, layer, context.color_format, VK_FORMAT_UNDEFINED, false, 1, glm::mat4(1.0f), glm::vec3(0.0f),
+-                  context.exposure, list_.near_plane, context.extent, nullptr);
++        // (Flares: the headset's billboards need the view; screen quads ignore it.)
++        const bool flare = layer == vfx::Layer::Flare;
++        DrawLayer(context.cmd, slot.filter, layer, context.color_format, VK_FORMAT_UNDEFINED, false, 1, flare ? context.view_projection : glm::mat4(1.0f),
++                  glm::vec3(0.0f), context.exposure, flare && context.near_plane > 0.0f ? context.near_plane : list_.near_plane, context.extent, nullptr);
+     }
+ }
+ 
 diff --git a/src/engine/render/vk_context.cpp b/src/engine/render/vk_context.cpp
 index f6a961d..de1420b 100644
 --- a/src/engine/render/vk_context.cpp
@@ -3864,6 +4938,119 @@ index f6a961d..de1420b 100644
          messenger_info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
          messenger_info.pfnUserCallback = DebugCallback;
+diff --git a/src/engine/vfx/vfx_system.cpp b/src/engine/vfx/vfx_system.cpp
+index faeebd9..d886b7f 100644
+--- a/src/engine/vfx/vfx_system.cpp
++++ b/src/engine/vfx/vfx_system.cpp
+@@ -20,6 +20,8 @@ namespace pt::vfx {
+ 
+ std::atomic<float> g_flare_ghost_scale{0.0f};
+ void SetFlareGhostScale(float scale) { g_flare_ghost_scale = scale; }
++std::atomic<float> g_flare_stereo_tan{0.0f};
++void SetFlareStereo(float tan_half_fov_y) { g_flare_stereo_tan = tan_half_fov_y; }
+ 
+ namespace {
+ 
+@@ -1410,7 +1412,16 @@ void System::BuildFlare(const glm::mat4& world, const FlareDef& flare, const Fla
+         const glm::vec3 c = light_math::ColorFromTemperature(flare.temperature, 0.0f, flare.lux, glm::vec3(1.0f)) * kFlareLux;
+         root = glm::vec4(c.r, glm::length(c), def->exposure_blend, 0.0f);
+     }
+-    const float inv_aspect = 1.0f / view.aspect;
++    // The headset: no lens, so no ghosts or screen-fixed shapes; the shapes on the light become a
++    // billboard at the light (facing the head, at its distance), which each eye's view projects
++    // (vfx_particle.vert). Sizes keep their angle on the flat game's screen (16:9, its field), and
++    // fields and rotations are read as if the light were straight ahead: the glow is the lamp's,
++    // the same wherever the head looks.
++    const float stereo_tan = g_flare_stereo_tan.load();
++    const bool stereo = stereo_tan > 0.0f;
++    constexpr float kFlatAspect = 16.0f / 9.0f;
++    const float aspect = stereo ? kFlatAspect : view.aspect;
++    const float inv_aspect = 1.0f / aspect;
+     Draw draw;
+     draw.layer = Layer::Flare;
+     draw.blend = BlendMode::Add;
+@@ -1434,8 +1445,17 @@ void System::BuildFlare(const glm::mat4& world, const FlareDef& flare, const Fla
+         case 4: pos = glm::vec2(ndc.x, ndc.y * el.offset_scale); break;
+         default: break;
+         }
+-        const glm::vec2 scale_at = el.scale_at_light ? ndc : pos;
+-        const glm::vec2 alpha_at = el.alpha_at_light ? ndc : pos;
++        if (stereo) {
++            const bool on_light = (el.offset_type == 1 && std::fabs(el.base_offset.x) < 1e-3f && std::fabs(el.base_offset.y) < 1e-3f) ||
++                                  (el.offset_type >= 2 && el.offset_type <= 4 && std::fabs(el.offset_scale - 1.0f) < 1e-3f);
++            if (!on_light) {
++                continue;
++            }
++            pos = glm::vec2(0.0f);
++        }
++        const glm::vec2 light_at = stereo ? glm::vec2(0.0f) : ndc;
++        const glm::vec2 scale_at = el.scale_at_light ? light_at : pos;
++        const glm::vec2 alpha_at = el.alpha_at_light ? light_at : pos;
+         float sx = el.scale_x.Eval(scale_at, inv_aspect);
+         float sy = el.scale_y.Eval(scale_at, inv_aspect);
+         float alpha = el.alpha.Eval(alpha_at, inv_aspect);
+@@ -1481,6 +1501,10 @@ void System::BuildFlare(const glm::mat4& world, const FlareDef& flare, const Fla
+         }
+         default: break;
+         }
++        if (stereo) {
++            // Near the head's side (depth -> 0) the billboard shrinks to nothing: fade it out first.
++            alpha *= std::clamp(light.depth / std::max(light.distance * 0.3f, 1.0e-3f), 0.0f, 1.0f);
++        }
+         if (alpha <= 0.0f) {
+             continue;
+         }
+@@ -1492,19 +1516,32 @@ void System::BuildFlare(const glm::mat4& world, const FlareDef& flare, const Fla
+         }
+         const glm::vec2 center(pos.x * 0.5f + 0.5f, pos.y * -0.5f + 0.5f);
+         const float ax = sx * el.width * 0.25f;
+-        const float ay = sy * el.height * 0.25f * view.aspect;
++        const float ay = sy * el.height * 0.25f * aspect;
+         Quad q;
+         for (int i = 0; i < 4; ++i) {
+             const float a = angle + kFlareCorners[i];
+-            const glm::vec2 p = center + glm::vec2(ax * std::cos(a), ay * std::sin(a));
+-            q.corner[i] = glm::vec4(p * 2.0f - 1.0f, 0.0f, 1.0f);
++            const glm::vec2 offset(ax * std::cos(a), ay * std::sin(a));
++            if (stereo) {
++                // Screen fractions (y down) to tangents on the flat screen, then to metres at the
++                // light's distance along the head's view.
++                const float right = 2.0f * offset.x * stereo_tan * kFlatAspect * light.depth;
++                const float up = -2.0f * offset.y * stereo_tan * light.depth;
++                q.corner[i] = glm::vec4(light.position + view.right * right + view.up * up, 1.0f);
++            } else {
++                const glm::vec2 p = center + offset;
++                q.corner[i] = glm::vec4(p * 2.0f - 1.0f, 0.0f, 1.0f);
++            }
+         }
+         q.uv = glm::vec4(0.0f, 0.0f, 1.0f, 1.0f);
+         q.uv_next = q.uv;
+         q.color = glm::vec4(PackedColor(el.color), alpha * el.color.a);
+         q.params = params;
+         q.luminance = root;
+-        q.info = glm::uvec4(textures ? textures(el.texture) : 0u, kQuadFlare, kNoTexture, 0u);
++        q.info = glm::uvec4(textures ? textures(el.texture) : 0u, kQuadFlare, kNoTexture, stereo ? 1u : 0u);
++        if (stereo) {
++            // Each view finds the light's pixel and distance itself (the occlusion taps).
++            q.extra = glm::vec4(light.position, 1.0f);
++        }
+         out.quads.push_back(q);
+         if (static const bool flare_log = std::getenv("PT_FLARE_LOG") != nullptr; flare_log) {
+             LogInfo("flare: {} {} light ({:.2f} {:.2f} {:.2f}) d {:.2f} ndc ({:.3f} {:.3f}) w {:.2f} on_screen {} cone {:.2f} fade {:.2f} visible {} "
+diff --git a/src/engine/vfx/vfx_system.h b/src/engine/vfx/vfx_system.h
+index 910f1ae..7553985 100644
+--- a/src/engine/vfx/vfx_system.h
++++ b/src/engine/vfx/vfx_system.h
+@@ -20,6 +20,9 @@
+ namespace pt::vfx {
+ 
+ void SetFlareGhostScale(float scale);
++// The headset: lens flares as billboards at their light, seen by each eye (tan_half_fov_y > 0:
++// the flat game's half field, which sets their angular size); 0 is the screen's 2D layer.
++void SetFlareStereo(float tan_half_fov_y);
+ 
+ struct ViewInfo {
+     glm::vec3 position{0.0f};
 diff --git a/src/engine/xr/xr_host.cpp b/src/engine/xr/xr_host.cpp
 index 5e7cee1..ff8142b 100644
 --- a/src/engine/xr/xr_host.cpp
@@ -4913,7 +6100,7 @@ index d1485b2..2bcbcd6 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..2b3dd87 100644
+index d629ab3..6dd62ee 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,11 +95,29 @@
@@ -5457,13 +6644,24 @@ index d629ab3..2b3dd87 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4123,23 +4476,145 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4105,6 +4458,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+                 if (begin(true)) {
+                     scene_builder.Build(game, camera, scene_dt, lighting, light_blend);
+                     last_scene_time = game.Time();
++                    pt::vfx::SetFlareStereo(0.0f);
+                     vfx_scene.Prepare(game, camera, 16.0f / 9.0f, lighting, vfx_pass, blend);
+                     app.scene.SetVrEye(-1);
+                     app.scene.Render(camera, draw_items, lighting, dt);
+@@ -4123,23 +4477,148 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.SetRenderExtent(stereo.render);
                  scene_builder.Build(game, stereo.head, scene_dt, lighting, light_blend);
                  last_scene_time = game.Time();
 -                vfx_scene.Prepare(game, stereo.head, static_cast<float>(stereo.render.width) / static_cast<float>(std::max(1u, stereo.render.height)),
 +                // (The picture's proportions: the logical size with variable rasterization rate.)
 +                const VkExtent2D picture = stereo.logical.width > 0 ? stereo.logical : stereo.render;
++                // Lens flares as billboards at their lamps, sized by the flat game's field (the
++                // game camera's, within 40-90 degrees).
++                pt::vfx::SetFlareStereo(std::tan(0.5f * std::clamp(camera.fov_y, glm::radians(40.0f), glm::radians(90.0f))));
 +                vfx_scene.Prepare(game, stereo.head, static_cast<float>(picture.width) / static_cast<float>(std::max(1u, picture.height)),
                                    lighting, vfx_pass, blend);
 -                for (int eye = 0; eye < 2; ++eye) {
@@ -5609,7 +6807,23 @@ index d629ab3..2b3dd87 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4568,6 +5043,16 @@ int main(int argc, char** argv) {
+@@ -4166,6 +4645,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+                 view_builder.Build(view, camera, 0.0f, lighting, light_blend);
+                 const VkExtent2D warm_extent = app.renderer.RenderExtent();
+                 const float warm_aspect = static_cast<float>(warm_extent.width) / static_cast<float>(std::max(1u, warm_extent.height));
++                pt::vfx::SetFlareStereo(0.0f);
+                 view_vfx.Prepare(view, camera, warm_aspect, lighting, vfx_pass, blend);
+                 app.scene.SetMotionReference(camera, 1.0f / options.tick_rate, i > 0 || last_render_frame + 1 == frame);
+                 app.scene.Render(camera, draw_items, lighting, dt);
+@@ -4191,6 +4671,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+             }
+             const auto part_t2 = std::chrono::steady_clock::now();
+             const VkExtent2D vfx_extent = app.renderer.RenderExtent();
++            pt::vfx::SetFlareStereo(0.0f);
+             view_vfx.Prepare(view, camera, static_cast<float>(vfx_extent.width) / static_cast<float>(std::max(1u, vfx_extent.height)), lighting,
+                              vfx_pass, blend);
+             const auto part_t3 = std::chrono::steady_clock::now();
+@@ -4568,6 +5049,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -5626,7 +6840,7 @@ index d629ab3..2b3dd87 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +5089,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +5095,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }
