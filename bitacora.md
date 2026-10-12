@@ -5,49 +5,34 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nativo + MoltenVK
 (con `patches/moltenvk/0001-rasterization-rate-map.patch` y `0002-metal-encode-command.patch`).
 
-## Estado (última build lanzada: 51; última probada: 50)
+## Estado (última build lanzada: 52; última probada: 51)
 
 - Juego completo jugable de principio a fin (build 42). Sin cierres desde la build 14.
 - Ajustes del usuario = preset M2: imagen 50 %, centro 60° al 100 %, altura -10°, periferia 10 %, VPKTAA 80 %, nitidez 100,
   VPKTAA en periferia, sombras altas, SSAO, bloom, reflejos, anisotrópico 8x, 45 fps.
-- Build 50 (log pt (37)): pasillo GPU 23–25 ms → 35–40 fps; zonas ligeras 44–48. Reparto pasillo por frame: sombras 3,05;
-  anchas ~4,5; por inset gbuffer 1,65, lighting 2,5 (lights 1,8–2), compose+forward 1,1, post 2,2 (vpktaa 0,84).
-  Térmico fair ~290 s, serious ~540 s.
+- Referencia build 50 (pasillo, 765→956): GPU total ~6,6–7,5 ms; inset/lighting/lights 1,4–1,7; wide/shadows 1,4–1,8.
 - AA: MetalFX, SMAA, TBDR descartados y borrados; FXAA solo para comparar.
 
-## Build 51 (sin probar): destellos en VR + optimización (misma imagen)
+## Build 51 (probada, log pt (38)) → build 52
 
-- **Destellos de lámparas en el visor** (antes la capa de flares no se dibujaba en VR: apliques/lámparas sin brillo):
-  `vfx::SetFlareStereo(tan)` (main.cpp: tan de la mitad del fov de la cámara del juego 40–90° en estéreo, 0 en el resto);
-  `BuildFlare` en estéreo: solo formas sobre la luz (sin fantasmas), campos/rotación como luz centrada, billboard en el mundo a
-  la distancia de la luz (tamaño angular de la pantalla 16:9), `info.w = 1`, `extra.xyz` = luz, fundido si depth→0.
-  `vfx_particle.vert`: proyecta por vista y calcula params de oclusión (luz hasta 1,5 NDC fuera: taps en el borde).
-  `SceneFilterContext.view_projection/near_plane` ← `post_view_projection_/post_near_plane_` (RecordView). Con VRR (apagado)
-  las vistas anchas pondrían mal el destello (habría que `ForceVrrNextPass` + uv física).
-- **Sombras** (`RecordShadows`): hash por caster una vez por frame incluyendo la pose (`Draw::skin_count`): los objetos con
-  esqueleto quietos ya no invalidan teselas. Teselas con esqueletos que se mueven y parte estática estable (igual el frame
-  anterior): profundidad estática en `shadow_static_[4]` (D32 de tesela, perezosas, `DestroyShadowStatics`), copia al atlas
-  (atlas con TRANSFER_DST) + solo los esqueletos. Expulsión solo de ranuras sin uso ≥2 frames. Log: `shadows: N kept, M drawn
-  (whole / static+skinned / rebuilt)`.
-- **VPKTAA**: profundidad 3x3 con 3 textureGather + 1 fetch (`#define DEPTH_GATHER 0` vuelve a 9 fetches si falla en el
-  visor), pesos gaussianos separables (6 exp), más cercano por ejes, sin recargar own_depth/alfa, disoclusión con fetch.
-- **Luces**: `EvaluateLight(uint li, ...)` lee campos sueltos (antes copiaba la luz entera ~27 vec4 por llamada); salidas
-  tempranas baratas primero (exacto si cone.z ≥ 0); en `light_all.frag` (`PT_LIGHT_SURFACE_CONSTANTS`) V, R, material y
-  offsets PCF una vez por píxel. CPU: cada tesela añade una luz solo si su cono de visión toca la esfera de alcance
-  (sector para focos).
-- **Bloom**: una pasada por ronda (`kawase_sum.frag` modos 1 ronda 0 con brillo incluido, 2 exacta, 3 anchas 9 taps); 41 → 20
-  pasadas, error ≤0,2 % del pico. `PT_BLOOM_PASSES=2` cadena original, `=exact` todas exactas.
-- **Post en el visor**: tonemap + LUT + screen_fx en una pasada (si no hay nitidez/distorsión/desenfoque/bandas);
-  `PT_POST_FUSE=0` lo separa.
+- Se quedan: destellos de lámparas en estéreo (`vfx::SetFlareStereo`, `vfx_particle.vert`), sombras con caché de esqueletos
+  quietos + profundidad estática por tesela (`shadow_static_[4]`; wide/shadows bajó a ~1,0 ms), recorte CPU de luces por
+  cono de tesela (`RecordLighting`), bloom de una pasada por ronda (`kawase_sum.frag`, `PT_BLOOM_PASSES`), post fusionado
+  (`PT_POST_FUSE=0` lo separa).
+- **Regresión de la 51**: luces ×2 (inset/lighting/lights 2,9–3,3 ms; total 8–9 ms). Causa: `lighting.glsl` con lecturas
+  campo a campo + `PT_LIGHT_SURFACE_CONSTANTS` (globales y `g_pcf_taps[4]` en `light_all.frag`: presión de registros en
+  Metal). Build 52: `lighting.glsl`, `light_main.glsl`, `light_all.frag`, `upscale_demod.frag` devueltos a los de la 50
+  (Light por valor). NO repetir ese enfoque.
+- Usuario notó más aliasing en la 51 con mismos ajustes: único cambio de AA = gathers de profundidad → build 52
+  `DEPTH_GATHER 0` en `vpktaa.frag` (9 fetches, como la 50).
 
 ## Pendiente (en orden)
 
-1. Log de la build 51: `gpu labels` (shadows, lights, bloom, tonemap, vpktaa), `shadows:`; comprobar destello de apliques y
-   lámparas (pasillo, escaleras, vestíbulo), sin brillo a través de paredes en el borde del centro. Si los bordes de la
-   imagen fallan → `DEPTH_GATHER 0`.
+1. Log build 52: confirmar luces ≈ build 50 y sombras ≈ build 51; si sigue el aliasing, mirar destellos/post fusionado
+   (`PT_POST_FUSE=0`) y pesos separables del VPKTAA.
 2. Afinar constantes de `vpktaa.frag` (KEEP_*, SIGMA_*, DISOCCLUSION, afilado) con lo que vea el usuario.
 3. Conocido menor: `taa_valid_` no caduca si una vista se salta frames con otra vista en la misma columna (raro).
-4. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos.
+4. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos, destellos de apliques.
 5. 45→90 de verdad (spacewarp propio) si la reproyección con profundidad convence.
 
 ## Funciones vigentes (dónde está cada cosa)

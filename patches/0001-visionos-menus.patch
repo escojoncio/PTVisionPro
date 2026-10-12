@@ -270,21 +270,18 @@ index 34717a5..8c33f13 100644
      vec4 sum = stored;
 diff --git a/shaders/light_all.frag b/shaders/light_all.frag
 new file mode 100644
-index 0000000..ccd7ab3
+index 0000000..2105e30
 --- /dev/null
 +++ b/shaders/light_all.frag
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,94 @@
 +#version 460
 +// All of a view's lights in one full-screen pass (the deferred lights without their volumes):
 +// the G-buffer is read once per pixel instead of once per light, and the light targets are
 +// written once. Each light is the same EvaluateLight as light.frag's; a light whose volume would
 +// not have covered the pixel gives nothing there (out of range, outside its area box), so the sum
 +// is the one the volumes add up. Tiled (f0.z = 1): a pixel evaluates only the lights its tile
-+// lists (frame.light_tiles, built on the CPU from each volume's screen rectangle and each tile's
-+// view cone against the light's reach). EvaluateLight's first test reads only position, range and
-+// colour (the falloff), so a listed light that misses the pixel costs three loads, not a Light copy.
++// lists (frame.light_tiles, built on the CPU from each volume's screen rectangle).
 +#include "common.glsl"
-+#define PT_LIGHT_SURFACE_CONSTANTS
 +#include "lighting.glsl"
 +
 +layout(push_constant) uniform PassPush {
@@ -341,7 +338,7 @@ index 0000000..ccd7ab3
 +                bits &= bits - 1u;
 +                vec3 diffuse;
 +                vec3 specular;
-+                if (EvaluateLight(w * 32u + uint(b), v, s, (shadowed & (1u << uint(b))) != 0u, gl_FragCoord.xy, diffuse, specular)) {
++                if (EvaluateLight(frame.lights[w * 32u + uint(b)], v, s, (shadowed & (1u << uint(b))) != 0u, gl_FragCoord.xy, diffuse, specular)) {
 +                    diffuse_sum += diffuse;
 +                    specular_sum += specular;
 +                    lit += 1.0;
@@ -357,7 +354,7 @@ index 0000000..ccd7ab3
 +            }
 +            vec3 diffuse;
 +            vec3 specular;
-+            if (EvaluateLight(i, v, s, (pass.ids.w & bit) != 0u, gl_FragCoord.xy, diffuse, specular)) {
++            if (EvaluateLight(frame.lights[i], v, s, (pass.ids.w & bit) != 0u, gl_FragCoord.xy, diffuse, specular)) {
 +                diffuse_sum += diffuse;
 +                specular_sum += specular;
 +                lit += 1.0;
@@ -372,47 +369,34 @@ index 0000000..ccd7ab3
 +    out_specular = vec4(specular_sum, 1.0);
 +}
 diff --git a/shaders/light_main.glsl b/shaders/light_main.glsl
-index 66d5d0c..5a0f884 100644
+index 66d5d0c..0207546 100644
 --- a/shaders/light_main.glsl
 +++ b/shaders/light_main.glsl
-@@ -17,7 +17,7 @@ layout(location = 1) out vec4 out_specular;
- 
- void main() {
-     View v = frame.views[pass.ids.x];
--    Light l = frame.lights[pass.ids.y];
-+    uint li = pass.ids.y;
-     ivec2 pixel = ivec2(gl_FragCoord.xy);
-     float depth = ImgFetch(IMG_DEPTH, pixel).x;
-     if (depth <= 0.0) {
-@@ -26,6 +26,35 @@ void main() {
+@@ -26,6 +26,31 @@ void main() {
      Surface s;
      s.P = ViewPosition(v, PixelNdc(v, gl_FragCoord.xy), depth);
      s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
 +    // Out of the light's reach (area box, range, spot cone): the tests EvaluateLight makes, before
 +    // the G-buffer's normal and material are fetched. Volumes drawn from the front pass every pixel
 +    // behind them (the far wall, the sky), so those leave here cheaply.
-+    // (Field by field from frame.lights: a whole Light would be copied for these few vectors.)
-+    if (frame.lights[li].info.z != 0) {
-+        vec3 q = (frame.lights[li].area * vec4(s.world, 1.0)).xyz;
++    if (l.info.z != 0) {
++        vec3 q = (l.area * vec4(s.world, 1.0)).xyz;
 +        if (1.0 - max(abs(q.z), max(abs(q.x), abs(q.y))) < 0.0) {
 +            discard;
 +        }
 +    }
 +    {
-+        vec4 position = frame.lights[li].position;
-+        vec4 range = frame.lights[li].range;
-+        vec4 cone = frame.lights[li].cone;
-+        bool spot = position.w > 0.5;
-+        vec3 to_light = position.xyz - s.world;
++        bool spot = l.position.w > 0.5;
++        vec3 to_light = l.position.xyz - s.world;
 +        float dist = length(to_light);
-+        float d = spot ? max(range.y, dist + range.x) : max(range.y, dist) + range.x;
++        float d = spot ? max(l.range.y, dist + l.range.x) : max(l.range.y, dist) + l.range.x;
 +        float d2 = d * d;
-+        if (1.0 / d2 - d2 * range.z <= 0.0) {
++        if (1.0 / d2 - d2 * l.range.z <= 0.0) {
 +            discard;
 +        }
-+        if (spot && cone.z > 0.0) {
-+            float cos_a = dot(frame.lights[li].direction.xyz, -to_light / max(dist, 1.0e-6));
-+            if ((cos_a - cone.x) * cone.y <= 0.0) {
++        if (spot && l.cone.z > 0.0) {
++            float cos_a = dot(l.direction.xyz, -to_light / max(dist, 1.0e-6));
++            if ((cos_a - l.cone.x) * l.cone.y <= 0.0) {
 +                discard;
 +            }
 +        }
@@ -420,300 +404,22 @@ index 66d5d0c..5a0f884 100644
      vec4 g_normal = ImgFetch(IMG_NORMAL, pixel);
      vec4 g_material = ImgFetch(IMG_MATERIAL, pixel);
      s.N = DecodeNormal(g_normal.xyz);
-@@ -39,7 +68,7 @@ void main() {
-     g_contact_reach = pass.f0.x;
-     g_contact_legacy = pass.f0.y > 0.5;
- #endif
--    if (!EvaluateLight(l, v, s, pass.ids.z != 0u, gl_FragCoord.xy, diffuse, specular)) {
-+    if (!EvaluateLight(li, v, s, pass.ids.z != 0u, gl_FragCoord.xy, diffuse, specular)) {
-         discard;
-     }
-     out_diffuse = vec4(diffuse, 1.0);
 diff --git a/shaders/lighting.glsl b/shaders/lighting.glsl
-index abc3da2..2b727d8 100644
+index abc3da2..7d19b0b 100644
 --- a/shaders/lighting.glsl
 +++ b/shaders/lighting.glsl
-@@ -6,7 +6,18 @@ vec2 Dither2x2(vec3 frag) {
-     return vec2(fract(0.5 * (frag.x - 0.5)) >= 0.3 ? 1.0 : -1.0, fract(0.5 * (frag.y - 0.5)) >= 0.3 ? 1.0 : -1.0);
- }
- 
-+#ifdef PT_LIGHT_SURFACE_CONSTANTS
-+// The four taps' offsets depend on the pixel and the frame alone (not the light): worked out at the
-+// pixel's first shadowed light and kept for the others (light_all.frag), the same expressions.
-+bool g_pcf_ready = false;
-+vec2 g_pcf_taps[4];
-+#endif
-+
- float ShadowPcf(vec2 uv, float zref, vec2 lo, vec2 hi, vec2 texel, vec3 frag, float rotate, float frame_time, vec4 temporal) {
-+#ifdef PT_LIGHT_SURFACE_CONSTANTS
-+    if (!g_pcf_ready) {
-+        g_pcf_ready = true;
-+#endif
-     vec2 d = temporal.w > 0.5 && rotate <= 0.5 ? temporal.yz : Dither2x2(frag);
-     mat2 rot = mat2(1.0);
-     if (rotate > 0.5) {
-@@ -21,6 +32,14 @@ float ShadowPcf(vec2 uv, float zref, vec2 lo, vec2 hi, vec2 texel, vec3 frag, fl
-     vec2 t1 = rot * vec2(-0.5, -0.5) + 0.125 * d;
-     vec2 t2 = rot * vec2(-0.5,  0.5) + 0.125 * d;
-     vec2 t3 = rot * vec2( 0.5,  0.5) + 0.125 * d;
-+#ifdef PT_LIGHT_SURFACE_CONSTANTS
-+        g_pcf_taps = vec2[4](t0, t1, t2, t3);
-+    }
-+    vec2 t0 = g_pcf_taps[0];
-+    vec2 t1 = g_pcf_taps[1];
-+    vec2 t2 = g_pcf_taps[2];
-+    vec2 t3 = g_pcf_taps[3];
-+#endif
-     float sum = 0.0;
-     sum += ShadowTap(clamp(uv + t0 * texel, lo, hi), zref);
-     sum += ShadowTap(clamp(uv + t1 * texel, lo, hi), zref);
-@@ -29,9 +48,14 @@ float ShadowPcf(vec2 uv, float zref, vec2 lo, vec2 hi, vec2 texel, vec3 frag, fl
-     return sum;
- }
- 
--float SpotShadow(Light l, View v, vec3 world, float shadow_cone, vec3 frag) {
--    vec3 receiver = world + v.inv_view[2].xyz * l.range.w + normalize(l.direction.xyz) * l.direction.w;
--    vec4 c = l.shadow * vec4(receiver, 1.0);
-+// The shadow functions and EvaluateLight take the light's index and read only the fields they use
-+// from frame.lights (a Light by value copies all of its 432 bytes, three matrices included, into
-+// registers for every call, also for lights that leave at the first test).
-+float SpotShadow(uint li, View v, vec3 world, float shadow_cone, vec3 frag) {
-+    vec4 direction = frame.lights[li].direction;
-+    vec4 rect = frame.lights[li].shadow_rect;
-+    vec3 receiver = world + v.inv_view[2].xyz * frame.lights[li].range.w + normalize(direction.xyz) * direction.w;
-+    vec4 c = frame.lights[li].shadow * vec4(receiver, 1.0);
-     if (c.w <= 0.0) {
-         return 1.0;
+@@ -112,6 +112,11 @@ bool EvaluateLight(Light l, View v, Surface s, bool shadows, vec2 frag, out vec3
+     if (length(radiance) <= 1.0e-4) {
+         return false;
      }
-@@ -41,27 +65,29 @@ float SpotShadow(Light l, View v, vec3 world, float shadow_cone, vec3 frag) {
-         return 1.0;
-     }
-     vec2 texel = 1.0 / ImgSize(IMG_SHADOW);
--    vec2 lo = l.shadow_rect.xy + texel;
--    vec2 hi = l.shadow_rect.xy + l.shadow_rect.zw - texel;
--    vec2 uv = l.shadow_rect.xy + local * l.shadow_rect.zw;
-+    vec2 lo = rect.xy + texel;
-+    vec2 hi = rect.xy + rect.zw - texel;
-+    vec2 uv = rect.xy + local * rect.zw;
-     float s = 1.0 - 0.25 * shadow_cone * ShadowPcf(uv, ndc.z, lo, hi, texel, frag, v.jitter.w, v.exposure.w, v.temporal);
-     return s * s;
- }
- 
--float PointShadow(Light l, View v, vec3 view_pos, vec3 frag) {
--    vec3 biased = vec3(view_pos.xy, view_pos.z + l.direction.w * l.cone.w);
-+float PointShadow(uint li, View v, vec3 view_pos, vec3 frag) {
-+    vec4 cone = frame.lights[li].cone;
-+    vec4 rect = frame.lights[li].shadow_rect;
-+    vec3 biased = vec3(view_pos.xy, view_pos.z + frame.lights[li].direction.w * cone.w);
-     vec3 world = (v.inv_view * vec4(biased, 1.0)).xyz;
--    vec3 d = (l.shadow * vec4(world, 1.0)).xyz;
-+    vec3 d = (frame.lights[li].shadow * vec4(world, 1.0)).xyz;
-     float len = max(length(d), 1.0e-5);
-     float s = d.z <= 0.0 ? -1.0 : 1.0;
-     vec2 p = vec2(-d.x, d.y) / (len + abs(d.z));
-     vec2 local = vec2(0.5 * ((p.x * 0.99902344 + s) * 0.5) + 0.5, 0.5 - 0.5 * p.y * 0.99902344);
--    float zref = 1.0 - len * l.cone.z;
-+    float zref = 1.0 - len * cone.z;
-     vec2 texel = 1.0 / ImgSize(IMG_SHADOW);
--    vec2 uv = l.shadow_rect.xy + local * l.shadow_rect.zw;
--    float half_width = l.shadow_rect.z * 0.5;
--    vec2 lo = vec2(l.shadow_rect.x + (s > 0.0 ? half_width : 0.0), l.shadow_rect.y) + texel;
--    vec2 hi = vec2(l.shadow_rect.x + (s > 0.0 ? l.shadow_rect.z : half_width), l.shadow_rect.y + l.shadow_rect.w) - texel;
-+    vec2 uv = rect.xy + local * rect.zw;
-+    float half_width = rect.z * 0.5;
-+    vec2 lo = vec2(rect.x + (s > 0.0 ? half_width : 0.0), rect.y) + texel;
-+    vec2 hi = vec2(rect.x + (s > 0.0 ? rect.z : half_width), rect.y + rect.w) - texel;
-     float sh = 1.0 - 0.25 * ShadowPcf(uv, zref, lo, hi, texel, frag, v.jitter.w, v.exposure.w, v.temporal);
-     return sh * sh;
- }
-@@ -76,101 +102,152 @@ struct Surface {
-     float translucency;
- };
- 
-+#ifdef PT_LIGHT_SURFACE_CONSTANTS
-+// What EvaluateLight works out from the pixel alone (view and reflection vectors, the material's
-+// two rows, the NDF table's roughness and gloss coordinates), worked out at the first light that
-+// gets that far and kept for the pixel's other lights (light_all.frag evaluates many per pixel):
-+// the same expressions, once per pixel instead of once per light. A pixel no light reaches pays nothing.
-+bool g_surface_ready = false;
-+vec3 g_surface_V;
-+vec3 g_surface_R;
-+vec4 g_surface_mat0;
-+vec4 g_surface_mat1;
-+vec2 g_surface_lut_yz;
-+#endif
-+
- #if defined(PT_RT_SHADOWS) || defined(PT_RT_CONTACT)
- float g_contact_reach = 0.0;
- bool g_contact_legacy = false;
- #endif
- 
--bool EvaluateLight(Light l, View v, Surface s, bool shadows, vec2 frag, out vec3 diffuse, out vec3 specular) {
-+// Light li at surface s: false (and zero) where it gives nothing. The tests go cheapest first, each
-+// reading only the fields it needs: the falloff (position, range, colour: past it the radiance
-+// check fails whatever the cone, which is at most 1), the area box, facing away, then the cone.
-+// Each early out returns what the full order returned there (false, zero), so the picture is the same.
-+bool EvaluateLight(uint li, View v, Surface s, bool shadows, vec2 frag, out vec3 diffuse, out vec3 specular) {
-     const vec3 dither_frag = vec3(frag, v.exposure.w);
-     diffuse = vec3(0.0);
-     specular = vec3(0.0);
--    if (l.info.z != 0) {
--        vec3 q = (l.area * vec4(s.world, 1.0)).xyz;
--        if (1.0 - max(abs(q.z), max(abs(q.x), abs(q.y))) < 0.0) {
--            return false;
--        }
--    }
--    bool spot = l.position.w > 0.5;
--    vec3 light_pos = (v.view * vec4(l.position.xyz, 1.0)).xyz;
-+    vec4 position = frame.lights[li].position;
-+    vec4 range = frame.lights[li].range;
-+    vec4 color = frame.lights[li].color;
-+    bool spot = position.w > 0.5;
-+    vec3 light_pos = (v.view * vec4(position.xyz, 1.0)).xyz;
-     vec3 lv = light_pos - s.P;
-     float dist = length(lv);
-     vec3 L = lv / max(dist, 1.0e-6);
--    float d = spot ? max(l.range.y, dist + l.range.x) : max(l.range.y, dist) + l.range.x;
-+    float d = spot ? max(range.y, dist + range.x) : max(range.y, dist) + range.x;
-     float d2 = d * d;
--    float att = max(0.0, 1.0 / d2 - d2 * l.range.z);
--    vec3 radiance = l.color.rgb * att * v.exposure.x;
-+    float att = max(0.0, 1.0 / d2 - d2 * range.z);
-+    vec3 radiance = color.rgb * att * v.exposure.x;
-+    if (length(radiance) <= 1.0e-4) {
-+        return false;
-+    }
-+    ivec4 info = frame.lights[li].info;
-+    if (info.z != 0) {
-+        vec3 q = (frame.lights[li].area * vec4(s.world, 1.0)).xyz;
-+        if (1.0 - max(abs(q.z), max(abs(q.x), abs(q.y))) < 0.0) {
-+            return false;
-+        }
-+    }
 +    // Facing away and not translucent: both terms below come out zero (diff and spec scale with
-+    // NdotL), so leave before the cone, the shadow taps and the material/LUT fetches.
-+    float NdotL = dot(s.N, L);
-+    if (NdotL <= 0.0 && !(s.translucency > 0.0)) {
++    // NdotL), so leave before the shadow taps and the material/LUT fetches. Same picture.
++    if (dot(s.N, L) <= 0.0 && !(s.translucency > 0.0)) {
 +        return false;
 +    }
-     float shadow_cone = 1.0;
-     if (spot) {
--        vec3 axis = mat3(v.view) * l.direction.xyz;
-+        vec4 cone_k = frame.lights[li].cone;
-+        vec4 shadow_k = frame.lights[li].shadow_cone;
-+        vec3 axis = mat3(v.view) * frame.lights[li].direction.xyz;
-         float cos_a = dot(axis, -L);
--        float cone = pow(abs(Saturate((cos_a - l.cone.x) * l.cone.y)), l.cone.z);
-+        float cone = pow(abs(Saturate((cos_a - cone_k.x) * cone_k.y)), cone_k.z);
-         radiance *= cone;
--        float sc = Saturate((cos_a - l.shadow_cone.x) * l.shadow_cone.y);
-+        float sc = Saturate((cos_a - shadow_k.x) * shadow_k.y);
-         shadow_cone = sc * sc;
-+        if (length(radiance) <= 1.0e-4) {
-+            return false;
-+        }
-     }
--    if (length(radiance) <= 1.0e-4) {
--        return false;
--    }
-+    vec4 scales = frame.lights[li].scales;
      float shadow = 1.0;
--    if (l.info.x >= 0 && shadows) {
-+    if (info.x >= 0 && shadows) {
+     if (l.info.x >= 0 && shadows) {
  #ifdef PT_RT_SHADOWS
--        if (dot(s.N, L) > 0.0 || s.translucency > 0.0) {
-+        if (NdotL > 0.0 || s.translucency > 0.0) {
-             vec3 n = s.translucency > 0.0 ? vec3(0.0) : normalize(mat3(v.inv_view) * s.N);
--            shadow = RtShadow(l, s.world, n, spot, shadow_cone, frag, v.exposure.w);
-+            shadow = RtShadow(frame.lights[li], s.world, n, spot, shadow_cone, frag, v.exposure.w);
-         }
- #else
--        shadow = spot ? SpotShadow(l, v, s.world, shadow_cone, dither_frag) : PointShadow(l, v, s.P, dither_frag);
-+        shadow = spot ? SpotShadow(li, v, s.world, shadow_cone, dither_frag) : PointShadow(li, v, s.P, dither_frag);
- #endif
-     }
--    float vis = 1.0 + l.scales.z * (shadow - 1.0);
-+    float vis = 1.0 + scales.z * (shadow - 1.0);
- #if defined(PT_RT_SHADOWS) || defined(PT_RT_CONTACT)
--    if (g_contact_reach > 0.0 && l.scales.w > 0.0 && (g_contact_legacy || l.scales.z > 0.0) && (dot(s.N, L) > 0.0 || s.translucency > 0.0)) {
--        float t = RtContactDistance(l, s.world, normalize(mat3(v.inv_view) * s.N), g_contact_reach);
-+    if (g_contact_reach > 0.0 && scales.w > 0.0 && (g_contact_legacy || scales.z > 0.0) && (NdotL > 0.0 || s.translucency > 0.0)) {
-+        float t = RtContactDistance(frame.lights[li], s.world, normalize(mat3(v.inv_view) * s.N), g_contact_reach);
-         if (t >= 0.0) {
-             if (g_contact_legacy) {
-                 vis *= 1.0 - Saturate(2.0 * (1.0 - t / g_contact_reach));
-             } else {
-                 float contact = 1.0 - shadow_cone * (1.0 - smoothstep(0.0, g_contact_reach, t));
--                vis = 1.0 + l.scales.z * (min(shadow, contact * contact) - 1.0);
-+                vis = 1.0 + scales.z * (min(shadow, contact * contact) - 1.0);
-             }
-         }
-     }
- #endif
-     vec3 mask = vec3(1.0);
--    if (l.info.y >= 0 || l.info.w > 0) {
--        vec4 c = l.mask * vec4(s.world, 1.0);
-+    if (info.y >= 0 || info.w > 0) {
-+        vec4 c = frame.lights[li].mask * vec4(s.world, 1.0);
-         if (c.w > 0.0) {
-             vec2 uv = vec2(0.5 * c.x / c.w + 0.5, 1.0 - (0.5 * c.y / c.w + 0.5));
--            if (l.info.w > 0) {
--                mask = textureLod(PT_TEXTURE(uint(l.info.w - 1)), uv, 0.0).rgb;
-+            if (info.w > 0) {
-+                mask = textureLod(PT_TEXTURE(uint(info.w - 1)), uv, 0.0).rgb;
-             } else {
--                mask = ImgLod(uint(l.info.y), SMP_LINEAR_WRAP, uv, 0.0).rgb;
-+                mask = ImgLod(uint(info.y), SMP_LINEAR_WRAP, uv, 0.0).rgb;
-             }
-         } else {
-             mask = vec3(0.0);
-         }
-     }
-     vec3 N = s.N;
-+#ifdef PT_LIGHT_SURFACE_CONSTANTS
-+    if (!g_surface_ready) {
-+        g_surface_ready = true;
-+        g_surface_V = -normalize(s.P);
-+        g_surface_R = reflect(-g_surface_V, N);
-+        g_surface_mat0 = Img(RES_MATERIAL, SMP_POINT_CLAMP, vec2(s.material_u, 0.25));
-+        g_surface_mat1 = Img(RES_MATERIAL, SMP_POINT_CLAMP, vec2(s.material_u, 0.75));
-+        g_surface_lut_yz = vec2(s.roughness * s.roughness * 0.9375 + 0.03125, g_surface_mat1.w * g_surface_mat1.w * 0.9375 + 0.03125);
-+    }
-+    vec3 V = g_surface_V;
-+    vec3 R = g_surface_R;
-+#else
-     vec3 V = -normalize(s.P);
-     vec3 R = reflect(-V, N);
-+#endif
-     vec3 to_ray = R - L;
--    float k = Saturate(Saturate(0.9 * l.color.w / d) / max(length(to_ray), 1.0e-6));
-+    float k = Saturate(Saturate(0.9 * color.w / d) / max(length(to_ray), 1.0e-6));
-     vec3 Ls = normalize(L + to_ray * k);
-     vec3 H = normalize(Ls + V);
-     float NdotH = Saturate(dot(N, H));
--    float NdotL = dot(N, L);
-     float LdotH = dot(H, L);
-+#ifdef PT_LIGHT_SURFACE_CONSTANTS
-+    vec4 mat0 = g_surface_mat0;
-+    vec4 mat1 = g_surface_mat1;
-+    vec3 lut_uv = vec3(NdotH * NdotH * 0.984375 + 0.0078125, g_surface_lut_yz);
-+#else
-     vec4 mat0 = Img(RES_MATERIAL, SMP_POINT_CLAMP, vec2(s.material_u, 0.25));
-     vec4 mat1 = Img(RES_MATERIAL, SMP_POINT_CLAMP, vec2(s.material_u, 0.75));
-     vec3 lut_uv = vec3(NdotH * NdotH * 0.984375 + 0.0078125, s.roughness * s.roughness * 0.9375 + 0.03125, mat1.w * mat1.w * 0.9375 + 0.03125);
-+#endif
-     vec2 ndf = texture(sampler3D(lut2_image, samplers[SMP_LINEAR_CLAMP]), lut_uv).xy;
-     float D = ndf.x * ndf.x / max(ndf.y * ndf.y, 1.0e-8);
-     float F = Img(RES_LUT1, SMP_LINEAR_CLAMP, vec2(LdotH, mat1.x)).x;
-     float spec = Saturate(4.0 * NdotL) * F * D;
-     float w = s.translucency;
-     float diff = Saturate(max(NdotL + w * (1.0 - NdotL * NdotL), w * mat0.w));
--    diffuse = radiance * l.scales.y * diff * vis * mask;
--    specular = radiance * l.scales.x * s.specular * mat0.rgb * spec * vis * mask;
-+    diffuse = radiance * scales.y * diff * vis * mask;
-+    specular = radiance * scales.x * s.specular * mat0.rgb * spec * vis * mask;
-     return true;
- }
 diff --git a/shaders/probe_main.glsl b/shaders/probe_main.glsl
 index bb2e1d6..2ac5fcd 100644
 --- a/shaders/probe_main.glsl
@@ -978,27 +684,6 @@ index d39d6a6..0d965e8 100644
 +    }
      out_color = vec4(graded, Luma601(graded));
  }
-diff --git a/shaders/upscale_demod.frag b/shaders/upscale_demod.frag
-index 7355148..f35de2a 100644
---- a/shaders/upscale_demod.frag
-+++ b/shaders/upscale_demod.frag
-@@ -21,7 +21,6 @@ void main() {
-     float depth = ImgFetch(IMG_DEPTH, pixel).x;
-     if (depth > 0.0 && hdr.a < 1.0 && pass.ids.y != 0xFFFFFFFFu) {
-         View v = frame.views[pass.ids.x];
--        Light l = frame.lights[pass.ids.y];
-         Surface s;
-         s.P = ViewPosition(v, PixelNdc(v, gl_FragCoord.xy), depth);
-         s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
-@@ -33,7 +32,7 @@ void main() {
-         s.translucency = g_material.w;
-         vec3 dh;
-         vec3 sh;
--        if (EvaluateLight(l, v, s, pass.ids.z != 0u, gl_FragCoord.xy, dh, sh)) {
-+        if (EvaluateLight(pass.ids.y, v, s, pass.ids.z != 0u, gl_FragCoord.xy, dh, sh)) {
-             float whole = Luma709(max(ImgFetch(IMG_DIFFUSE, pixel).rgb, vec3(0.0)));
-             float handy = clamp(Luma709(max(dh, vec3(0.0))), 0.0, whole);
-             factor = (whole + pass.f0.x) / (whole - handy + pass.f0.x);
 diff --git a/shaders/upscale_motion.frag b/shaders/upscale_motion.frag
 index 00687d9..f352904 100644
 --- a/shaders/upscale_motion.frag
@@ -1115,7 +800,7 @@ index c9c8551..ad12caa 100644
          out_view_depth = 0.0;
 diff --git a/shaders/vpktaa.frag b/shaders/vpktaa.frag
 new file mode 100644
-index 0000000..99b369b
+index 0000000..fda2800
 --- /dev/null
 +++ b/shaders/vpktaa.frag
 @@ -0,0 +1,344 @@
@@ -1149,7 +834,7 @@ index 0000000..99b369b
 +#define SIGMA_EDGE 0.85
 +#define DISOCCLUSION 0.05
 +// 1: the 3x3's depths with 3 gathers + 1 fetch (the same values as 9 fetches); 0: 9 fetches.
-+#define DEPTH_GATHER 1
++#define DEPTH_GATHER 0
 +
 +layout(push_constant) uniform PassPush {
 +    uvec4 ids;  // x the history to read (image slot), y flags (1 history valid, 2 the TAA is on the
