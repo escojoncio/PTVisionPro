@@ -5,69 +5,50 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nativo + MoltenVK
 (con `patches/moltenvk/0001-rasterization-rate-map.patch` y `0002-metal-encode-command.patch`).
 
-## Estado (última build lanzada: 50, VPKTAA; última probada: 49)
+## Estado (última build lanzada: 51; última probada: 50)
 
-- Juego completo jugable de principio a fin (log pt (27), build 42). Sin cierres desde la build 14.
-- Ajustes de referencia del usuario: imagen 50 %, zona nítida 70° al 100 %, altura -10°, periferia 10 %, sombras altas,
-  SSAO, bloom, reflejos, anisotrópico 8x, 45 fps.
-- Build 49 (logs pt (35)/(36)): TAA viejo 0,8–1,0 ms/inset + copia/resolve ≈1,5–1,8 ms/inset; luces por teselas sin
-  ganancia (se quedan, opción de menú). Centro 100 % → 22–30 fps (GPU 32–40 ms); 80 % → 29–36 fps. Para 45 fps: GPU < 22 ms.
-- Antialiasing: el usuario descartó MetalFX (separa la estereoscopia, build 47) y SMAA; FXAA se queda solo para comparar.
-  TBDR descartado (build 48). MetalFX y la sonda TBDR borrados del proyecto en la build 50.
+- Juego completo jugable de principio a fin (build 42). Sin cierres desde la build 14.
+- Ajustes del usuario = preset M2: imagen 50 %, centro 60° al 100 %, altura -10°, periferia 10 %, VPKTAA 80 %, nitidez 100,
+  VPKTAA en periferia, sombras altas, SSAO, bloom, reflejos, anisotrópico 8x, 45 fps.
+- Build 50 (log pt (37)): pasillo GPU 23–25 ms → 35–40 fps; zonas ligeras 44–48. Reparto pasillo por frame: sombras 3,05;
+  anchas ~4,5; por inset gbuffer 1,65, lighting 2,5 (lights 1,8–2), compose+forward 1,1, post 2,2 (vpktaa 0,84).
+  Térmico fair ~290 s, serious ~540 s.
+- AA: MetalFX, SMAA, TBDR descartados y borrados; FXAA solo para comparar.
 
-## Build 50 (sin probar en el visor): VPKTAA
+## Build 51 (sin probar): destellos en VR + optimización (misma imagen)
 
-- `shaders/vpktaa.frag` (nuevo; `taa.frag` y `tbdr_probe*` borrados): una pasada por vista que sustituye al resolve
-  (`RecordVpkTaa` en `scene_upscale.cpp`): 3x3 de render con jitter → reconstrucción gaussiana (Blackman-Harris) + afilado
-  contra la media del 3x3 tipo CAS (×1,6 en movimiento, recortado al min/max: sin halos; no en la periferia); movimiento del
-  más cercano: objetos desde `motion_`, cámara calculada en el shader desde la profundidad (`motion_` se limpia a 1000 =
-  "sin objeto"; ya no hay pasada `upscale_motion` con VPKTAA); historia Catmull-Rom 5 taps; caja de varianza YCoCg 1,25σ
-  (zonas planas) → 0,85σ (bordes de profundidad), recortada al min/max; antiparpadeo (acuerdo de luma); disoclusión: la
-  historia guarda en `.a` la distancia (ViewZ), se rechaza si guardaba algo más cercano que `previous.w` (tolerancia
-  max(5 %, 1,5× rango de profundidad del 3x3)); reactivo de partículas (`particles_` con `SharePlace`,
-  `taa_particles_place_` en scene_frame.cpp); pesos 0,93 quieto → 0,80 a 8 px/frame (tope 0,97). Salidas MRT: post_hdr
-  (+ capa de reflejos como el resolve), post_depth, post_object_velocity, historia siguiente (HDR plano RGBA16F + distancia).
-- Historias: `taa_history_[4]` por juego de objetivos (columna = ojo & 1, ×2 turnos), ranuras 56–59
-  (`kImgTaaHistory..3`; `kImageSlots` 60, `images[60]`), dueño por imagen `taa_owner_` (en el stash). `upscaled_` no se crea
-  en el visor. Log: `vpktaa: on RxR -> OxO view N`, `vpktaa: view N history starts again (motivo)`, etiqueta GPU `vpktaa`.
-- Resolución interna (TAAU) 100/90/85/80 %: render al %, fases de jitter max(8, 8/r²), mip bias −0,5 + log2(r), confianza por
-  distancia a la muestra más cercana. Periferia: VPKTAA también en las vistas anchas (a su tamaño, sin afilado).
-- Ajustes (agente): `HeadsetSettings::aa` 5 VPKTAA (def.) / 0 FXAA; `taa_res` (100), `taa_sharpness` (50), `taa_periphery`
-  (sí). Env `PT_VP_AA`, `PT_VP_TAA_RES`, `PT_VP_TAA_SHARPNESS`, `PT_VP_TAA_PERIPHERY`; claves `aa`, `taa_res`,
-  `taa_sharpness`, `taa_periphery`; Swift `aa` (`sharpZoneAntialiasingV3`), `taaRes`, `taaSharpness`, `taaPeriphery`.
-  Menú: filas `kVpAa` (VPKTAA/FXAA), `kVpTaaRes`, `kVpTaaSharp`, `kVpTaaPeriphery`. `SetVrTaa(on, scale, sharpness, periphery)`.
-  Sin pipeline → FXAA en la sesión. Con VRR activo VPKTAA no corre (FXAA).
-- MetalFX fuera: `metalfx_upscaler.mm`, `tbdr_probe.mm`, `-framework MetalFX`, camino MetalFX espacial del host,
-  `aa_jitter`/`aa_debug`/`AaScale`, `SetVrNoJitter`/`SetVrUpscaleBypass`. Quedan sin uso (inofensivos): `UpscalerKind::MetalFx`
-  en el motor y el parche MoltenVK 0002.
-
-## Resultado build 50 (log pt (37)) y preset M2 (sin build aún)
-
-- VPKTAA funciona en el visor; sin fallos. Coste `vpktaa` 0,84 ms/inset (765² render → 956²) a 1,06 (1054²): objetivo
-  ≤0,7 no alcanzado. Periferia: `wide/upscale` 0,18 ms. El usuario eligió: centro 60°, VPKTAA 80 %, nitidez 100 %,
-  periferia sí. Con eso: pasillo (≈268 draws) GPU 23–25 ms → 35–40 fps; zonas ligeras 19–21 ms → 44–48 fps. 100 % → +4–5 ms
-  en el pasillo. Térmico fair a ~290 s, serious a ~540 s.
-- Reparto pasillo (por frame, 80 %, 60°): sombras 3,05 (vista ancha izq., compartidas), anchas ~4,5 en total, por inset:
-  gbuffer 1,65, lighting 2,5 (lights ~1,8–2,0, 16 luces/tesela de 23), compose+forward 1,1, post 2,2 (vpktaa 0,84).
-- **Preset M2 = ajustes del usuario** (`kPresets` .mm y `PTSettings.defaults`): centro 60°, `aa` 5, `taa_res` 80,
-  `taa_sharpness` 100, `taa_periphery` sí. El preset incluye ahora aa/taa_* (`MatchesPreset`, `ApplyPreset`, Swift
-  `apply`/`matches`); las filas de VPKTAA del menú llaman `HeadsetCustom()`. M5: 70°, VPKTAA 100 %, nitidez 50, periferia sí.
+- **Destellos de lámparas en el visor** (antes la capa de flares no se dibujaba en VR: apliques/lámparas sin brillo):
+  `vfx::SetFlareStereo(tan)` (main.cpp: tan de la mitad del fov de la cámara del juego 40–90° en estéreo, 0 en el resto);
+  `BuildFlare` en estéreo: solo formas sobre la luz (sin fantasmas), campos/rotación como luz centrada, billboard en el mundo a
+  la distancia de la luz (tamaño angular de la pantalla 16:9), `info.w = 1`, `extra.xyz` = luz, fundido si depth→0.
+  `vfx_particle.vert`: proyecta por vista y calcula params de oclusión (luz hasta 1,5 NDC fuera: taps en el borde).
+  `SceneFilterContext.view_projection/near_plane` ← `post_view_projection_/post_near_plane_` (RecordView). Con VRR (apagado)
+  las vistas anchas pondrían mal el destello (habría que `ForceVrrNextPass` + uv física).
+- **Sombras** (`RecordShadows`): hash por caster una vez por frame incluyendo la pose (`Draw::skin_count`): los objetos con
+  esqueleto quietos ya no invalidan teselas. Teselas con esqueletos que se mueven y parte estática estable (igual el frame
+  anterior): profundidad estática en `shadow_static_[4]` (D32 de tesela, perezosas, `DestroyShadowStatics`), copia al atlas
+  (atlas con TRANSFER_DST) + solo los esqueletos. Expulsión solo de ranuras sin uso ≥2 frames. Log: `shadows: N kept, M drawn
+  (whole / static+skinned / rebuilt)`.
+- **VPKTAA**: profundidad 3x3 con 3 textureGather + 1 fetch (`#define DEPTH_GATHER 0` vuelve a 9 fetches si falla en el
+  visor), pesos gaussianos separables (6 exp), más cercano por ejes, sin recargar own_depth/alfa, disoclusión con fetch.
+- **Luces**: `EvaluateLight(uint li, ...)` lee campos sueltos (antes copiaba la luz entera ~27 vec4 por llamada); salidas
+  tempranas baratas primero (exacto si cone.z ≥ 0); en `light_all.frag` (`PT_LIGHT_SURFACE_CONSTANTS`) V, R, material y
+  offsets PCF una vez por píxel. CPU: cada tesela añade una luz solo si su cono de visión toca la esfera de alcance
+  (sector para focos).
+- **Bloom**: una pasada por ronda (`kawase_sum.frag` modos 1 ronda 0 con brillo incluido, 2 exacta, 3 anchas 9 taps); 41 → 20
+  pasadas, error ≤0,2 % del pico. `PT_BLOOM_PASSES=2` cadena original, `=exact` todas exactas.
+- **Post en el visor**: tonemap + LUT + screen_fx en una pasada (si no hay nitidez/distorsión/desenfoque/bandas);
+  `PT_POST_FUSE=0` lo separa.
 
 ## Pendiente (en orden)
 
-0. Build 51 (optimización, misma calidad): (a) sombras: caché de la profundidad estática por tesela y redibujo solo de los
-   objetos que se mueven (−2 ms en el pasillo); (b) VPKTAA: profundidad 3x3 con textureGather, menos lecturas y ALU
-   (−0,3 ms/inset); (c) luces por teselas con rango de profundidad por tesela (min/max) para no recorrer luces que no tocan
-   esa profundidad (lights 1,8–2 ms/inset); (d) medir de nuevo.
-
-1. Log de la build 50: líneas `vpktaa:`, coste `vpktaa` en `gpu labels` (objetivo ≤ 0,7 ms/inset), fps con 100/90/85/80 %
-   y periferia sí/no. Preguntar: nitidez, estelas (partículas, objetos), parpadeo en suelos lejanos, aspecto de la periferia.
-2. Afinar constantes de `vpktaa.frag` (KEEP_*, SIGMA_*, DISOCCLUSION, factor de afilado) según lo que vea.
-3. Conocido menor: `taa_valid_` no caduca si una vista se salta frames con otra vista usando la misma columna (raro).
-   `kResVrrMap` (35) pisa la tesela 1 del desenfoque de movimiento (solo con VRR, apagado).
-4. Rendimiento: sombras (caché de mapas estáticos, redibujo solo de lo que se mueve), vistas anchas, bloom, composición.
-5. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos.
-6. 45→90 de verdad (spacewarp propio) si la reproyección con profundidad convence.
+1. Log de la build 51: `gpu labels` (shadows, lights, bloom, tonemap, vpktaa), `shadows:`; comprobar destello de apliques y
+   lámparas (pasillo, escaleras, vestíbulo), sin brillo a través de paredes en el borde del centro. Si los bordes de la
+   imagen fallan → `DEPTH_GATHER 0`.
+2. Afinar constantes de `vpktaa.frag` (KEEP_*, SIGMA_*, DISOCCLUSION, afilado) con lo que vea el usuario.
+3. Conocido menor: `taa_valid_` no caduca si una vista se salta frames con otra vista en la misma columna (raro).
+4. Comprobar en el visor: X como zoom, X en la marca del cuadro, subtítulos.
+5. 45→90 de verdad (spacewarp propio) si la reproyección con profundidad convence.
 
 ## Funciones vigentes (dónde está cada cosa)
 
