@@ -5,7 +5,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nativo + MoltenVK
 (con `patches/moltenvk/0001-rasterization-rate-map.patch` y `0002-metal-encode-command.patch`).
 
-## Estado (última build lanzada: 52; última probada: 51)
+## Estado (última build lanzada: 53; última probada: 51)
 
 - Juego completo jugable de principio a fin (build 42). Sin cierres desde la build 14.
 - Ajustes del usuario = preset M2: imagen 50 %, centro 60° al 100 %, altura -10°, periferia 10 %, VPKTAA 80 %, nitidez 100,
@@ -25,6 +25,14 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
   (Light por valor). NO repetir ese enfoque.
 - Usuario notó más aliasing en la 51 con mismos ajustes: único cambio de AA = gathers de profundidad → build 52
   `DEPTH_GATHER 0` en `vpktaa.frag` (9 fetches, como la 50).
+
+## Build 53: icono y arte del launcher
+
+- Icono: `visionos/App/Assets.xcassets/AppIcon.solidimagestack` (Back = captura del pasillo con la puerta, 1024 opaca;
+  Front = puerta + lámpara con máscara suave, paralaje); `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon` en project.yml.
+- Launcher (`LauncherBackground.swift`): busca `sce_sys` sin distinguir mayúsculas, carga `icon0` (junto al título en
+  `HomeView`) y `pic1/pic0` de fondo; registra en `Registros/app.txt` qué hay en sce_sys. Sin nada: `LauncherArt`
+  (la misma captura, en el bundle). La 51 mostraba el launcher vacío: ver en app.txt por qué no cargó sce_sys.
 
 ## Pendiente (en orden)
 

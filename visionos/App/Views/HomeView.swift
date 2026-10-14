@@ -19,16 +19,27 @@ struct HomeView: View {
             background
             VStack(alignment: .leading, spacing: 28) {
                 Spacer(minLength: 0)
-                VStack(alignment: .leading, spacing: 6) {
-                    if LauncherBackground.shared.image == nil {
-                        // (A background picture usually carries the title already.)
-                        Text("P.T.")
-                            .font(.extraLargeTitle)
-                            .fontWeight(.heavy)
+                HStack(alignment: .center, spacing: 24) {
+                    if let icon = LauncherBackground.shared.icon {
+                        // The game's own icon (sce_sys/icon0.png of the player's copy).
+                        Image(uiImage: icon)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 140, height: 140)
+                            .clipShape(.rect(cornerRadius: 22))
+                            .shadow(radius: 12)
                     }
-                    Text(L("Teaser jugable · PlayStation 4 · en VR", "Playable Teaser · PlayStation 4 · in VR"))
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if LauncherBackground.shared.icon == nil {
+                            // (The game's icon carries the title already.)
+                            Text("P.T.")
+                                .font(.extraLargeTitle)
+                                .fontWeight(.heavy)
+                        }
+                        Text(L("Teaser jugable · PlayStation 4 · en VR", "Playable Teaser · PlayStation 4 · in VR"))
+                            .font(.title2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 HStack(alignment: .top, spacing: 16) {
                     dataCard
