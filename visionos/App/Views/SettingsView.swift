@@ -258,11 +258,29 @@ struct SettingsView: View {
                 Text("Español").tag(AppLanguage.spanish)
                 Text("English").tag(AppLanguage.english)
             }
+            Picker(L("Idioma del juego (subtítulos)", "Game language (subtitles)"), selection: string(\.gameLanguage)) {
+                Text(L("Como la app", "Same as the app")).tag("app")
+                Text(L("English (sin subtítulos)", "English (no subtitles)")).tag("off")
+                Text("English").tag("0")
+                Text("Français").tag("1")
+                Text("Deutsch").tag("2")
+                Text("Español").tag("3")
+                Text("日本語").tag("4")
+                Text("Italiano").tag("5")
+                Text("Português").tag("6")
+                Text("Türkçe").tag("7")
+                Text("简体中文").tag("8")
+                Text("العربية").tag("9")
+                Text("Русский").tag("10")
+                Text("Українська").tag("11")
+                Text("Čeština").tag("12")
+                Text("Polski").tag("13")
+            }
         } header: {
             Text(L("Juego", "Game"))
         } footer: {
-            Text(L("El idioma es el de la app y el del juego. Escenas inmersivas: las escenas se ven en 3D desde su cámara, con la cabeza libre; sin ellas, en una pantalla virtual. Se aplica al empezar la partida.",
-                   "The language is the app's and the game's. Immersive cutscenes: scenes are shown in 3D from their camera, with the head free; without them, on a virtual screen. Applies when the game starts."))
+            Text(L("Idioma: el de la app es el de los menús del launcher; el del juego (subtítulos) puede ser otro y se impone a lo guardado en la partida al empezar. Escenas inmersivas: las escenas se ven en 3D desde su cámara, con la cabeza libre; sin ellas, en una pantalla virtual. Se aplica al empezar la partida.",
+                   "Language: the app's is the launcher's menus; the game's (subtitles) can differ and overrides what the save stored when the game starts. Immersive cutscenes: scenes are shown in 3D from their camera, with the head free; without them, on a virtual screen. Applies when the game starts."))
         }
     }
 

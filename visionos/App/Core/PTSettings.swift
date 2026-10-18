@@ -101,6 +101,9 @@ struct PTSettings: Codable, Equatable {
     var voiceRecognition = true
     /// "es", "en" or "system".
     var language = "system"
+    /// The game's own language (subtitles): "app" (follow `language`), "off" (English, no subtitles)
+    /// or the subtitle index "0"..."13" (0 English, 1 French, 2 German, 3 Spanish, ...).
+    var gameLanguage = "app"
 
     // Diagnostics.
     var showPerformanceOverlay = false
@@ -303,7 +306,7 @@ struct PTSettings: Codable, Equatable {
         case sceneDepth, subtitleSize, subtitleHeight
         case tiledLights = "tiledLights"
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
-        case voiceRecognition, language, showPerformanceOverlay, gamePath
+        case voiceRecognition, language, gameLanguage, showPerformanceOverlay, gamePath
     }
 
     init() {}
@@ -348,6 +351,7 @@ struct PTSettings: Codable, Equatable {
         immersiveCutscenes = (try? c.decodeIfPresent(Bool.self, forKey: .immersiveCutscenes)) ?? base.immersiveCutscenes
         voiceRecognition = (try? c.decodeIfPresent(Bool.self, forKey: .voiceRecognition)) ?? base.voiceRecognition
         language = (try? c.decodeIfPresent(String.self, forKey: .language)) ?? base.language
+        gameLanguage = (try? c.decodeIfPresent(String.self, forKey: .gameLanguage)) ?? base.gameLanguage
         showPerformanceOverlay = (try? c.decodeIfPresent(Bool.self, forKey: .showPerformanceOverlay)) ?? base.showPerformanceOverlay
         gamePath = (try? c.decodeIfPresent(String.self, forKey: .gamePath)) ?? base.gamePath
     }
@@ -375,6 +379,13 @@ struct PTSettings: Codable, Equatable {
         default:
             return (Locale.preferredLanguages.first ?? "en").lowercased().hasPrefix("es") ? "es" : "en"
         }
+    }
+
+    /// PT_VP_SUBTITLE_LANGUAGE: the game's language when it is not the app's ("off" or 0...13).
+    var subtitleLanguageEnvironment: [String] {
+        if gameLanguage == "off" { return ["PT_VP_SUBTITLE_LANGUAGE=off"] }
+        if let index = Int(gameLanguage), (0...13).contains(index) { return ["PT_VP_SUBTITLE_LANGUAGE=\(index)"] }
+        return []
     }
 
     /// The PT_VP_* environment variables the core reads its settings from.
@@ -420,6 +431,6 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_VOICE=\(flag(voiceRecognition))",
             "PT_VP_LANGUAGE=\(resolvedLanguage)",
             "PT_VP_OVERLAY=\(flag(showPerformanceOverlay))",
-        ]
+        ] + subtitleLanguageEnvironment
     }
 }
