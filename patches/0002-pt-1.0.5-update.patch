@@ -26797,17 +26797,18 @@ index b45fa4d..bd33cc5 100644
      };
  
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index 38782fe..1773983 100644
+index 38782fe..cff8ba9 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
-@@ -169,6 +169,11 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -169,6 +169,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          state.pressed |= kPadGouge;
      }
      if (pressed & kRawStart) state.pause = true;
 +    // Both triggers at once: "Jack" without a microphone (main.cpp acts on it only while the game
 +    // listens). The triggers are not game buttons here, so no mapping changes.
-+    const bool voice_chord = c.active && c.l2 && c.r2 && !menu_open;
-+    if (voice_chord && !voice_chord_previous_) state.voice_keyword_pressed = true;
++    // (Held through a menu closing: no press until the triggers are let go and pressed again.)
++    const bool voice_chord = c.active && c.l2 && c.r2;
++    if (voice_chord && !voice_chord_previous_ && !menu_open) state.voice_keyword_pressed = true;
 +    voice_chord_previous_ = voice_chord;
      if (c.settings && !settings_previous_) state.pc_settings = true;
      settings_previous_ = c.settings;

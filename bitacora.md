@@ -34,6 +34,29 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
   `HomeView`) y `pic1/pic0` de fondo; registra en `Registros/app.txt` qué hay en sce_sys. Sin nada: `LauncherArt`
   (la misma captura, en el bundle). La 51 mostraba el launcher vacío: ver en app.txt por qué no cargó sce_sys.
 
+## Rama `pt-1.0.5` (sin build todavía): juego de pt-pc 1.0.5 sobre el port
+
+- `patches/0002-pt-1.0.5-update.patch` (binario: `git diff --binary`, os.cpp lleva NUL) va tras 0001. Regenerar: árbol de
+  `prepare_source.py` sin 0002 → commit → copiar el árbol final → `git diff --cached --binary HEAD`.
+- Traído de upstream (5c63078→v1.0.5): lógica de juego, audio, voz, fs, core, anim; nuevos sound_captions, gyro,
+  controller_feedback, spatial_output, json, device_start, boot_timing, sdl_diag, gltf_model, mod_level, parallel_for,
+  game_plus_intercom*, lisa_date/* (compila; Backdrop/SetDateResolve son no-ops en `scene_renderer.h`).
+- Revertidos a los nuestros (dependen de gpu::/UI nueva): game_ui, options_menu, pc_settings_page, uif_view, demo_ui,
+  photo_panel, archive*, museum_layout, ui_assets (+`FontCovering` inline), ui_icons, model_cache (+StageScope/AddStageRef
+  no-op), ftex, enhanced_textures, texture_cache.cpp, input_script.cpp. game.cpp: `ReleaseUnusedAssets` y
+  `VideoMemoryTight` no liberan (memoria unificada), `BackfillArchive` vacío.
+- Portado a mano: decals ordenadas por capa y sin depth bias (`PT_DECAL_LAYERS=0`, `PT_DECAL_BIAS=1` revierten),
+  `SubMesh::layer`; NaN fuera de `luminance.comp`.
+- Voz: whisper estático conservado (`PT_STATIC_WHISPER` en LoadRuntime); `OpenAsync` en main.cpp; L2+R2 = Jack
+  (`xr::ControllerState::l2/r2`, `.mm` SyncActions copia l2/r2, `vr_play` flanco `voice_chord_previous_`). Segundo modelo
+  ggml-small.en (rescue=4) no incluido: degrada con un LogWarn.
+- HDR: `shaders/vr_hdr.glsl` `VrHdrAlpha` (ganancia por canal máx, hombro Hermite, sin realce si se ve oscuro) en
+  tonemap/screen_fx; `xr_copy.frag` `DecodeOut` gamma 2.2 con HDR (`params.w` en `CopyToXr`): sombras más oscuras.
+- Launcher: pestaña `Views/HowToPlayView.swift` (Cómo jugar), en `LauncherView.swift`.
+- Fuera: corte a negro del falso crash (para presentar, imposible en VR), DoF de la sangre de la nevera, path tracing,
+  crash AMD de vfx gpu::, FilePrefetch, Museo/modo foto nuevos.
+- Comprobado sin Mac: todos los .cpp compilan a objeto y enlazan (nm), todos los shaders compilan.
+
 ## Pendiente (en orden)
 
 1. Log build 52: confirmar luces ≈ build 50 y sombras ≈ build 51; si sigue el aliasing, mirar destellos/post fusionado
