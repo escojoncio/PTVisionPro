@@ -391,7 +391,7 @@ struct PTSettings: Codable, Equatable {
     /// The PT_VP_* environment variables the core reads its settings from.
     var environment: [String] {
         func flag(_ value: Bool) -> String { value ? "1" : "0" }
-        return [
+        var vars: [String] = [
             "PT_VP_PRESET=\(preset.rawValue)",
             "PT_VP_DEVICE=\(Self.detectedPreset() == .m5 ? "m5" : "m2")",
             "PT_VP_RESOLUTION_SCALE=\(String(format: "%.2f", min(max(resolutionScale, 0.5), 2.0)))",
@@ -431,6 +431,8 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_VOICE=\(flag(voiceRecognition))",
             "PT_VP_LANGUAGE=\(resolvedLanguage)",
             "PT_VP_OVERLAY=\(flag(showPerformanceOverlay))",
-        ] + subtitleLanguageEnvironment
+        ]
+        vars.append(contentsOf: subtitleLanguageEnvironment)
+        return vars
     }
 }
