@@ -23,6 +23,10 @@ struct LauncherView: View {
                 .tabItem {
                     Label(L("Ajustes", "Settings"), systemImage: "slider.horizontal.3")
                 }
+            HowToPlayView()
+                .tabItem {
+                    Label(L("Cómo jugar", "How to play"), systemImage: "questionmark.circle")
+                }
             PerformanceView()
                 .tabItem {
                     Label(L("Rendimiento", "Performance"), systemImage: "gauge.with.dots.needle.67percent")

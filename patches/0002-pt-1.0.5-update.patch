@@ -1,3 +1,173 @@
+diff --git a/shaders/luminance.comp b/shaders/luminance.comp
+index 964d13d..a256ccd 100644
+--- a/shaders/luminance.comp
++++ b/shaders/luminance.comp
+@@ -27,7 +27,11 @@ void main() {
+             if (all(lessThan(p, size))) {
+                 float depth = ImgFetch(IMG_DEPTH, p).x;
+                 if (depth > 0.0) {
+-                    acc += vec2(max(0.0, Luma709(ImgFetch(IMG_DIFFUSE, p).rgb)), 1.0);
++                    float y = Luma709(ImgFetch(IMG_DIFFUSE, p).rgb);
++                    /* 1.0.4: one NaN or infinite texel would turn the whole measurement and the eye adaptation with it */
++                    if (!isnan(y) && !isinf(y)) {
++                        acc += vec2(max(0.0, y), 1.0);
++                    }
+                 }
+             }
+         }
+diff --git a/shaders/screen_fx.frag b/shaders/screen_fx.frag
+index 144f24f..937969d 100644
+--- a/shaders/screen_fx.frag
++++ b/shaders/screen_fx.frag
+@@ -1,5 +1,6 @@
+ #version 460
+ #include "common.glsl"
++#include "vr_hdr.glsl"
+ 
+ layout(push_constant) uniform PassPush {
+     uvec4 ids;
+@@ -51,25 +52,16 @@ void main() {
+     seed += dot(seed, seed.yxz + 33.33);
+     float noise = fract((seed.x + seed.y) * seed.z) - 0.5;
+     // Native HDR for a headset (f0.y: the brightest it may go, times SDR white; 0 off): the game
+-    // clips its scene at white (tonemap.frag: clamp, then sRGB); the scene's real light is still in
+-    // IMG_HDR. How much brighter the scene is there than what the clip shows goes to the alpha, as
+-    // 2 - gain (gain 1 to 2: alpha 1 is "no gain" for any path that writes a plain 1), for the
+-    // headset's composition to apply above white (EDR). Where the scene is not clipped nothing
+-    // changes; a clipped saturated colour gets back the brightness the clip took.
++    // clips its scene at white (tonemap.frag); the scene's real light is still in IMG_HDR. The gain
++    // above white goes to the alpha as 2 - gain (vr_hdr.glsl; alpha 1 is "no gain" for any path that
++    // writes a plain 1), for the headset's composition to apply above white (EDR). f1.y: bloom on;
++    // f2: the shared bloom's place under this view (tonemap.frag).
+     float alpha = 1.0;
+     if (pass.f0.y > 1.0) {
+         ivec2 hdr_size = ivec2(ImgSize(IMG_HDR));
+         ivec2 p = clamp(ivec2(in_uv * vec2(hdr_size)), ivec2(0), hdr_size - 1);
+-        vec3 scene = max(ImgFetch(IMG_HDR, p).rgb * pass.f0.z, vec3(0.0));
+-        float clipped = Luma709(min(scene, vec3(1.0)));
+-        float y = Luma709(scene);
+-        if (y > clipped + 1.0e-4 && clipped > 1.0e-3) {
+-            // Above white the light rolls off smoothly towards the peak.
+-            float peak = min(pass.f0.y, 2.0);
+-            float over = max(y - 1.0, 0.0);
+-            float shown = min(y, 1.0) + (peak - 1.0) * (1.0 - exp(-over / (peak - 1.0)));
+-            alpha = 2.0 - clamp(shown / clipped, 1.0, peak);
+-        }
++        vec2 view_uv = pass.f2.x > 0.0 ? 0.5 + (in_uv - 0.5) * pass.f2.xy + pass.f2.zw : in_uv;
++        alpha = VrHdrAlpha(p, view_uv, pass.f1.y, pass.f0.z, pass.f0.y, clamp(color, 0.0, 1.0));
+     }
+     out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), alpha);
+ }
+diff --git a/shaders/tonemap.frag b/shaders/tonemap.frag
+index 0d965e8..327f612 100644
+--- a/shaders/tonemap.frag
++++ b/shaders/tonemap.frag
+@@ -1,5 +1,6 @@
+ #version 460
+ #include "common.glsl"
++#include "vr_hdr.glsl"
+ 
+ layout(push_constant) uniform PassPush {
+     uvec4 ids;
+@@ -60,15 +61,8 @@ void main() {
+         if (pass.f1.z > 1.0) {
+             ivec2 hdr_size = ivec2(ImgSize(IMG_HDR));
+             ivec2 p = clamp(ivec2(in_uv * vec2(hdr_size)), ivec2(0), hdr_size - 1);
+-            vec3 scene = max(ImgFetch(IMG_HDR, p).rgb * pass.f0.z, vec3(0.0));
+-            float clipped = Luma709(min(scene, vec3(1.0)));
+-            float y = Luma709(scene);
+-            if (y > clipped + 1.0e-4 && clipped > 1.0e-3) {
+-                float peak = min(pass.f1.z, 2.0);
+-                float over = max(y - 1.0, 0.0);
+-                float shown = min(y, 1.0) + (peak - 1.0) * (1.0 - exp(-over / (peak - 1.0)));
+-                alpha = 2.0 - clamp(shown / clipped, 1.0, peak);
+-            }
++            vec2 view_uv = pass.f2.x > 0.0 ? 0.5 + (in_uv - 0.5) * pass.f2.xy + pass.f2.zw : in_uv;
++            alpha = VrHdrAlpha(p, view_uv, pass.f0.x, pass.f0.z, pass.f1.z, color);
+         }
+         out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), alpha);
+         return;
+diff --git a/shaders/vr_hdr.glsl b/shaders/vr_hdr.glsl
+new file mode 100644
+index 0000000..27370a8
+--- /dev/null
++++ b/shaders/vr_hdr.glsl
+@@ -0,0 +1,40 @@
++// Native HDR for a headset view (EDR): the gain above SDR white for the composition, written to the
++// eye image's alpha as 2 - gain (1: none; xr_host_visionos.mm SceneLight). As upstream 1.0.3/1.0.4
++// (hdr_boost.frag): the light is the strongest channel of the scene as the tonemap sees it, flare
++// and bloom included (lamps, the flashlight and their glow rise above white together), rolled off
++// smoothly to the peak (a Hermite shoulder: no clip); the gain is one factor for the whole pixel (the
++// hue stays: no cyan bulbs) and only where the picture shown is near white (dark tones untouched).
++// Needs common.glsl.
++const float kVrHdrSourceWhite = 3.0;
++
++float VrHdrShoulder(float m, float ratio) {
++    if (m <= 1.0 || ratio <= 1.001) {
++        return min(m, 1.0);
++    }
++    float width = min(kVrHdrSourceWhite - 1.0, 2.97 * (ratio - 1.0));
++    if (m >= 1.0 + width) {
++        return ratio;
++    }
++    float t = (m - 1.0) / width;
++    float t2 = t * t;
++    float t3 = t2 * t;
++    return (1.0 - 3.0 * t2 + 2.0 * t3) + (t - 2.0 * t2 + t3) * width + (3.0 * t2 - 2.0 * t3) * ratio;
++}
++
++// p: the pixel in IMG_HDR (and IMG_FLARE); bloom_uv: where the bloom is read (bloom_on 0: none);
++// exposure: the tonemap's f0.z; peak: the brightest, times SDR white (1 to 2); shown: the
++// picture's colour as displayed (sRGB encoded, 0 to 1).
++float VrHdrAlpha(ivec2 p, vec2 bloom_uv, float bloom_on, float exposure, float peak, vec3 shown) {
++    float ratio = min(peak, 2.0);
++    vec3 scene = ImgFetch(IMG_HDR, p).rgb * exposure;
++    scene = mix(scene, vec3(0.0), isnan(scene));
++    scene = clamp(scene, vec3(0.0), vec3(1.0e4));
++    vec3 x = SrgbEncode(scene) + max(ImgFetch(IMG_FLARE, p).rgb, vec3(0.0));
++    vec3 x2 = x * x;
++    vec3 bloom = bloom_on > 0.0 ? min(vec3(0.5), Img(IMG_BLOOM_SUM, SMP_LINEAR_CLAMP, bloom_uv + 0.5 / ImgSize(IMG_BLOOM_SUM)).rgb) : vec3(0.0);
++    vec3 encoded = sqrt(x2 + bloom * max(1.0 - x2, 0.0));
++    float light = pow(max(encoded.r, max(encoded.g, encoded.b)), 2.2);
++    float boost = max(VrHdrShoulder(light, ratio), 1.0) - 1.0;
++    float near_white = smoothstep(0.4, 0.8, max(shown.r, max(shown.g, shown.b)));
++    return 2.0 - clamp(1.0 + boost * near_white, 1.0, ratio);
++}
+diff --git a/shaders/xr_copy.frag b/shaders/xr_copy.frag
+index 8e3f88f..45793dc 100644
+--- a/shaders/xr_copy.frag
++++ b/shaders/xr_copy.frag
+@@ -18,6 +18,14 @@ vec3 Decode(vec3 c) {
+     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+ }
+ 
++// params.w: native HDR on. The picture was graded for a display (gamma 2.2), as upstream 1.0.3/1.0.4
++// decodes it for HDR output: the sRGB curve's linear toe lifts the dark tones (greyed dark rooms,
++// film grain greying the dark, the brightness page's darkest steps). Picture and HUD alike, so the
++// brightness page still matches the picture.
++vec3 DecodeOut(vec3 c) {
++    return p.params.w > 0.5 ? pow(clamp(c, 0.0, 1.0), vec3(2.2)) : Decode(c);
++}
++
+ void main() {
+     vec2 uv = p.rect.xy + in_uv * p.rect.zw;
+     vec4 c = texture(source, uv);
+@@ -25,7 +33,7 @@ void main() {
+         float a = clamp(c.a, 0.0, 1.0);
+         vec3 straight = a > 1.0e-4 ? c.rgb / a : vec3(0.0);
+         straight = pow(clamp(straight, 0.0, 1.0), vec3(1.0 / max(p.params.y, 0.1)));
+-        out_color = vec4(Decode(straight) * a, a);
++        out_color = vec4(DecodeOut(straight) * a, a);
+         return;
+     }
+     vec3 color = c.rgb;
+@@ -46,5 +54,5 @@ void main() {
+     }
+     color = pow(clamp(color, 0.0, 1.0), vec3(1.0 / max(p.params.y, 0.1)));
+     // params.z: a headset eye with native HDR, its gain in the alpha (1 = none).
+-    out_color = vec4(Decode(color), p.params.z > 0.5 ? clamp(c.a, 0.0, 1.0) : 1.0);
++    out_color = vec4(DecodeOut(color), p.params.z > 0.5 ? clamp(c.a, 0.0, 1.0) : 1.0);
+ }
 diff --git a/src/engine/assets/gltf_model.cpp b/src/engine/assets/gltf_model.cpp
 new file mode 100644
 index 0000000..ca16765
@@ -14883,6 +15053,30 @@ index 0000000..20fbc6a
 +}
 +
 +}
+diff --git a/src/engine/render/mesh.h b/src/engine/render/mesh.h
+index 1d15dfc..4ca3a45 100644
+--- a/src/engine/render/mesh.h
++++ b/src/engine/render/mesh.h
+@@ -40,6 +40,7 @@ struct SubMesh {
+     bool shadow = true;
+     bool shadow_double_sided = false;
+     uint16_t group = 0;
++    uint8_t layer = 0;  // decal layer, render flag bits 20 to 23 (lower layers blend first)
+ };
+ 
+ struct MeshGroup {
+diff --git a/src/engine/render/model_cache.cpp b/src/engine/render/model_cache.cpp
+index b6dee64..b440877 100644
+--- a/src/engine/render/model_cache.cpp
++++ b/src/engine/render/model_cache.cpp
+@@ -388,6 +388,7 @@ const ModelEntry* ModelCache::Load(const std::string& path, const std::string& k
+             }
+             const uint32_t kind = MaterialKindOf(m);
+             sub.kind = static_cast<uint8_t>(kind);
++            sub.layer = static_cast<uint8_t>((info.render_flags >> 20) & 0xF);
+             const uint32_t f = info.render_flags;
+             sub.shadow = (f & 0x140) == 0 && ((f & 0x10) == 0 || (f & 0xF) == 0);
+             if (LisaHairShadow(path, m)) {
 diff --git a/src/engine/render/model_cache.h b/src/engine/render/model_cache.h
 index 9fe1eff..55e8b3d 100644
 --- a/src/engine/render/model_cache.h
@@ -14902,8 +15096,81 @@ index 9fe1eff..55e8b3d 100644
      ModelCache(Vfs& vfs, SceneRenderer& scene, TextureManager& textures) : vfs_(vfs), scene_(scene), textures_(textures) {}
  
      const ModelEntry* Get(const std::string& path, FmdlModel* parsed = nullptr);
+diff --git a/src/engine/render/renderer.cpp b/src/engine/render/renderer.cpp
+index 33cccaf..37effd7 100644
+--- a/src/engine/render/renderer.cpp
++++ b/src/engine/render/renderer.cpp
+@@ -787,8 +787,9 @@ void Renderer::CopyToXr(VkCommandBuffer cmd, VkDescriptorSet set, const XrTarget
+                              : 1.0f;
+     const float push[16] = {target.rect.x, target.rect.y, target.rect.z, target.rect.w,
+                             // The brightness goes on the HUD too, as on a screen, where it is applied to the whole
+-                            // picture with its UI: the brightness screen's test pattern is UI.
+-                            premultiplied ? 1.0f : 0.0f, brightness, !premultiplied && xr_hdr ? 1.0f : 0.0f, 0.0f,
++                            // picture with its UI: the brightness screen's test pattern is UI. params.w: native HDR
++                            // on, everything (picture and HUD alike) decoded as a display shows it (gamma 2.2).
++                            premultiplied ? 1.0f : 0.0f, brightness, !premultiplied && xr_hdr ? 1.0f : 0.0f, xr_hdr ? 1.0f : 0.0f,
+                             premultiplied ? 0.0f : grain[0], grain[1], grain[2], grain[3],
+                             grain_offset[0], grain_offset[1], across, 0.0f};
+     vkCmdPushConstants(cmd, xr_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), push);
+diff --git a/src/engine/render/scene_frame.cpp b/src/engine/render/scene_frame.cpp
+index 3c58237..fa8e9a9 100644
+--- a/src/engine/render/scene_frame.cpp
++++ b/src/engine/render/scene_frame.cpp
+@@ -1682,14 +1682,29 @@ void SceneRenderer::RecordGBuffer(VkCommandBuffer cmd, const ViewSetup& view) {
+     for (int pass = 0; pass < 2; ++pass) {
+         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pass == 0 ? gbuffer_ : decal_);
+         if (pass == 1) {
+-            vkCmdSetDepthBias(cmd, 1.0f, 0.0f, 1.0f);
+-        }
++            // 1.0.3: the original's decal draws have no polygon offset; the slope term let a wall crack draw over a painting
++            // 2 cm in front of it up close at low resolutions. PT_DECAL_BIAS=1 restores the old offset
++            static const bool legacy_bias = std::getenv("PT_DECAL_BIAS") != nullptr;
++            vkCmdSetDepthBias(cmd, legacy_bias ? 1.0f : 0.0f, 0.0f, legacy_bias ? 1.0f : 0.0f);
++        }
++        const RenderPass wanted = pass == 0 ? RenderPass::Opaque : RenderPass::Decal;
++        // 1.0.2: decal meshes carry a layer in mesh flag bits 20 to 23 (the ending street's blood is layer 2 to 4 over the
++        // layer 0 wet asphalt of the road placements, which come later in the draw list): lower layers blend first
++        decal_order_.clear();
+         for (const Draw& d : draws_) {
+-            const RenderPass wanted = pass == 0 ? RenderPass::Opaque : RenderPass::Decal;
+-            if (d.sub->pass != wanted || d.sub->kind != gpu::kKindDeferred || !Visible(d, view)) {
+-                continue;
++            if (d.sub->pass == wanted && d.sub->kind == gpu::kKindDeferred && Visible(d, view)) {
++                decal_order_.push_back(&d);
+             }
+-            DrawMesh(cmd, d, view.index, debug_flags, view.mirrored, false, aux);
++        }
++        static const bool by_layer = [] {
++            const char* env = std::getenv("PT_DECAL_LAYERS");
++            return !env || std::atoi(env) != 0;
++        }();
++        if (pass == 1 && by_layer) {
++            std::stable_sort(decal_order_.begin(), decal_order_.end(), [](const Draw* a, const Draw* b) { return a->sub->layer < b->sub->layer; });
++        }
++        for (const Draw* d : decal_order_) {
++            DrawMesh(cmd, *d, view.index, debug_flags, view.mirrored, false, aux);
+             ++gbuffer_draws;
+         }
+     }
+diff --git a/src/engine/render/scene_post.cpp b/src/engine/render/scene_post.cpp
+index 756cba0..c8817e1 100644
+--- a/src/engine/render/scene_post.cpp
++++ b/src/engine/render/scene_post.cpp
+@@ -366,8 +366,11 @@ void SceneRenderer::RecordPost(VkCommandBuffer cmd, const SceneLighting& lightin
+     BeginPass(cmd, output_extent_, {{&output, false, {}}});
+     push.ids = glm::uvec4(ldr_index(current), 0, 0, post_view_);
+     push.f0 = glm::vec4(distortion ? 1.0f : 0.0f, hdr_peak, lighting.valid ? 1.0f : renderer_->exposure, 0.0f);
+-    push.f1 = glm::vec4(graphics.clarity, 0.0f, 0.0f, 0.0f);
++    // f1.y, f2: the bloom (on, its place under this view) for the native HDR's gain (vr_hdr.glsl).
++    push.f1 = glm::vec4(graphics.clarity, bloom && !tonemap_test ? 1.0f : 0.0f, 0.0f, 0.0f);
++    push.f2 = bloom_place;
+     Fullscreen(cmd, screen_fx_, push);
++    push.f2 = glm::vec4(0.0f);
+     renderer_->grain[0] = grain ? 1.0f : 0.0f;
+     renderer_->grain[1] = screen.grain_alt ? 1.0f : 0.0f;
+     renderer_->grain[2] = screen.grain_strength * graphics.film_grain;
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 705d57c..cf23be4 100644
+index 705d57c..d042e39 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
 @@ -174,6 +174,21 @@ struct UpscaleStats {
@@ -14928,6 +15195,14 @@ index 705d57c..cf23be4 100644
      bool Init(Renderer& renderer, TextureManager& textures);
      void Shutdown();
      bool LoadResources(Vfs& vfs);
+@@ -718,6 +733,7 @@ private:
+     gpu::FrameData* frame_ = nullptr;
+     std::vector<glm::mat4> skin_matrices_;
+     std::vector<Draw> draws_;
++    std::vector<const Draw*> decal_order_;
+     std::vector<ShadowView> shadow_views_;
+     std::vector<uint32_t> probe_order_;
+     std::vector<const SceneLight*> light_sources_;
 diff --git a/src/engine/render/texture_manager.h b/src/engine/render/texture_manager.h
 index cb25b6f..aa119f4 100644
 --- a/src/engine/render/texture_manager.h
@@ -16467,6 +16742,21 @@ index 399ce75..71922c8 100644
      int silence_chunks_ = 0;
      int voiced_chunks_ = 0;
  };
+diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
+index c1d987a..03948bc 100644
+--- a/src/engine/xr/xr_host.h
++++ b/src/engine/xr/xr_host.h
+@@ -45,6 +45,10 @@ struct ControllerState {
+     bool dpad_right = false;
+     bool l1 = false;
+     bool r1 = false;
++    // Both triggers (L2, R2): the menu pointer clicks with them; both at once say "Jack" while
++    // the game listens (vr_play.cpp), the controller alternative to the microphone.
++    bool l2 = false;
++    bool r2 = false;
+     int prompt_style = 0;  // 0 Xbox, 1 PlayStation, 2 Nintendo
+     bool pointer_valid = false;
+     glm::vec2 pointer{0.0f};
 diff --git a/src/game/archive_model_camera.h b/src/game/archive_model_camera.h
 new file mode 100644
 index 0000000..2ff8fc3
@@ -25383,7 +25673,7 @@ index e827345..deb3a84 100644
  
  }
 diff --git a/src/game/trap_system.cpp b/src/game/trap_system.cpp
-index 6628eab..66690e4 100644
+index 6628eab..9bf1769 100644
 --- a/src/game/trap_system.cpp
 +++ b/src/game/trap_system.cpp
 @@ -90,6 +90,10 @@ bool TrapSystem::ButtonPressed(const std::string& button) const {
@@ -25397,6 +25687,15 @@ index 6628eab..66690e4 100644
  bool TrapSystem::TargetInView(const Context& ctx, const fox2::Entity* locator, float area, glm::vec3* position) const {
      if (!locator) {
          return false;
+@@ -142,7 +146,7 @@ bool TrapSystem::Check(const Context& ctx, const TrapCallback& callback) {
+             if(exec.entity && exec.class_name == "ShTrapExecNazoCallbackDataElement" && f.GetString(*exec.entity,"checkName") == "XMark")gouge=true;
+         }
+         auto in_view = [&]() { return TargetInView(ctx, locator, area, nullptr) &&
+-            (gouge && button == "Action" ? (player.FramePressedButtons() & kGougeButtons) != 0 : ButtonPressed(button)); };
++            (gouge && button == "Action" ? GougePressed() : ButtonPressed(button)); };
+         if (!f.GetBool(e, "isOutOfViewAfter")) {
+             return in_view();
+         }
 @@ -210,7 +214,11 @@ int TrapSystem::ExecDemo(const Context& ctx, const fox2::Entity& e) {
      if (game_.Demos().IsPlaying(demo_id)) {
          return 1;
@@ -26275,226 +26574,6 @@ index 49b8344..323571b 100644
  #if defined(PT_WITH_DLSS) || defined(PT_WITH_STREAMLINE)
      cards.push_back({{"NVIDIA RTX", "pc_credits_dlss",
  #if defined(PT_WITH_STREAMLINE)
-diff --git a/src/game/ui/prompt_hint.cpp b/src/game/ui/prompt_hint.cpp
-new file mode 100644
-index 0000000..65d9408
---- /dev/null
-+++ b/src/game/ui/prompt_hint.cpp
-@@ -0,0 +1,169 @@
-+#include "game/ui/prompt_hint.h"
-+
-+#include <algorithm>
-+#include <array>
-+
-+#include "engine/render/texture_manager.h"
-+#include "game/ui/ui_assets.h"
-+#include "game/ui/uif_view.h"
-+
-+namespace pt::game {
-+namespace {
-+
-+constexpr std::string_view kPictureCode = "\xEE\x80\x80";
-+
-+struct Token {
-+    std::string_view name;
-+    std::array<Prompt, 4> keyboard{};
-+    int keyboard_count = 0;
-+    std::array<Prompt, 4> pad{};
-+    int pad_count = 0;
-+};
-+
-+constexpr Prompt Key(KeyAction action) { return {PromptButton::Cross, action, action}; }
-+constexpr Prompt Both(PromptButton button, KeyAction action) { return {button, action, action}; }
-+constexpr Prompt Pair(PromptButton button, KeyAction a, KeyAction b) { return {button, a, b}; }
-+
-+const std::array<Token, 20>& Tokens() {
-+    static const std::array<Token, 20> tokens = {{
-+        {"accept", {Both(PromptButton::Cross, KeyAction::Confirm)}, 1, {Both(PromptButton::Cross, KeyAction::Confirm)}, 1},
-+        {"back", {Both(PromptButton::Circle, KeyAction::Menu)}, 1, {Both(PromptButton::Circle, KeyAction::Menu)}, 1},
-+        {"pause", {Both(PromptButton::Options, KeyAction::Menu)}, 1, {Both(PromptButton::Options, KeyAction::Menu)}, 1},
-+        {"columns", {Both(PromptButton::R1, KeyAction::MenuColumn)}, 1, {Both(PromptButton::L1, KeyAction::MenuHouse), Both(PromptButton::R1, KeyAction::MenuColumn)}, 2},
-+        {"updown", {Pair(PromptButton::DpadUpDown, KeyAction::PadUp, KeyAction::PadDown)}, 1, {Pair(PromptButton::DpadUpDown, KeyAction::PadUp, KeyAction::PadDown)}, 1},
-+        {"leftright", {Pair(PromptButton::DpadLeftRight, KeyAction::PadLeft, KeyAction::PadRight)}, 1, {Pair(PromptButton::DpadLeftRight, KeyAction::PadLeft, KeyAction::PadRight)}, 1},
-+        {"dpad",
-+         {Pair(PromptButton::DpadUpDown, KeyAction::PadUp, KeyAction::PadDown), Pair(PromptButton::DpadLeftRight, KeyAction::PadLeft, KeyAction::PadRight)}, 2,
-+         {Pair(PromptButton::DpadUpDown, KeyAction::PadUp, KeyAction::PadDown), Pair(PromptButton::DpadLeftRight, KeyAction::PadLeft, KeyAction::PadRight)}, 2},
-+        {"photo", {Both(PromptButton::Square, KeyAction::PhotoSave)}, 1, {Both(PromptButton::Square, KeyAction::PhotoSave)}, 1},
-+        {"hide", {Both(PromptButton::Triangle, KeyAction::PhotoHide)}, 1, {Both(PromptButton::Triangle, KeyAction::PhotoHide)}, 1},
-+        {"walk", {Key(KeyAction::WalkForward), Key(KeyAction::WalkLeft), Key(KeyAction::WalkBack), Key(KeyAction::WalkRight)}, 4, {}, 0},
-+        {"look", {Key(KeyAction::Zoom)}, 1, {}, 0},
-+        {"rise", {Key(KeyAction::FreeRise)}, 1, {}, 0},
-+        {"sink", {Key(KeyAction::FreeSink)}, 1, {}, 0},
-+        {"fast", {Key(KeyAction::FreeFast)}, 1, {}, 0},
-+        {"seek", {Key(KeyAction::MusicBack), Key(KeyAction::MusicForward)}, 2,
-+         {Both(PromptButton::L1, KeyAction::MusicBack), Both(PromptButton::R1, KeyAction::MusicForward)}, 2},
-+        {"restart", {Key(KeyAction::MusicRestart)}, 1, {Both(PromptButton::Square, KeyAction::MusicRestart)}, 1},
-+        {"loop", {Key(KeyAction::MusicLoop)}, 1, {Both(PromptButton::Triangle, KeyAction::MusicLoop)}, 1},
-+        {"tabprev", {Key(KeyAction::MenuTabPrev)}, 1, {Both(PromptButton::L1, KeyAction::MenuTabPrev)}, 1},
-+        {"tabnext", {Key(KeyAction::MenuTabNext)}, 1, {Both(PromptButton::R1, KeyAction::MenuTabNext)}, 1},
-+        {"donate", {Key(KeyAction::MenuDonate)}, 1, {Both(PromptButton::Select, KeyAction::MenuDonate)}, 1},
-+    }};
-+    return tokens;
-+}
-+
-+const Token* FindToken(std::string_view name) {
-+    for (const Token& token : Tokens()) {
-+        if (token.name == name) return &token;
-+    }
-+    return nullptr;
-+}
-+
-+}
-+
-+bool HasPromptTokens(std::string_view text) {
-+    for (size_t at = text.find('{'); at != std::string_view::npos; at = text.find('{', at + 1)) {
-+        const size_t end = text.find('}', at);
-+        if (end == std::string_view::npos) break;
-+        std::string_view name = text.substr(at + 1, end - at - 1);
-+        if (name == "kb" || name == "pad" || name == "/kb" || name == "/pad" || FindToken(name)) return true;
-+    }
-+    return false;
-+}
-+
-+PromptLine ExpandPromptHint(std::string_view hint, bool keyboard) {
-+    PromptLine out;
-+    out.text.reserve(hint.size());
-+    int block = 0;
-+    const auto shown = [&] { return block == 0 || (block == 1 && keyboard) || (block == 2 && !keyboard); };
-+    for (size_t i = 0; i < hint.size();) {
-+        if (hint[i] == '{') {
-+            const size_t end = hint.find('}', i);
-+            if (end != std::string_view::npos) {
-+                const std::string_view name = hint.substr(i + 1, end - i - 1);
-+                if (name == "kb" || name == "pad") {
-+                    block = name == "kb" ? 1 : 2;
-+                    i = end + 1;
-+                    continue;
-+                }
-+                if (name == "/kb" || name == "/pad") {
-+                    block = 0;
-+                    i = end + 1;
-+                    continue;
-+                }
-+                if (const Token* token = FindToken(name)) {
-+                    if (shown()) {
-+                        const int count = keyboard ? token->keyboard_count : token->pad_count;
-+                        const auto& prompts = keyboard ? token->keyboard : token->pad;
-+                        for (int n = 0; n < count; ++n) {
-+                            out.text += kPictureCode;
-+                            out.pictures.push_back(prompts[static_cast<size_t>(n)]);
-+                        }
-+                    }
-+                    i = end + 1;
-+                    continue;
-+                }
-+            }
-+        }
-+        if (shown()) out.text += hint[i];
-+        ++i;
-+    }
-+    return out;
-+}
-+
-+std::vector<float> PromptAdvances(UiAssets& assets, const PromptLine& line, const PromptStyle& style, float font_height) {
-+    std::vector<float> advances;
-+    for (const Prompt& prompt : line.pictures) {
-+        const PromptGlyph glyph = assets.PromptPicture(prompt, style);
-+        advances.push_back(font_height / std::max(0.05f, glyph.body_height) * glyph.body_width + 0.5f * font_height);
-+    }
-+    return advances;
-+}
-+
-+void DrawPromptPictures(ui::UiBatch& batch, const UiCanvas& canvas, UiAssets& assets, const UiFont& font, const ui::TextLayout& layout,
-+                        const PromptLine& line, const PromptStyle& prompts, float alpha) {
-+    const float font_height = layout.line_height / std::max(0.01f, font.font.LineFactor());
-+    const float em = static_cast<float>(std::max(1, font.font.EmSize()));
-+    const ui::FfntGlyph* cap = font.font.Find('H');
-+    const float cap_middle = cap ? (static_cast<float>(font.font.Pad()) + cap->top + cap->height * 0.5f) / em : 0.5f * font.font.LineFactor();
-+    auto texture = [&](const std::string& name) {
-+        const uint32_t t = assets.Texture(name);
-+        return t | assets.TextureAddressBits(t);
-+    };
-+    for (const ui::TextLine& text_line : layout.lines) {
-+        for (const ui::LaidGlyph& g : text_line.glyphs) {
-+            if (g.glyph || g.picture < 0 || static_cast<size_t>(g.picture) >= line.pictures.size()) continue;
-+            const PromptGlyph glyph = assets.PromptPicture(line.pictures[static_cast<size_t>(g.picture)], prompts);
-+            if (glyph.icon.empty()) continue;
-+            const float height = font_height / std::max(0.05f, glyph.body_height);
-+            const glm::vec2 centre(g.position.x + g.size.x * 0.5f, g.position.y + font_height * cap_middle);
-+            const glm::vec2 half(height * glyph.width * 0.5f, height * 0.5f);
-+            const glm::vec2 a = canvas.ToTarget(centre - half), b = canvas.ToTarget(centre + half);
-+            if (!glyph.glow.empty()) {
-+                batch.Quad(a, b, glyph.uv0, glyph.uv1, glm::vec4(1.0f, 1.0f, 1.0f, 0.4f * alpha), ui::UiDrawParams::Plain(texture(glyph.glow)),
-+                           ui::UiShade::Material, ui::UiBlend::Additive);
-+            }
-+            batch.Quad(a, b, glyph.uv0, glyph.uv1, glm::vec4(1.0f, 1.0f, 1.0f, alpha), ui::UiDrawParams::Plain(texture(glyph.icon)), ui::UiShade::Material,
-+                       ui::UiBlend::Alpha);
-+        }
-+    }
-+}
-+
-+void DrawPromptText(ui::UiBatch& batch, const UiCanvas& canvas, UiAssets& assets, UiFont& font, std::string_view hint, const PromptStyle& prompts,
-+                    float size, glm::vec2 lo, glm::vec2 hi, ui::TextAlign align, ui::TextAlign vertical, glm::vec4 color, bool fit, float line_space) {
-+    const PromptLine line = ExpandPromptHint(hint, prompts);
-+    if (line.text.empty()) return;
-+    ui::TextStyle style;
-+    style.font = &font.font;
-+    style.font_width = style.font_height = size;
-+    style.line_space = line_space;
-+    style.inline_advances = PromptAdvances(assets, line, prompts, size);
-+    style.inline_advance = style.inline_advances.empty() ? 0.0f : style.inline_advances.front();
-+    ui::TextLayout layout = fit ? ui::LayoutTextInBox(line.text, style, glm::vec2(0.0f), hi - lo) : ui::LayoutText(line.text, style, hi.x - lo.x);
-+    ui::PlaceText(layout, lo, hi, align, align, vertical, true);
-+    DrawText(batch, canvas, font, layout, color, ui::UiBlend::Alpha);
-+    DrawPromptPictures(batch, canvas, assets, font, layout, line, prompts, color.a);
-+}
-+
-+}
-diff --git a/src/game/ui/prompt_hint.h b/src/game/ui/prompt_hint.h
-new file mode 100644
-index 0000000..925d964
---- /dev/null
-+++ b/src/game/ui/prompt_hint.h
-@@ -0,0 +1,39 @@
-+#pragma once
-+
-+#include <glm/glm.hpp>
-+
-+#include <string>
-+#include <string_view>
-+#include <vector>
-+
-+#include "engine/platform/input.h"
-+#include "engine/ui/text_layout.h"
-+#include "engine/ui/ui_batch.h"
-+#include "game/ui/ui_icons.h"
-+
-+namespace pt::game {
-+
-+struct UiCanvas;
-+struct UiFont;
-+class UiAssets;
-+
-+struct PromptLine {
-+    std::string text;
-+    std::vector<Prompt> pictures;
-+};
-+
-+PromptLine ExpandPromptHint(std::string_view hint, bool keyboard);
-+inline PromptLine ExpandPromptHint(std::string_view hint, const PromptStyle& style) {
-+    return ExpandPromptHint(hint, style.device == PromptDevice::Keyboard);
-+}
-+bool HasPromptTokens(std::string_view text);
-+
-+std::vector<float> PromptAdvances(UiAssets& assets, const PromptLine& line, const PromptStyle& style, float font_height);
-+
-+void DrawPromptPictures(ui::UiBatch& batch, const UiCanvas& canvas, UiAssets& assets, const UiFont& font, const ui::TextLayout& layout,
-+                        const PromptLine& line, const PromptStyle& prompts, float alpha);
-+
-+void DrawPromptText(ui::UiBatch& batch, const UiCanvas& canvas, UiAssets& assets, UiFont& font, std::string_view hint, const PromptStyle& prompts,
-+                    float size, glm::vec2 lo, glm::vec2 hi, ui::TextAlign align, ui::TextAlign vertical, glm::vec4 color, bool fit, float line_space = 0.0f);
-+
-+}
 diff --git a/src/game/ui/subtitle_player.cpp b/src/game/ui/subtitle_player.cpp
 index 9ae082a..56ef6aa 100644
 --- a/src/game/ui/subtitle_player.cpp
@@ -26717,3 +26796,82 @@ index b45fa4d..bd33cc5 100644
          bool failed = false;
      };
  
+diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
+index 38782fe..1773983 100644
+--- a/src/game/vr_play.cpp
++++ b/src/game/vr_play.cpp
+@@ -169,6 +169,11 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+         state.pressed |= kPadGouge;
+     }
+     if (pressed & kRawStart) state.pause = true;
++    // Both triggers at once: "Jack" without a microphone (main.cpp acts on it only while the game
++    // listens). The triggers are not game buttons here, so no mapping changes.
++    const bool voice_chord = c.active && c.l2 && c.r2 && !menu_open;
++    if (voice_chord && !voice_chord_previous_) state.voice_keyword_pressed = true;
++    voice_chord_previous_ = voice_chord;
+     if (c.settings && !settings_previous_) state.pc_settings = true;
+     settings_previous_ = c.settings;
+     if (pressed) state.any_button = true;
+diff --git a/src/game/vr_play.h b/src/game/vr_play.h
+index 2bcbcd6..b936bae 100644
+--- a/src/game/vr_play.h
++++ b/src/game/vr_play.h
+@@ -123,6 +123,7 @@ private:
+     uint32_t raw_previous_ = 0;
+     bool snap_armed_ = true;
+     bool settings_previous_ = false;
++    bool voice_chord_previous_ = false;
+     int game_turns_ = 0;
+     uint64_t frames_ = 0;
+ };
+diff --git a/src/main.cpp b/src/main.cpp
+index 6dd62ee..52b2775 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -4207,12 +4207,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
+             }
+         }
+ 
+-        if (app.window && voice_key != SDL_SCANCODE_UNKNOWN) {
+-            const bool down = SDL_GetKeyboardState(nullptr)[voice_key];
+-            if (down && !voice_key_down && game.VoiceListening() && !game.Paused() && !app.microphone_test) {
++        {
++            // Jack without a microphone: the keyboard key (voice.key) or both controller triggers,
++            // only while the game listens. On visionOS the triggers always work (no text files to edit).
++            bool key_tapped = false;
++            if (app.window && voice_key != SDL_SCANCODE_UNKNOWN) {
++                const bool down = SDL_GetKeyboardState(nullptr)[voice_key];
++                key_tapped = down && !voice_key_down;
++                voice_key_down = down;
++            }
++#if PT_VISIONOS
++            const bool chord_enabled = true;
++#else
++            const bool chord_enabled = voice_key != SDL_SCANCODE_UNKNOWN;
++#endif
++            const bool chord = polled.voice_keyword_pressed && chord_enabled;
++            if ((key_tapped || chord) && game.VoiceListening() && !game.Paused() && !ui.MenuOpen() && !show_settings && !app.microphone_test) {
++                pt::LogInfo("voice: fallback Jack from {}", chord ? "controller" : "keyboard");
+                 game.OnVoiceKeyword("jack");
+             }
+-            voice_key_down = down;
+         }
+         if (!ui.MenuOpen() || ui.Menu().CurrentPage() != pt::game::OptionsMenu::Page::Pc)
+             app.microphone_test = app.microphone_monitor = false;
+@@ -4241,9 +4254,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+         }
+         if (hearing && recognizer) {
+             if (!microphone.IsOpen() && !microphone_failed && !voice_file) {
+-                microphone_failed = !microphone.Open(pt::VoiceRecognizer::kSampleRate, app.settings.voice.device);
+-                recognizer->Reset();
+-                if (microphone_failed) pt::LogError("voice: no microphone to listen with");
++                // Opened on a thread: opening a capture device can block for seconds (1.0.3).
++                const auto open_state = microphone.OpenAsync(pt::VoiceRecognizer::kSampleRate, app.settings.voice.device);
++                if (open_state != pt::Microphone::AsyncState::Pending) {
++                    microphone_failed = open_state == pt::Microphone::AsyncState::Failed;
++                    recognizer->Reset();
++                    if (microphone_failed) pt::LogError("voice: no microphone to listen with");
++                }
+             }
+             const pt::VoiceRecognizer::State state = recognizer->GetState();
+             app.microphone_status = microphone_failed || state == pt::VoiceRecognizer::State::Failed ? "pc_mic_unavailable"

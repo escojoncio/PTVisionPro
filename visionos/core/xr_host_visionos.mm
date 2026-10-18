@@ -1711,6 +1711,8 @@ void Host::SyncActions() {
     controllers_.dpad_right = c.dpad_right;
     controllers_.l1 = c.l1;
     controllers_.r1 = c.r1;
+    controllers_.l2 = c.l2;
+    controllers_.r2 = c.r2;
     controllers_.prompt_style = c.prompt_style;
 
     Impl& x = *impl_;
