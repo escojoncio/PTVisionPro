@@ -57,6 +57,19 @@ visionOS sobre `build/port-src` (+ `patches/0001-visionos-menus.patch`). C++ nat
   crash AMD de vfx gpu::, FilePrefetch, Museo/modo foto nuevos.
 - Comprobado sin Mac: todos los .cpp compilan a objeto y enlazan (nm), todos los shaders compilan.
 
+- Builds 54–56 fallidas (CI): 54 `posix_spawn_file_actions_addchdir_np`/fork no existen en visionOS → `os.cpp`
+  `StartDetached` y `ChildProcess::Start` devuelven false con `PT_IOS`; 55 `ggml-backend-impl.h` → incluido solo sin
+  `PT_STATIC_WHISPER`; 56 link: `texture_cache.h` 1.0.5 con `.cpp` antiguo → `texture_cache.cpp` de 1.0.5 + `rgbcx.cpp` en
+  `pt_bc7enc` (Dependencies.cmake). Lección: los símbolos "esperados" sin definir hay que comprobarlos uno a uno.
+- Idioma del juego: `PTSettings.gameLanguage` → `PT_VP_SUBTITLE_LANGUAGE` (0–13 | off); `Game::ApplyLauncherLanguage`
+  tras `RequestLoad` (una vez por proceso) pisa el idioma del guardado; `UiTextLanguage` en main.cpp (cs/pl → menús en inglés).
+- 1.0.6 (up/main, tag local `v105-merged` = 1.0.5): mirilla (look con roll, centro en `PeepholeTransform`), demo
+  `gc_p00_010`, pausa del paso 7 con `LoopReloadPending`, `BrowseLoop` desde el primer menú, `outro_input.h`. Fuera:
+  sonda de CPU de voz, altavoz DS4, RT/gpu::, UI/actualizador.
+- Museo nuevo: DESCARTADO por el usuario. Estudio: lógica (archive*, museum_music) compila; requeriría ~12 ficheros y
+  ~600 líneas de main.cpp. Fallo latente: el teatro del museo en VR usa la cámara de la cabeza (`ScreenMode` usa el juego
+  principal, no `theater->Sandbox()`); arreglo barato = forzar pantalla virtual con teatro activo.
+
 ## Pendiente (en orden)
 
 1. Log build 52: confirmar luces ≈ build 50 y sombras ≈ build 51; si sigue el aliasing, mirar destellos/post fusionado
