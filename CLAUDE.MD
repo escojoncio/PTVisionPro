@@ -71,7 +71,7 @@ At the start of a session, check whether .claude/agents/ contains reader.md,
 coder.md and Explore.md. Create only the missing ones; do not overwrite existing
 files. Create the folder if needed. Each file is YAML frontmatter (a line of three
 hyphens, the fields, a line of three hyphens) followed by the body. After creating
-any, tell me to restart the session so they load.
+any, make sure they load.
 
 reader.md
 - name: reader
