@@ -17,7 +17,9 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Estado
 
-- Rama de trabajo: `pt-1.0.5`. Build 71 sin probar.
+- Rama de trabajo: `pt-1.0.5`. Build 71 probada 67 s (log pt (3)): sin cierres, 47 fps, GPU 4 vistas 20,3 ms.
+- Mapa de foveado ESTÁTICO (log pt (3)): centro fijo vista 0 (0,631, 0,497), vista 1 (0,369, 0,497) durante toda la
+  sesión; el objeto se recrea cada frame con el mismo contenido. `GazeInset` nunca se activó. Seguir la mirada: imposible.
 - Pantalla de crash falsa invertida: causa NO encontrada (variantes `sh_bug_*` = mallas con textura propia por la misma
   ruta UI que los subtítulos, que salen bien). Pendiente del log (`ui: full-canvas picture…` + `ui: bug screen N`).
 - Escena final pixelada: causa NO encontrada (no hay condición que salte el inset). Pendiente de `vr: stereo frame:`.
@@ -29,8 +31,8 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Pendiente (en orden)
 
-1. Log build 71: `foveation map:` (¿centro se mueve con la mirada?) y `GazeInset` aplicado; crash falsa (variante,
-   orientación); escena final (`sharp zone drawn/NOT drawn`, tamaños); falsos positivos del HUD completo.
+1. Log con crash falsa (variante, orientación) y escena final (`sharp zone drawn/NOT drawn`): el log pt (3) no llegó.
+   Próxima build: quitar `GazeInset`/`DenseCentre`/ajuste `gaze_inset` y `FoveationDiag` (mapa estático, código inútil).
 2. Subtítulos con el HUD completo escalan con él (misma textura); sacarlos a otra capa si molesta.
 3. Nombres de botón genéricos en vez de iconos (`prompt_hint` de 1.0.5 no fusionado).
 4. Otros idiomas (tr, zh, ar, ru, uk) caen al inglés en las claves del visor.
@@ -45,7 +47,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
   sombras; ritmo fijo como sustituto de rendimiento.
 - Arquitectura (Compositor Services + MoltenVK, misma cola Metal): ver `notas/arquitectura.md`. No cambiar sin motivo.
 - Mirada: visionOS no la da a apps Metal (foveado dinámico oficial solo en RealityKit o streaming con entitlement).
-  Vía implementada (build 71): centro del mapa de foveado del drawable; solo se sigue si se mueve 3 veces en 10 s.
+  El mapa de foveado del drawable es estático (medido, build 71): descartado definitivamente.
 - Presets duplicados en `kPresets` (.mm) y `PTSettings.defaults(for:)`: mantener iguales.
 
 ## Ficheros en juego
