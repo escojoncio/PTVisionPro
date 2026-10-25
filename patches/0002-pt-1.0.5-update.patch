@@ -14296,7 +14296,7 @@ index 0000000..f83f305
 +
 +}
 diff --git a/src/engine/platform/input.cpp b/src/engine/platform/input.cpp
-index c5e0b77..8e7a46d 100644
+index c5e0b77..1acb532 100644
 --- a/src/engine/platform/input.cpp
 +++ b/src/engine/platform/input.cpp
 @@ -7,8 +7,16 @@
@@ -14438,14 +14438,18 @@ index c5e0b77..8e7a46d 100644
  }
  
  std::vector<GamepadInfo> DescribeJoysticks() {
-@@ -347,9 +416,35 @@ void InputDevice::UsePrompts(const PromptStyle& style, uint32_t pad) {
+@@ -347,9 +416,39 @@ void InputDevice::UsePrompts(const PromptStyle& style, uint32_t pad) {
      }
  }
  
 +PromptStyle InputDevice::ShownPrompts() const {
-+    if (settings.prompt_style <= 0 || prompts_.device == PromptDevice::Keyboard) return prompts_;
++    return ForcedPromptStyle(prompts_, settings.prompt_style);
++}
++
++PromptStyle ForcedPromptStyle(const PromptStyle& automatic, int forced) {
++    if (forced <= 0 || automatic.device == PromptDevice::Keyboard) return automatic;
 +    PromptStyle style;
-+    switch (settings.prompt_style) {
++    switch (forced) {
 +        case 1: style.device = PromptDevice::PlayStation; break;
 +        case 3:
 +            style.device = PromptDevice::Nintendo;
@@ -14476,7 +14480,7 @@ index c5e0b77..8e7a46d 100644
      }
      for (Pad& pad : pads_) {
          SDL_CloseGamepad(pad.handle);
-@@ -357,6 +452,18 @@ void InputDevice::Shutdown() {
+@@ -357,6 +456,18 @@ void InputDevice::Shutdown() {
      pads_.clear();
      rumble_pad_ = 0;
      rumble_sent_[0] = rumble_sent_[1] = 0;
@@ -14495,7 +14499,7 @@ index c5e0b77..8e7a46d 100644
  }
  
  InputDevice::Pad* InputDevice::Find(uint32_t id) {
-@@ -377,7 +484,18 @@ void InputDevice::Open(uint32_t id) {
+@@ -377,7 +488,18 @@ void InputDevice::Open(uint32_t id) {
          LogWarn("input: cannot open gamepad {}: {}", id, SDL_GetError());
          return;
      }
@@ -14515,7 +14519,7 @@ index c5e0b77..8e7a46d 100644
      LogInfo("input: gamepad opened: {} ({} connected)", DescribeGamepad(Describe(handle)), pads_.size());
  }
  
-@@ -388,11 +506,25 @@ void InputDevice::Close(uint32_t id) {
+@@ -388,11 +510,25 @@ void InputDevice::Close(uint32_t id) {
          }
          const char* name = SDL_GetGamepadName(it->handle);
          LogInfo("input: gamepad {} removed ('{}'), {} left", id, name ? name : "", pads_.size() - 1);
@@ -14541,7 +14545,7 @@ index c5e0b77..8e7a46d 100644
          }
          if (prompt_pad_ == id) {
              const Pad* next = nullptr;
-@@ -474,6 +606,7 @@ void InputDevice::ProcessEvent(const SDL_Event& event) {
+@@ -474,6 +610,7 @@ void InputDevice::ProcessEvent(const SDL_Event& event) {
          break;
      case SDL_EVENT_MOUSE_WHEEL:
          UsePrompts(PromptStyle{}, 0);
@@ -14549,7 +14553,7 @@ index c5e0b77..8e7a46d 100644
          break;
      case SDL_EVENT_KEY_DOWN:
          if (event.key.repeat) {
-@@ -481,6 +614,8 @@ void InputDevice::ProcessEvent(const SDL_Event& event) {
+@@ -481,6 +618,8 @@ void InputDevice::ProcessEvent(const SDL_Event& event) {
          }
          any_edge_ = true;
          last_from_gamepad_ = false;
@@ -14558,7 +14562,7 @@ index c5e0b77..8e7a46d 100644
          UsePrompts(PromptStyle{}, 0);
          for (const KeyBinding& binding : kKeyBindings) {
              if (binding.scancode == 0 || binding.scancode != event.key.scancode) {
-@@ -499,6 +634,9 @@ void InputDevice::ProcessEvent(const SDL_Event& event) {
+@@ -499,6 +638,9 @@ void InputDevice::ProcessEvent(const SDL_Event& event) {
          any_edge_ = true;
          last_from_gamepad_ = false;
          UsePrompts(PromptStyle{}, 0);
@@ -14568,7 +14572,7 @@ index c5e0b77..8e7a46d 100644
          if (event.button.button == SDL_BUTTON_LEFT) {
              click_edge_ = true;
          } else if (event.button.button == SDL_BUTTON_RIGHT) {
-@@ -516,6 +654,38 @@ void InputDevice::ProcessEvent(const SDL_Event& event) {
+@@ -516,6 +658,38 @@ void InputDevice::ProcessEvent(const SDL_Event& event) {
                  pad->event_raw |= TouchHalves(pad->handle);
              } else if (event.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
                  settings_edge_ = true;
@@ -14607,7 +14611,7 @@ index c5e0b77..8e7a46d 100644
              }
          }
          break;
-@@ -573,15 +743,23 @@ void InputDevice::InjectMouseButton(uint8_t button, bool down) {
+@@ -573,15 +747,23 @@ void InputDevice::InjectMouseButton(uint8_t button, bool down) {
      ProcessEvent(event);
  }
  
@@ -14632,7 +14636,7 @@ index c5e0b77..8e7a46d 100644
      auto held = [&](KeyAction action) {
          for (const KeyBinding& binding : kKeyBindings) {
              if (binding.action != action) {
-@@ -618,6 +796,40 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
+@@ -618,6 +800,40 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
      const bool house_key = mouse == MouseUse::Menu && held(KeyAction::MenuHouse);
      state.house_pressed = house_key && !previous_house_key_;
      previous_house_key_ = house_key;
@@ -14673,7 +14677,7 @@ index c5e0b77..8e7a46d 100644
      if (mouse == MouseUse::Look) {
          state.mouse_look = glm::vec2(mouse_dx_, mouse_dy_) * settings.mouse_sensitivity;
      }
-@@ -627,9 +839,10 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
+@@ -627,9 +843,10 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
      }
      if (mouse_settle_ > 0) {
          --mouse_settle_;
@@ -14685,7 +14689,7 @@ index c5e0b77..8e7a46d 100644
      mouse_travel_ = 0.0f;
      mouse_dx_ = 0.0f;
      mouse_dy_ = 0.0f;
-@@ -638,6 +851,10 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
+@@ -638,6 +855,10 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
      glm::vec2 right(0.0f);
      for (Pad& pad : pads_) {
          const uint32_t held = HeldRaw(pad) | pad.event_raw;
@@ -14696,7 +14700,7 @@ index c5e0b77..8e7a46d 100644
          uint32_t gouge_button = kRawSquare;
          if (pad.style.device == PromptDevice::PlayStation) {
              gouge_button = kRawCross;
-@@ -711,6 +928,18 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
+@@ -711,6 +932,18 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
          any_edge_ |= touch.any;
      }
      raw |= pad_raw;
@@ -14715,7 +14719,7 @@ index c5e0b77..8e7a46d 100644
      state.raw_held = raw;
      state.raw_pressed = raw & ~previous_raw_;
      previous_raw_ = raw;
-@@ -719,22 +948,84 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
+@@ -719,22 +952,84 @@ InputState InputDevice::Poll(bool keyboard_free, MouseUse mouse, bool pads_free)
      if(state.gouge_pressed)state.pressed |= kPadGouge;
      previous_held_ = state.held;
      const uint32_t pad_pressed = state.raw_pressed & pad_raw;
@@ -14801,7 +14805,7 @@ index c5e0b77..8e7a46d 100644
      UpdateRumble();
  }
  
-@@ -750,8 +1041,13 @@ void InputDevice::UpdateRumble() {
+@@ -750,8 +1045,13 @@ void InputDevice::UpdateRumble() {
          if (Pad* old = Find(rumble_pad_); old && (rumble_sent_[0] || rumble_sent_[1])) {
              SDL_RumbleGamepad(old->handle, 0, 0, 0);
          }
@@ -14815,7 +14819,7 @@ index c5e0b77..8e7a46d 100644
          rumble_sent_at_ = 0;
      }
      if (!target) {
-@@ -760,6 +1056,9 @@ void InputDevice::UpdateRumble() {
+@@ -760,6 +1060,9 @@ void InputDevice::UpdateRumble() {
      const uint64_t now = SDL_GetTicks();
      const bool active = rumble_want_[0] || rumble_want_[1];
      const bool changed = rumble_want_[0] != rumble_sent_[0] || rumble_want_[1] != rumble_sent_[1];
@@ -14825,7 +14829,7 @@ index c5e0b77..8e7a46d 100644
      if (active && rumble_logged_pad_ != id) {
          rumble_logged_pad_ = id;
          const char* name = SDL_GetGamepadName(target->handle);
-@@ -772,6 +1071,12 @@ void InputDevice::UpdateRumble() {
+@@ -772,6 +1075,12 @@ void InputDevice::UpdateRumble() {
          rumble_sent_[1] = rumble_want_[1];
          rumble_sent_at_ = now;
      }
@@ -14839,7 +14843,7 @@ index c5e0b77..8e7a46d 100644
  
  }
 diff --git a/src/engine/platform/input.h b/src/engine/platform/input.h
-index 3c05632..f378ee1 100644
+index 3c05632..7187302 100644
 --- a/src/engine/platform/input.h
 +++ b/src/engine/platform/input.h
 @@ -5,11 +5,15 @@
@@ -14899,7 +14903,18 @@ index 3c05632..f378ee1 100644
  struct PromptStyle {
      PromptDevice device = PromptDevice::Keyboard;
      std::array<char, 4> faces{};
-@@ -85,6 +107,7 @@ struct InputState {
+@@ -76,6 +98,10 @@ struct PromptStyle {
+     bool operator==(const PromptStyle&) const = default;
+ };
+ 
++// The prompts shown: the controller's own (`automatic`) unless the "Button icons" setting (`forced`: 0 automatic, 1 PlayStation, 3 Nintendo,
++// 4 Steam, else Xbox) names another; the keyboard's are never replaced.
++PromptStyle ForcedPromptStyle(const PromptStyle& automatic, int forced);
++
+ struct InputState {
+     glm::vec2 left_stick{0.0f};
+     glm::vec2 right_stick{0.0f};
+@@ -85,6 +111,7 @@ struct InputState {
      uint32_t raw_held = 0;
      uint32_t raw_pressed = 0;
      bool pause = false;
@@ -14907,7 +14922,7 @@ index 3c05632..f378ee1 100644
      bool confirm = false;
      bool cancel = false;
      bool pc_settings = false;
-@@ -93,8 +116,15 @@ struct InputState {
+@@ -93,8 +120,15 @@ struct InputState {
      bool left_stick_from_pad = false;
      bool click = false;
      bool right_click = false;
@@ -14923,7 +14938,7 @@ index 3c05632..f378ee1 100644
      bool pointer_valid = false;
      bool touch_enabled = false;
      bool menu_continue = false;
-@@ -102,12 +132,24 @@ struct InputState {
+@@ -102,12 +136,24 @@ struct InputState {
      PromptStyle prompts;
      bool vr_look = false;
      glm::vec2 vr_look_angles{0.0f};
@@ -14948,7 +14963,7 @@ index 3c05632..f378ee1 100644
  };
  
  struct GamepadInfo {
-@@ -128,6 +170,7 @@ struct GamepadInfo {
+@@ -128,6 +174,7 @@ struct GamepadInfo {
      int touchpads = 0;
      bool rumble = false;
      bool trigger_rumble = false;
@@ -14956,7 +14971,7 @@ index 3c05632..f378ee1 100644
  };
  
  std::vector<GamepadInfo> DescribeJoysticks();
-@@ -138,6 +181,16 @@ uint32_t MouseButtonFromName(std::string_view name);
+@@ -138,6 +185,16 @@ uint32_t MouseButtonFromName(std::string_view name);
  
  enum class MouseUse { None, Look, Menu };
  
@@ -14973,7 +14988,7 @@ index 3c05632..f378ee1 100644
  class InputDevice {
  public:
      void Init();
-@@ -145,11 +198,21 @@ public:
+@@ -145,11 +202,21 @@ public:
      void ProcessEvent(const SDL_Event& event);
      InputState Poll(bool keyboard_free, MouseUse mouse, bool pads_free = true);
      void SetRumble(uint8_t large_motor, uint8_t small_motor);
@@ -14996,7 +15011,7 @@ index 3c05632..f378ee1 100644
  
      void ResetTransient();
      void EnableTouch(bool enabled) { touch_enabled_ = enabled; touch_.Reset(); }
-@@ -170,6 +233,12 @@ private:
+@@ -170,6 +237,12 @@ private:
          uint64_t last_used = 0;
          PromptStyle style;
          uint32_t previous_gouge = 0;
@@ -15009,7 +15024,7 @@ index 3c05632..f378ee1 100644
      };
  
      void Open(uint32_t id);
-@@ -180,11 +249,18 @@ private:
+@@ -180,11 +253,18 @@ private:
      uint32_t TouchRaw(const Pad& pad) const;
      glm::vec2 Stick(const Pad& pad, int x_axis, int y_axis) const;
      void UpdateRumble();
@@ -15028,7 +15043,7 @@ index 3c05632..f378ee1 100644
      uint64_t use_counter_ = 0;
      float mouse_dx_ = 0.0f;
      float mouse_dy_ = 0.0f;
-@@ -192,25 +268,40 @@ private:
+@@ -192,25 +272,40 @@ private:
      uint32_t previous_raw_ = 0;
      bool previous_gouge_key_ = false;
      bool previous_house_key_ = false;
@@ -17518,28 +17533,8 @@ index 399ce75..71922c8 100644
      int silence_chunks_ = 0;
      int voiced_chunks_ = 0;
  };
-diff --git a/src/engine/xr/xr_host.cpp b/src/engine/xr/xr_host.cpp
-index ff8142b..cc3da95 100644
---- a/src/engine/xr/xr_host.cpp
-+++ b/src/engine/xr/xr_host.cpp
-@@ -58,6 +58,7 @@ float Host::GpuBudgetMs() const { return 0.0f; }
- void Host::SetPointerWanted(bool) {}
- bool Host::TakeRecenter() { return false; }
- bool Host::InsetWanted(float&, float&, float&) const { return false; }
-+bool Host::GazeInset(glm::vec2&) const { return false; }
- bool Host::EnsureInsetImages(VkExtent2D) { return false; }
- bool Host::Acquire(Swapchain&) { return false; }
- void Host::Release(Swapchain&) {}
-@@ -876,6 +877,7 @@ float Host::GpuBudgetMs() const { return 0.0f; }
- void Host::SetPointerWanted(bool) {}
- bool Host::TakeRecenter() { return false; }
- bool Host::InsetWanted(float&, float&, float&) const { return false; }
-+bool Host::GazeInset(glm::vec2&) const { return false; }
- bool Host::EnsureInsetImages(VkExtent2D) { return false; }
- 
- #endif
 diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
-index c1d987a..07be109 100644
+index c1d987a..03948bc 100644
 --- a/src/engine/xr/xr_host.h
 +++ b/src/engine/xr/xr_host.h
 @@ -45,6 +45,10 @@ struct ControllerState {
@@ -17553,16 +17548,6 @@ index c1d987a..07be109 100644
      int prompt_style = 0;  // 0 Xbox, 1 PlayStation, 2 Nintendo
      bool pointer_valid = false;
      glm::vec2 pointer{0.0f};
-@@ -131,6 +135,9 @@ public:
-     // pixel density over the wide view's and its centre's height (a tangent above the eye's
-     // forward axis, negative below); the eye images are then the wide, low-density views.
-     bool InsetWanted(float& center, float& density, float& lift) const;
-+    // Where the system's foveation map is sharpest (the gaze), as tangents from the eyes' axes (right, up), when the sharp zone should
-+    // follow it: the setting is on and the map has moved lately (a fixed map is no gaze). false: keep the straight-ahead zone.
-+    bool GazeInset(glm::vec2& tangent) const;
-     // The inset images at this size (made again when it changes); false: no insets.
-     bool EnsureInsetImages(VkExtent2D extent);
-     bool Acquire(Swapchain& swapchain);
 diff --git a/src/game/archive_model_camera.h b/src/game/archive_model_camera.h
 new file mode 100644
 index 0000000..2ff8fc3
@@ -26858,82 +26843,182 @@ index a42d9f0..7717789 100644
      Game& game_;
      std::unordered_map<Key, bool, KeyHash> traps_;
 diff --git a/src/game/ui/demo_ui.cpp b/src/game/ui/demo_ui.cpp
-index 6654480..60f770e 100644
+index 6654480..592a2c7 100644
 --- a/src/game/ui/demo_ui.cpp
 +++ b/src/game/ui/demo_ui.cpp
-@@ -277,6 +277,7 @@ void DemoUi::Update(Game& game, float dt, bool paused) {
+@@ -144,6 +144,14 @@ bool DemoUi::Text(uint64_t graph, uint64_t text, int bug_screen) {
+         return false;
+     }
+     std::vector<ui::UigbAction> added;
++    int shown_pick = -1;  // the crash picture this text chooses (kept only once its event is found)
++    auto remember = [&](const std::vector<ui::UigbAction>& actions) {
++        instance->bug_pick = shown_pick;
++        instance->bug_nodes.clear();
++        for (const ui::UigbAction& a : actions) {
++            if (a.kind == ui::UigbActionKind::SetVisible && a.visible) instance->bug_nodes.emplace_back(a.layout, a.target);
++        }
++    };
+     if ((text & kStrCode64Mask) == kRandomBugText) {
+         uint32_t x = ReadTsc();
+         x ^= x << 13;
+@@ -151,6 +159,7 @@ bool DemoUi::Text(uint64_t graph, uint64_t text, int bug_screen) {
+         x ^= x << 5;
+         const uint32_t pick = bug_screen >= 0 && bug_screen < kBugCases ? static_cast<uint32_t>(bug_screen) : x % kBugCases;
+         LogInfo("ui: bug screen {} of {} ({}){}", pick, kBugCases, kBugPictures[pick], bug_screen >= 0 ? ", forced" : "");
++        shown_pick = static_cast<int>(pick);
+         if (pick == 6) {
+             if (const ui::UigbEvent* model = instance->data->FindEvent(kBugTexts[0])) {
+                 added = model->actions;
+@@ -160,6 +169,7 @@ bool DemoUi::Text(uint64_t graph, uint64_t text, int bug_screen) {
+                     }
+                 }
+                 LogInfo("ui: demo graph {:#x} event sh_bug_3 ({} actions)", graph, added.size());
++                remember(added);
+                 Run(*instance, added);
+                 return true;
+             }
+@@ -172,6 +182,7 @@ bool DemoUi::Text(uint64_t graph, uint64_t text, int bug_screen) {
+         return false;
+     }
+     LogInfo("ui: demo graph {:#x} event {:#x} ({} actions)", graph, text, event->actions.size());
++    if (shown_pick >= 0) remember(event->actions);
+     Run(*instance, event->actions);
+     return true;
+ }
+@@ -277,6 +288,8 @@ void DemoUi::Update(Game& game, float dt, bool paused) {
  }
  
  void DemoUi::Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language) {
 +    full_canvas_ = false;
++    bug_screen_ = -1;
      for (auto& instance : instances_) {
          if (!instance->started) {
              continue;
-@@ -287,6 +288,7 @@ void DemoUi::Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language) {
+@@ -287,6 +300,26 @@ void DemoUi::Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language) {
              }
              for (ModelView& model : layout.models) {
                  model.view->Draw(batch, canvas, language, 1.0f);
 +                full_canvas_ = full_canvas_ || model.view->CoversCanvas();
++                // The crash picture counts while one of the nodes its event showed is visible now (an animation or a later event can hide it).
++                if (instance->bug_pick >= 0 && bug_screen_ < 0) {
++                    const auto& nodes = model.model->Nodes();
++                    const auto& names = model.model->Names();
++                    for (const auto& [shown_layout, target] : instance->bug_nodes) {
++                        if (shown_layout != layout.name) continue;
++                        if (target == layout.name || target == ui::UigbGraph::kEmptyName) {
++                            bug_screen_ = instance->bug_pick;
++                            break;
++                        }
++                        for (size_t i = 0; i < nodes.size(); ++i) {
++                            if (nodes[i].id < names.size() && names[nodes[i].id] == target && model.view->StateAt(i).visible.value_or(false)) {
++                                bug_screen_ = instance->bug_pick;
++                                break;
++                            }
++                        }
++                        if (bug_screen_ >= 0) break;
++                    }
++                }
              }
          }
      }
 diff --git a/src/game/ui/demo_ui.h b/src/game/ui/demo_ui.h
-index 8aa87d6..4df86f4 100644
+index 8aa87d6..8445805 100644
 --- a/src/game/ui/demo_ui.h
 +++ b/src/game/ui/demo_ui.h
-@@ -27,6 +27,8 @@ public:
+@@ -27,13 +27,23 @@ public:
      void Update(Game& game, float dt, bool paused);
      void Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language);
      bool Active() const { return !instances_.empty(); }
+-    void Clear() { instances_.clear(); }
 +    // The last Draw showed a picture over the whole canvas (the fake crash screens, the ending).
 +    bool FullCanvas() const { return full_canvas_; }
-     void Clear() { instances_.clear(); }
++    // A fake crash picture (bug screen N) is on screen now (its nodes visible in the last Draw): it fills the whole view.
++    bool FullOverlay() const { return bug_screen_ >= 0; }
++    int BugScreen() const { return bug_screen_; }
++    void Clear() {
++        instances_.clear();
++        bug_screen_ = -1;
++    }
  
      bool Create(std::string_view demo_id, uint64_t graph, std::string_view path);
-@@ -34,6 +36,7 @@ public:
+     bool Start(uint64_t graph);
      bool Text(uint64_t graph, uint64_t text, int bug_screen = -1);
  
  private:
 +    bool full_canvas_ = false;
++    int bug_screen_ = -1;  // set by Draw from what is visible
      struct ModelView {
          const ui::UifModel* model = nullptr;
          std::unique_ptr<UifView> view;
+@@ -54,6 +64,8 @@ private:
+         std::shared_ptr<const ui::UigbGraph> data;
+         std::vector<Layout> layouts;
+         bool started = false;
++        int bug_pick = -1;                                     // the crash picture its last bug text chose
++        std::vector<std::pair<uint64_t, uint64_t>> bug_nodes;  // (layout, target) that picture's event shows
+     };
+ 
+     Instance* Find(uint64_t graph);
 diff --git a/src/game/ui/game_ui.cpp b/src/game/ui/game_ui.cpp
-index 2fc326b..8e453a7 100644
+index 2fc326b..b797105 100644
 --- a/src/game/ui/game_ui.cpp
 +++ b/src/game/ui/game_ui.cpp
-@@ -909,6 +909,13 @@ void GameUi::Record(VkCommandBuffer cmd, VkImageView target, VkExtent2D extent)
+@@ -276,6 +276,8 @@ void GameUi::UpdateSubliminal(Game& game, float dt, bool paused) {
+     }
+     last_subliminal_ = fx.subliminal_image;
+     last_subliminal_time_ = fx.subliminal_time;
++    // The picture with its string (3 s) fills the canvas; the string-less noise flash (0.06 s) is too short to resize the HUD for.
++    subliminal_full_ = fx.subliminal_image >= 0 && !fx.subliminal_no_string;
+     if (!paused) {
+         subliminal_.Update(dt);
+     }
+@@ -909,6 +911,26 @@ void GameUi::Record(VkCommandBuffer cmd, VkImageView target, VkExtent2D extent)
      for (const Layer& layer : layers) {
          layer.draw();
      }
-+    const bool full_canvas = !menu_.IsOpen() && ((demo_ui_.Active() && demo_ui_.FullCanvas()) || port_credits_time_ >= 0.0f);
-+    if (full_canvas != full_canvas_ && vr_hud_) {
-+        LogInfo("ui: full-canvas picture {} (demo graphs {}, port credits {}); the UI's scene-colour source is {}x{}", full_canvas ? "shown" : "gone",
-+                demo_ui_.Active() && demo_ui_.FullCanvas(), port_credits_time_ >= 0.0f, renderer_ ? renderer_->SceneColor().extent.width : 0,
-+                renderer_ ? renderer_->SceneColor().extent.height : 0);
++    // A full-view overlay: a fake crash picture (explicit flag from the demo graph), a subliminal picture, a mesh that covers the canvas
++    // (the heuristic), or the port credits; never with the menu open.
++    const int bug_screen = !menu_.IsOpen() && demo_ui_.Active() && demo_ui_.FullOverlay() ? demo_ui_.BugScreen() : -1;
++    const bool subliminal = !menu_.IsOpen() && subliminal_full_;
++    const bool covers = !menu_.IsOpen() && demo_ui_.Active() && demo_ui_.FullCanvas();
++    const bool credits = !menu_.IsOpen() && port_credits_time_ >= 0.0f;
++    const bool full_canvas = bug_screen >= 0 || subliminal || covers || credits;
++    const int reason = (bug_screen >= 0 ? 1 + (bug_screen << 4) : 0) | (subliminal ? 2 : 0) | (covers ? 4 : 0) | (credits ? 8 : 0);
++    if (reason != full_reason_ && vr_hud_) {
++        std::string why;
++        auto add = [&](const std::string& what) { why += (why.empty() ? "" : ", ") + what; };
++        if (bug_screen >= 0) add(std::format("bug screen {}", bug_screen));
++        if (subliminal) add("subliminal");
++        if (covers) add("covers canvas");
++        if (credits) add("credits");
++        LogInfo("ui: full-view overlay {}; the UI's scene-colour source is {}x{}", full_canvas ? "on (" + why + ")" : std::string("off"),
++                renderer_ ? renderer_->SceneColor().extent.width : 0, renderer_ ? renderer_->SceneColor().extent.height : 0);
 +    }
++    full_reason_ = reason;
 +    full_canvas_ = full_canvas;
      batch.Record(cmd, extent);
  }
  
 diff --git a/src/game/ui/game_ui.h b/src/game/ui/game_ui.h
-index 82f38e7..362aaba 100644
+index 82f38e7..44f6aa5 100644
 --- a/src/game/ui/game_ui.h
 +++ b/src/game/ui/game_ui.h
 @@ -77,6 +77,8 @@ public:
      void ShowCaptionKey(uint32_t key, float offset_seconds) { subtitles_.PlayKey(key, offset_seconds); }
      void SetLetterbox(float aspect) { letterbox_ = aspect; }
      void SetVrHud(bool enabled) { vr_hud_ = enabled; }
-+    // The last frame's UI was a full-screen picture (a crash screen, the credits): in the headset the HUD then fills the view.
++    // The last frame's UI was a full-screen picture (a crash screen, a subliminal picture, the credits): in the headset the HUD then fills the view.
 +    bool FullCanvasUi() const { return full_canvas_; }
      SubtitlePlayer& Subtitles() { return subtitles_; }
      DemoUi& DemoGraphs() { return demo_ui_; }
      void SetMenuSuspended(bool suspended) { menu_suspended_ = suspended; }
-@@ -150,6 +152,7 @@ private:
+@@ -150,6 +152,9 @@ private:
      bool pc_request_ = false;
      float letterbox_ = 0.0f;
      bool vr_hud_ = false;
 +    bool full_canvas_ = false;
++    bool subliminal_full_ = false;  // a subliminal picture (its string over the whole canvas) is on
++    int full_reason_ = 0;           // what made the UI a full-view overlay now (see Draw), for the log
      std::string save_dialog_text_;
      bool menu_suspended_ = false;
      SubtitlePlayer other_subtitles_;
@@ -26955,34 +27040,27 @@ index 588808d..2852ec7 100644
      options.invert_y = vertical_;
      options.invert_x = horizontal_;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 1868d99..8263bf7 100644
+index 1868d99..ca176a3 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -1,6 +1,9 @@
+@@ -1,6 +1,11 @@
  #include "game/ui/pc_settings.h"
  
  #include <array>
++#include <atomic>
 +#include <map>
 +#include <mutex>
 +#include <string>
++#include <tuple>
  #include <utility>
  #include "engine/core/localized_text.h"
  
-@@ -71,6 +74,8 @@ constexpr Entry kTexts[] = {
-     {"pc_note_vp_center_res", {"Resolution inside the sharp zone, relative to the image size. 100% is the most the image size allows. The periphery does not change it.", "", "", "Resolución dentro de la zona nítida, respecto al tamaño de imagen. 100 % es la máxima que permite el tamaño de imagen. La periferia no la cambia.", "", "", ""}},
-     {"pc_vp_center", {"Sharp zone width", "", "", "Ancho de la zona nítida", "", "", ""}},
-     {"pc_note_vp_center", {"Diameter in degrees of the sharp circle in the middle of the view. 40° is about what you look at straight ahead. Wider costs much more.", "", "", "Diámetro en grados del círculo nítido en el centro de la vista. 40° es más o menos lo que miras de frente. Más ancho cuesta mucho más.", "", "", ""}},
-+    {"pc_vp_gaze", {"Sharp zone follows your gaze", "", "", "Zona nítida sigue la mirada", "", "", ""}},
-+    {"pc_note_vp_gaze", {"The sharp zone moves to where the headset's own foveation is sharpest (where you look) instead of staying straight ahead. Only when the headset follows the gaze; otherwise it stays in the middle. Applies right away.", "", "", "La zona nítida se mueve a donde el foveado del propio visor es más nítido (donde miras) en vez de quedarse al frente. Solo si el visor sigue la mirada; si no, se queda en el centro. Se aplica al momento.", "", "", ""}},
-     {"pc_vp_border", {"Show the sharp zone's edge", "", "", "Mostrar borde de la zona nítida", "", "", ""}},
-     {"pc_note_vp_border", {"A red ring where the sharp zone ends, to set its width and height. For testing; not kept.", "", "", "Un aro rojo donde acaba la zona nítida, para ajustar su ancho y su altura. Solo para pruebas; no se guarda.", "", "", ""}},
-     {"pc_vp_dynres", {"Dynamic resolution", "", "", "Resolución dinámica", "", "", ""}},
 @@ -90,15 +95,66 @@ constexpr Entry kTexts[] = {
      {"pc_vp_recenter", {"Recentre view", "", "", "Recentrar vista", "", "", ""}},
      {"pc_vp_recenter_value", {"Now", "", "", "Ahora", "", "", ""}},
      {"pc_note_vp_recenter", {"Puts you back in the game where you stand now, facing where you look. Also done by itself after a long press of the Digital Crown.", "", "", "Te vuelve a colocar en el juego donde estás ahora, mirando hacia donde miras. También se hace solo tras mantener pulsada la Digital Crown.", "", "", ""}},
 +    {"pc_reset_confirm", {"Confirm", "Confirmer", "Bestätigen", "Confirmar", "決定", "Conferma", "Confirmar"}},
-+    {"pc_archive_model_hint", {"Sticks left / right: turn. Left stick up / R2: nearer. Left stick down / L2: farther. {back}: back.", "", "", "Sticks izquierda / derecha: girar. Stick izquierdo arriba / R2: acercar. Stick izquierdo abajo / L2: alejar. {back}: volver.", "", "", ""}},
++    {"pc_archive_model_hint", {"Sticks left / right: turn. Left stick up / {r2}: nearer. Left stick down / {l2}: farther. {back}: back.", "", "", "Sticks izquierda / derecha: girar. Stick izquierdo arriba / {r2}: acercar. Stick izquierdo abajo / {l2}: alejar. {back}: volver.", "", "", ""}},
 +    {"pc_archive_free_hint", {"{back}: stop", "", "", "{back}: detener", "", "", ""}},
 +    {"pc_note_archive_free", {"Not available in the headset.", "", "", "No disponible en el visor.", "", "", ""}},
 +    {"pc_note_freecam", {"Not available in the headset.", "", "", "No disponible en el visor.", "", "", ""}},
@@ -27602,7 +27680,7 @@ index 1868d99..8263bf7 100644
  };
  
  }
-@@ -499,7 +922,61 @@ std::string PcNoteText(std::string_view note, int language) {
+@@ -499,7 +922,79 @@ std::string PcNoteText(std::string_view note, int language) {
      return text;
  }
  
@@ -27618,13 +27696,31 @@ index 1868d99..8263bf7 100644
 +    return false;
 +}
 +
-+/* The prompt tokens ({accept}, {kb}...{/kb}, {pad}...{/pad}) as plain words for a controller; the UI of this port does not draw the
-+   prompt pictures. {1}, {2}... and other arguments are left for the caller. */
-+std::string ExpandHeadsetTokens(std::string_view text) {
-+    static constexpr std::pair<std::string_view, std::string_view> words[] = {
-+        {"accept", "Select"}, {"back", "Back"}, {"pause", "Menu"}, {"columns", "L1 / R1"}, {"updown", "up / down"}, {"leftright", "left / right"},
-+        {"dpad", "D-pad"}, {"photo", ""}, {"hide", ""}, {"walk", ""}, {"look", ""}, {"rise", ""}, {"sink", ""}, {"fast", ""},
-+        {"seek", "L1 / R1"}, {"restart", "Square"}, {"loop", "Triangle"}, {"tabprev", "L1"}, {"tabnext", "R1"}, {"donate", ""}};
++std::atomic<int> g_prompt_style{0};
++
++/* The prompt tokens ({accept}, {kb}...{/kb}, {pad}...{/pad}) as plain words for the controller in hand (style 0 Xbox, 1 PlayStation,
++   2 Nintendo; Spanish names the PlayStation shapes in Spanish); the UI of this port does not draw the prompt pictures. {1}, {2}... and
++   other arguments are left for the caller. The face buttons are named by position: bottom (accept), right (back), left, top. */
++std::string ExpandHeadsetTokens(std::string_view text, int style, int language) {
++    const bool es = language == 3;
++    const bool ps = style == 1;
++    const bool ns = style == 2;
++    const std::string_view cross = ps ? (es ? "Equis" : "Cross") : ns ? "B" : "A";
++    const std::string_view circle = ps ? (es ? "Círculo" : "Circle") : ns ? "A" : "B";
++    const std::string_view square = ps ? (es ? "Cuadrado" : "Square") : ns ? "Y" : "X";
++    const std::string_view triangle = ps ? (es ? "Triángulo" : "Triangle") : ns ? "X" : "Y";
++    const std::string_view menu = ps ? "Options" : ns ? "+" : (es ? "Menú" : "Menu");
++    const std::string_view l1 = ps ? "L1" : ns ? "L" : "LB";
++    const std::string_view r1 = ps ? "R1" : ns ? "R" : "RB";
++    const std::string_view l2 = ps ? "L2" : ns ? "ZL" : "LT";
++    const std::string_view r2 = ps ? "R2" : ns ? "ZR" : "RT";
++    const std::pair<std::string_view, std::string> words[] = {
++        {"accept", std::string(cross)}, {"back", std::string(circle)}, {"pause", std::string(menu)},
++        {"columns", std::string(l1) + " / " + std::string(r1)}, {"seek", std::string(l1) + " / " + std::string(r1)},
++        {"updown", es ? "arriba / abajo" : "up / down"}, {"leftright", es ? "izquierda / derecha" : "left / right"}, {"dpad", "D-pad"},
++        {"restart", std::string(square)}, {"loop", std::string(triangle)}, {"tabprev", std::string(l1)}, {"tabnext", std::string(r1)},
++        {"l1", std::string(l1)}, {"r1", std::string(r1)}, {"l2", std::string(l2)}, {"r2", std::string(r2)},
++        {"photo", ""}, {"hide", ""}, {"walk", ""}, {"look", ""}, {"rise", ""}, {"sink", ""}, {"fast", ""}, {"donate", ""}};
 +    std::string out;
 +    int block = 0;  // 1: inside {kb} (dropped), 2: inside {pad}
 +    for (size_t i = 0; i < text.size();) {
@@ -27665,19 +27761,37 @@ index 1868d99..8263bf7 100644
      if (language >= 1) {
          const auto text = localized::Menu(key, language);
          if (!text.empty()) return text;
-@@ -513,4 +990,19 @@ std::string_view PcText(std::string_view key, int language) {
+@@ -513,4 +1008,37 @@ std::string_view PcText(std::string_view key, int language) {
      return key;
  }
  
++int PcPromptStyle() {
++#if PT_VISIONOS
++    return g_prompt_style.load(std::memory_order_relaxed);
++#else
++    return 0;
++#endif
++}
++
++void SetPcPromptStyle(int style) {
++#if PT_VISIONOS
++    g_prompt_style.store(style >= 0 && style <= 2 ? style : 0, std::memory_order_relaxed);
++#else
++    (void)style;
++#endif
++}
++
 +std::string_view PcText(std::string_view key, int language) {
 +    const std::string_view text = PcTextLookup(key, language);
 +#if PT_VISIONOS
 +    if (text.find('{') == std::string_view::npos) return text;
 +    static std::mutex mutex;
-+    static std::map<std::pair<std::string, int>, std::string> cache;  // (nodes stay put: the views stay valid)
++    // (Keyed by the controller's style and the language too: a change of either reads other words. Nodes stay put: the views stay valid.)
++    static std::map<std::tuple<std::string, int, int>, std::string> cache;
++    const int style = g_prompt_style.load(std::memory_order_relaxed);
 +    std::lock_guard lock(mutex);
-+    auto [it, added] = cache.try_emplace({std::string(key), language});
-+    if (added) it->second = ExpandHeadsetTokens(text);
++    auto [it, added] = cache.try_emplace({std::string(key), language, style});
++    if (added) it->second = ExpandHeadsetTokens(text, style, language);
 +    return it->second;
 +#else
 +    return text;
@@ -27686,7 +27800,7 @@ index 1868d99..8263bf7 100644
 +
  }
 diff --git a/src/game/ui/pc_settings.h b/src/game/ui/pc_settings.h
-index 43f59a2..dfca32a 100644
+index 43f59a2..64a0f85 100644
 --- a/src/game/ui/pc_settings.h
 +++ b/src/game/ui/pc_settings.h
 @@ -16,7 +16,10 @@ struct PcSettingRow {
@@ -27730,7 +27844,7 @@ index 43f59a2..dfca32a 100644
  class PcSettingsSource {
  public:
      virtual ~PcSettingsSource() = default;
-@@ -74,10 +86,21 @@ public:
+@@ -74,15 +86,29 @@ public:
      virtual bool FullScreen() const { return false; }
      virtual std::string_view FullScreenHint() const { return {}; }
      virtual void CursorMoved() {}
@@ -27752,6 +27866,14 @@ index 43f59a2..dfca32a 100644
  };
  
  std::vector<std::string_view> PcDescriptionKeys();
+ 
+ std::string_view PcText(std::string_view key, int language);
++// The headset: the buttons of the controller in hand (0 Xbox, 1 PlayStation, 2 Nintendo) name the prompts PcText expands.
++void SetPcPromptStyle(int style);
++int PcPromptStyle();
+ 
+ constexpr char kPcNoteArgument = '';
+ std::string PcNoteText(std::string_view note, int language);
 diff --git a/src/game/ui/photo_preset.cpp b/src/game/ui/photo_preset.cpp
 new file mode 100644
 index 0000000..83699f3
@@ -28219,19 +28341,10 @@ index b45fa4d..bd33cc5 100644
      };
  
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index 38782fe..49823ce 100644
+index 38782fe..c588a12 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
-@@ -3,6 +3,8 @@
- #include <algorithm>
- #include <cmath>
- #include <cstdlib>
-+#include <format>
-+#include <string>
- 
- #include "engine/core/log.h"
- #include "engine/physics/collision_world.h"
-@@ -13,6 +15,10 @@ namespace pt::game {
+@@ -13,6 +13,10 @@ namespace pt::game {
  namespace {
  
  constexpr float kHudDistance = 1.6f;
@@ -28242,25 +28355,7 @@ index 38782fe..49823ce 100644
  constexpr float kHudWidth = 1.4f;
  constexpr float kHudDrop = 0.08f;
  constexpr float kHudDeadZone = 0.349f;
-@@ -24,6 +30,17 @@ constexpr float kHeadDrop = 0.8f;
- constexpr float kWallMargin = 0.12f;
- constexpr float kNearPlane = 0.05f;
- 
-+// Critically damped approach to `target` (smooth_time: about the time it takes), no overshoot.
-+float SmoothDamp(float current, float target, float& velocity, float smooth_time, float dt) {
-+    const float omega = 2.0f / smooth_time;
-+    const float x = omega * dt;
-+    const float e = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
-+    const float change = current - target;
-+    const float temp = (velocity + omega * change) * dt;
-+    velocity = (velocity - omega * temp) * e;
-+    return target + (change + temp) * e;
-+}
-+
- }
- 
- void VrPlay::BeginLoop(bool& running) {
-@@ -63,8 +80,15 @@ bool VrPlay::ScreenMode(Game& game) {
+@@ -63,8 +67,15 @@ bool VrPlay::ScreenMode(Game& game) {
      constexpr bool immersive = false;
  #endif
      const bool peephole = game.Nazo().IsPeepholeTheaterActive();
@@ -28278,7 +28373,7 @@ index 38782fe..49823ce 100644
      if (screen != screen_ || cutscene != cutscene_) {
          LogInfo("vr: {}", screen ? "virtual screen (a camera the game frames)" : cutscene ? "cutscene in stereo from the scene's camera" : "stereo view");
      }
-@@ -111,8 +135,10 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -111,8 +122,10 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
              state.left_stick = move;
              state.left_stick_from_pad = true;
          }
@@ -28291,7 +28386,7 @@ index 38782fe..49823ce 100644
          if (c.dpad_left) raw |= kRawLeft;
          if (c.dpad_right) raw |= kRawRight;
          if (c.l1) raw |= kRawL1;
-@@ -124,10 +150,16 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -124,10 +137,16 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          // hold the zoom" interaction of the original (the peephole, the clock, the picture, the bag)
          // goes on X as well: pressing X is pressing R3, holding it is holding R3.
          if (c.zoom || (c.interact && !menu_open)) raw |= kRawR3;
@@ -28309,7 +28404,7 @@ index 38782fe..49823ce 100644
              if (glm::length(look) > glm::length(state.right_stick)) state.right_stick = look;
          } else if (!menu_open && centered_) {
              const float x = c.turn.x;
-@@ -169,6 +201,13 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -169,6 +188,13 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          state.pressed |= kPadGouge;
      }
      if (pressed & kRawStart) state.pause = true;
@@ -28323,7 +28418,7 @@ index 38782fe..49823ce 100644
      if (c.settings && !settings_previous_) state.pc_settings = true;
      settings_previous_ = c.settings;
      if (pressed) state.any_button = true;
-@@ -251,6 +290,18 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -251,6 +277,18 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
      }
      head_frustum_ = frusta_[0];
  #endif
@@ -28342,7 +28437,7 @@ index 38782fe..49823ce 100644
      if (cutscene_) {
          // A cutscene in stereo: the scene's camera is where the head was when it began, pointing
          // where the head pointed (so nothing jumps); the head then turns and leans freely
-@@ -288,6 +339,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -288,6 +326,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
                                          glm::normalize(heading * rig_.ToWorld(pose.orientation)), frusta_[i], kNearPlane);
          }
          out.render = {draw.x, draw.y};
@@ -28350,7 +28445,7 @@ index 38782fe..49823ce 100644
          Place(head.position, head.orientation, menu_open, dt);
          auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
              if (!host_.Acquire(sc)) return false;
-@@ -346,6 +398,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -346,6 +385,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          out.eyes[i] = xr::EyeCamera(anchor + rig_.Offset(pose.position) + correction, rig_.ToWorld(pose.orientation), frusta_[i], kNearPlane);
      }
      out.render = {draw.x, draw.y};
@@ -28358,91 +28453,7 @@ index 38782fe..49823ce 100644
      Place(head.position, head.orientation, menu_open, dt);
      auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
          if (!host_.Acquire(sc)) return false;
-@@ -412,6 +465,52 @@ bool VrPlay::PrepareInsets(Stereo& out) {
-     out.inset_render = {scaled(images.x), scaled(images.y)};
-     const float tan_x = tan_r;
-     const float tan_y = tan_r;
-+    // The sharp zone's centre: straight ahead (and `lift_y` up), or where the headset's foveation map is sharpest (the gaze) when it is
-+    // moving, smoothed (50 ms), always with the whole circle inside both eyes' wide fields (so the nominal place is never moved).
-+    float centre_x = 0.0f;
-+    float centre_y = lift_y;
-+    {
-+        const auto now = std::chrono::steady_clock::now();
-+        const float dt = gaze_time_ == std::chrono::steady_clock::time_point{} ? 1.0f / 45.0f
-+                                                                              : std::clamp(std::chrono::duration<float>(now - gaze_time_).count(), 0.001f, 0.1f);
-+        gaze_time_ = now;
-+        float lo_x = -1.0e9f, hi_x = 1.0e9f, lo_y = -1.0e9f, hi_y = 1.0e9f;
-+        for (int i = 0; i < 2; ++i) {
-+            lo_x = std::max(lo_x, frusta_[i].center.x - frusta_[i].tan_x);
-+            hi_x = std::min(hi_x, frusta_[i].center.x + frusta_[i].tan_x);
-+            lo_y = std::max(lo_y, frusta_[i].center.y - frusta_[i].tan_y);
-+            hi_y = std::min(hi_y, frusta_[i].center.y + frusta_[i].tan_y);
-+        }
-+        const float margin = tan_r / 0.98f;
-+        lo_x += margin; hi_x -= margin; lo_y += margin; hi_y -= margin;
-+        const bool room = lo_x <= hi_x && lo_y <= hi_y;
-+        glm::vec2 goal(0.0f, lift_y);
-+        glm::vec2 gaze(0.0f);
-+        const bool following = room && host_.GazeInset(gaze);
-+        if (following) goal = glm::vec2(std::clamp(gaze.x, lo_x, hi_x), std::clamp(gaze.y, lo_y, hi_y));
-+        if (!gaze_started_ || !std::isfinite(gaze_smooth_.x + gaze_smooth_.y)) {
-+            gaze_smooth_ = goal;
-+            gaze_velocity_ = glm::vec2(0.0f);
-+            gaze_started_ = true;
-+        } else {
-+            gaze_smooth_.x = SmoothDamp(gaze_smooth_.x, goal.x, gaze_velocity_.x, 0.05f, dt);
-+            gaze_smooth_.y = SmoothDamp(gaze_smooth_.y, goal.y, gaze_velocity_.y, 0.05f, dt);
-+        }
-+        centre_x = gaze_smooth_.x;
-+        centre_y = gaze_smooth_.y;
-+        if (room) {
-+            centre_x = std::clamp(centre_x, lo_x, hi_x);
-+            centre_y = std::clamp(centre_y, lo_y, hi_y);
-+        } else {
-+            centre_x = 0.0f;
-+            centre_y = lift_y;
-+        }
-+        if (now - gaze_logged_ >= std::chrono::seconds(1)) {
-+            gaze_logged_ = now;
-+            LogInfo("vr: sharp zone centre {:.1f} degrees right, {:.1f} up ({}; gaze {})", glm::degrees(std::atan(centre_x)), glm::degrees(std::atan(centre_y)),
-+                    following ? "following the foveation map" : "straight ahead", following ? std::format("{:.1f}, {:.1f}", glm::degrees(std::atan(gaze.x)), glm::degrees(std::atan(gaze.y))) : std::string("none"));
-+        }
-+    }
-     if (inset_logged_ != images || std::fabs(inset_lift_logged_ - lift_y) > 1.0e-3f) {
-         inset_logged_ = images;
-         inset_lift_logged_ = lift_y;
-@@ -420,25 +519,25 @@ bool VrPlay::PrepareInsets(Stereo& out) {
-                 glm::degrees(2.0f * std::atan(tan_r)), glm::degrees(std::atan(lift_y)), images.x, images.y, density, render_size_.x, render_size_.y);
-     }
-     // Left, right, up, down (the composition places it by these).
--    out.inset_tangents = glm::vec4(-tan_x, tan_x, lift_y + tan_y, lift_y - tan_y);
-+    out.inset_tangents = glm::vec4(centre_x - tan_x, centre_x + tan_x, centre_y + tan_y, centre_y - tan_y);
-     for (int i = 0; i < 2; ++i) {
-         // The inset's field in its wide view's image (image y is down).
-         const xr::EyeFrustum& f = frusta_[i];
--        out.inset_share[i] = glm::vec4(tan_x / f.tan_x, tan_y / f.tan_y, -f.center.x / (2.0f * f.tan_x), (f.center.y - lift_y) / (2.0f * f.tan_y));
-+        out.inset_share[i] = glm::vec4(tan_x / f.tan_x, tan_y / f.tan_y, (centre_x - f.center.x) / (2.0f * f.tan_x), (f.center.y - centre_y) / (2.0f * f.tan_y));
-     }
-     {
-         const xr::EyeFrustum& l = frusta_[0];
-         const xr::EyeFrustum& r = frusta_[1];
-         out.bloom_place[0] = out.inset_share[0];
--        out.bloom_place[1] = glm::vec4(tan_x / l.tan_x, tan_y / l.tan_y, -l.center.x / (2.0f * l.tan_x), (l.center.y - lift_y) / (2.0f * l.tan_y));
-+        out.bloom_place[1] = glm::vec4(tan_x / l.tan_x, tan_y / l.tan_y, (centre_x - l.center.x) / (2.0f * l.tan_x), (l.center.y - centre_y) / (2.0f * l.tan_y));
-         out.bloom_place[2] = glm::vec4(r.tan_x / l.tan_x, r.tan_y / l.tan_y, (r.center.x - l.center.x) / (2.0f * l.tan_x),
-                                        (l.center.y - r.center.y) / (2.0f * l.tan_y));
-     }
-     for (int i = 0; i < 2; ++i) {
-         out.insets[i] = out.eyes[i];
-         out.insets[i].fov_y = 2.0f * std::atan(tan_y);
--        // Off-centre vertically by `lift_y` (as OwnFrustumFor: centre over the half field).
--        out.insets[i].offset = glm::vec2(0.0f, lift_y / tan_y);
-+        // Off-centre by the zone's centre (as OwnFrustumFor: centre over the half field).
-+        out.insets[i].offset = glm::vec2(-centre_x / tan_x, centre_y / tan_y);
-         xr::Swapchain& sc = host_.InsetSwapchain(i);
-         if (!host_.Acquire(sc)) {
-             if (i == 1) host_.Release(host_.InsetSwapchain(0));
-@@ -521,6 +620,16 @@ void VrPlay::ReportGpu(float frame_gpu_ms) {
+@@ -521,6 +561,16 @@ void VrPlay::ReportGpu(float frame_gpu_ms) {
  }
  
  void VrPlay::FinishStereo(const Stereo& stereo) {
@@ -28459,7 +28470,7 @@ index 38782fe..49823ce 100644
      host_.Release(host_.EyeSwapchain(0));
      host_.Release(host_.EyeSwapchain(1));
      host_.Release(host_.HudSwapchain());
-@@ -535,9 +644,47 @@ void VrPlay::FinishStereo(const Stereo& stereo) {
+@@ -535,9 +585,47 @@ void VrPlay::FinishStereo(const Stereo& stereo) {
      layers.eyes[0] = stereo.poses[0];
      layers.eyes[1] = stereo.poses[1];
      layers.hud = true;
@@ -28510,7 +28521,7 @@ index 38782fe..49823ce 100644
      host_.EndFrame(layers);
      if (++frames_ == 1) {
          LogInfo("vr: first stereo frame submitted");
-@@ -612,7 +759,27 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
+@@ -612,7 +700,27 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
      }
  }
  
@@ -28538,7 +28549,7 @@ index 38782fe..49823ce 100644
      const float head_yaw_local = xr::AnglesOf(head_orientation_local).yaw;
      if (!menu_open) {
          // In play the HUD (subtitles, prompts) rides with the head, like the performance panel:
-@@ -621,7 +788,7 @@ void VrPlay::Place(const glm::vec3& head_local, const glm::quat& head_orientatio
+@@ -621,7 +729,7 @@ void VrPlay::Place(const glm::vec3& head_local, const glm::quat& head_orientatio
          hud_placed_ = true;
          menu_was_open_ = false;
          hud_orientation_ = head_orientation_local;
@@ -28548,7 +28559,7 @@ index 38782fe..49823ce 100644
      }
      // A menu stays where it opened (in the world, turning after the head beyond a dead zone),
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index 2bcbcd6..d7cbe23 100644
+index 2bcbcd6..0c840a8 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
 @@ -63,6 +63,8 @@ public:
@@ -28560,7 +28571,7 @@ index 2bcbcd6..d7cbe23 100644
      void Rumble(uint8_t large_motor, uint8_t small_motor);
      VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
      // Dynamic resolution: the GPU time of the views drawn this frame, measured. While it stays
-@@ -71,12 +73,31 @@ public:
+@@ -71,12 +73,25 @@ public:
      void ReportGpu(float frame_gpu_ms);
  
  private:
@@ -28572,12 +28583,6 @@ index 2bcbcd6..d7cbe23 100644
      glm::uvec2 inset_logged_{0u, 0u};
      glm::uvec2 inset_images_{0u, 0u};  // the inset images' size now (PrepareInsets)
      float inset_lift_logged_ = 0.0f;
-+    // The sharp zone's centre (tangents from the eye axis) smoothed towards the gaze (PrepareInsets).
-+    glm::vec2 gaze_smooth_{0.0f};
-+    glm::vec2 gaze_velocity_{0.0f};
-+    bool gaze_started_ = false;
-+    std::chrono::steady_clock::time_point gaze_time_{};
-+    std::chrono::steady_clock::time_point gaze_logged_{};
 +    // The HUD filling the view (SetHudFull): 0 normal, 1 full; the head it is locked to.
 +    bool hud_full_wanted_ = false;
 +    float hud_full_ = 0.0f;
@@ -28592,7 +28597,7 @@ index 2bcbcd6..d7cbe23 100644
      // The size the eyes are drawn at this frame: render_size_ times the dynamic resolution.
      glm::uvec2 DrawSize() const;
  
-@@ -86,6 +107,7 @@ private:
+@@ -86,6 +101,7 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -28600,7 +28605,7 @@ index 2bcbcd6..d7cbe23 100644
      bool cutscene_ = false;  // a scene's camera drawn in stereo (immersive cutscenes)
      bool cutscene_entered_ = false;  // where the head was when it began (below) is known
      float cutscene_ref_yaw_ = 0.0f;  // the head's heading in the world then: the scene's camera points there
-@@ -96,6 +118,7 @@ private:
+@@ -96,6 +112,7 @@ private:
      bool hud_placed_ = false;
      bool menu_was_open_ = false;
      float hud_yaw_ = 0.0f;
@@ -28608,7 +28613,7 @@ index 2bcbcd6..d7cbe23 100644
      glm::quat hud_orientation_{1.0f, 0.0f, 0.0f, 0.0f};
      glm::vec3 hud_position_{0.0f};
      float eye_height_ = -1.0f;
-@@ -123,6 +146,7 @@ private:
+@@ -123,6 +140,7 @@ private:
      uint32_t raw_previous_ = 0;
      bool snap_armed_ = true;
      bool settings_previous_ = false;
@@ -28617,7 +28622,7 @@ index 2bcbcd6..d7cbe23 100644
      uint64_t frames_ = 0;
  };
 diff --git a/src/main.cpp b/src/main.cpp
-index 6dd62ee..fd4ee5b 100644
+index 6dd62ee..0786d2f 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -98,6 +98,13 @@
@@ -28634,37 +28639,7 @@ index 6dd62ee..fd4ee5b 100644
  namespace {
  
  #if PT_VISIONOS
-@@ -1684,6 +1691,9 @@ public:
-             for (int i = 0; i <= 8; ++i) periphery.values.push_back(std::format("{}%", 10 + 5 * i));
-             periphery.wrap = false;
-             foveation.rows.push_back(std::move(periphery));
-+            pt::game::PcSettingRow gaze = Row(kVpGazeInset, "pc_vp_gaze", OffOn(), h.gaze_inset ? 1 : 0, "pc_note_vp_gaze");
-+            gaze.enabled = h.game_foveation;
-+            foveation.rows.push_back(std::move(gaze));
-             foveation.rows.push_back(Row(kVpBorder, "pc_vp_border", OffOn(), h.show_border ? 1 : 0, "pc_note_vp_border"));
-             // Shown VPKTAA, FXAA; kept as aa 5, 0. Then VPKTAA's own two settings.
-             foveation.rows.push_back(Row(kVpAa, "pc_vp_aa", {"pc_vp_aa_vpktaa", "pc_vp_aa_fxaa"}, VpAaToMenu(h.aa), "pc_note_vp_aa"));
-@@ -2042,6 +2052,10 @@ public:
-             pt::visionos::SettingChanged("center_up", std::to_string(pt::visionos::Headset().center_up));
-             HeadsetCustom();
-             return;
-+        case kVpGazeInset:
-+            pt::visionos::Headset().gaze_inset = value == 1;
-+            pt::visionos::SettingChanged("gaze_inset", value == 1 ? "1" : "0");
-+            return;
-         case kVpBorder:
-             pt::visionos::Headset().show_border = value == 1;
-             pt::visionos::SettingChanged("show_border", value == 1 ? "1" : "0");
-@@ -2518,7 +2532,7 @@ private:
-         kVr, kVrMode, kVrFlashlight, kVrTurn,
-         kFrameLimit,
-         kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpFov, kVpRecenter,
--        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
-+        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpGazeInset, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
-         kVpSubtitleSize, kVpSubtitleHeight, kVpTiledLights,
-         kLoopFirst = 1000,
-         kRunSplitFirst = 3000,
-@@ -2536,7 +2550,7 @@ private:
+@@ -2536,7 +2543,7 @@ private:
      uint32_t voice_id_ = 0;
      uint64_t voice_start_ = 0;
  
@@ -28673,7 +28648,7 @@ index 6dd62ee..fd4ee5b 100644
  
      const pt::game::ArchiveEntry* EntryOf(int id) const {
          const auto entries = pt::game::ArchiveEntries();
-@@ -2826,7 +2840,7 @@ private:
+@@ -2826,7 +2833,7 @@ private:
      std::vector<pt::game::PcSettingSection> SpeedrunResults() const {
          const pt::game::SpeedrunTimer& run = game_.Speedrun();
          using pt::game::SpeedrunTimer;
@@ -28682,7 +28657,7 @@ index 6dd62ee..fd4ee5b 100644
          pt::game::PcSettingSection result{"pc_speedrun_run", 0, {}};
          auto menu = Row(kRunMenu, "pc_speedrun_menu", {""}, 0, "pc_note_speedrun_menu");
          menu.link = true;
-@@ -3020,7 +3034,7 @@ private:
+@@ -3020,7 +3027,7 @@ private:
          pt::game::PcSettingSection left{"pc_section_mods", 0, {}};
          pt::game::PcSettingSection right{"pc_section_mods", 1, {}};
          if (!app_.mods) return {std::move(left)};
@@ -28691,26 +28666,62 @@ index 6dd62ee..fd4ee5b 100644
          const std::string restart(pt::game::PcText("pc_note_mods", language));
          const auto& mods = app_.mods->mods;
          for (size_t i = 0; i < mods.size() && i < static_cast<size_t>(kMaxModRows); ++i) {
-@@ -3716,7 +3730,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3688,6 +3695,15 @@ int RunGame(App& app, pt::Vfs& vfs) {
+     };
+     std::unique_ptr<TheaterView> theater;
+     bool theater_paused = false;
++    const pt::game::ArchiveEntry* theater_entry = nullptr;
++    int theater_hint_sig = -1;  // the controller style and language the theater hint was worded for
++    auto set_theater_hint = [&]() {
++        const int language = UiTextLanguage(game.Options().subtitle_language);
++        theater_hint_sig = pt::game::PcPromptStyle() * 64 + language;
++        ui.SetTheaterHint(pt::game::ArchiveLabel(*theater_entry, language),
++                          std::string(pt::game::PcText(theater_entry->media == pt::game::ArchiveMedia::Model ? "pc_archive_model_hint" : "pc_archive_demo_hint",
++                                                       language)));
++    };
+     auto start_theater = [&](const std::string& id) {
+         if (id == "-") {
+             if (theater) theater->theater->Stop();
+@@ -3716,14 +3732,10 @@ int RunGame(App& app, pt::Vfs& vfs) {
              theater_paused = true;
              if (game.Audio()) game.Audio()->PostEvent("Pause_All", nullptr);
          }
 -        const int language = std::clamp(game.Options().subtitle_language, 0, 11);
-+        const int language = UiTextLanguage(game.Options().subtitle_language);
          ui.SetMenuSuspended(true);
          ui.EnterTheater(view->theater->Sandbox());
-         if (options.make_museum_previews.empty()) {
-@@ -3868,7 +3882,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+-        if (options.make_museum_previews.empty()) {
+-            ui.SetTheaterHint(pt::game::ArchiveLabel(*entry, language),
+-                              std::string(pt::game::PcText(entry->media == pt::game::ArchiveMedia::Model ? "pc_archive_model_hint" : "pc_archive_demo_hint",
+-                                                           language)));
+-        }
++        theater_entry = options.make_museum_previews.empty() ? entry : nullptr;
++        if (theater_entry) set_theater_hint();
+         theater = std::move(view);
+         game.SetArchiveTheaterActive(true);
+         pt::LogInfo("archive: theater opens {}", id);
+@@ -3732,6 +3744,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+         if (!theater) return;
+         vkDeviceWaitIdle(app.renderer.Context().device);
+         theater.reset();
++        theater_entry = nullptr;
+         ui.SetTheaterHint({}, {});
+         ui.SetMenuSuspended(false);
+         ui.LeaveTheater(game);
+@@ -3868,7 +3881,12 @@ int RunGame(App& app, pt::Vfs& vfs) {
              polled.prompts = *options.forced_prompts;
          }
          if (vr) {
 -            vr->ApplyControls(game, polled, ui_ready && ui.MenuOpen(), vr->ScreenMode(game), dt);
 +            // (A theater opened from the pause menu leaves the menu open but suspended: the theater has the controls, not the menu.)
 +            vr->ApplyControls(game, polled, ui_ready && ui.MenuOpen() && !game.ArchiveTheaterActive(), vr->ScreenMode(game), dt);
++            // The words of the museum hints name the buttons shown: the controller in hand, or the one the "Button icons" setting forces.
++            const pt::PromptStyle shown_prompts = pt::ForcedPromptStyle(polled.prompts, input.settings.prompt_style);
++            pt::game::SetPcPromptStyle(shown_prompts.device == pt::PromptDevice::PlayStation ? 1 : shown_prompts.device == pt::PromptDevice::Nintendo ? 2 : 0);
++            if (theater && theater_entry && theater_hint_sig != pt::game::PcPromptStyle() * 64 + UiTextLanguage(game.Options().subtitle_language)) set_theater_hint();
          }
          if (polled.pc_settings && !freecam) {
              if (options.dev_ui && app.window) {
-@@ -4207,12 +4222,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4207,12 +4225,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
  
@@ -28740,7 +28751,7 @@ index 6dd62ee..fd4ee5b 100644
          }
          if (!ui.MenuOpen() || ui.Menu().CurrentPage() != pt::game::OptionsMenu::Page::Pc)
              app.microphone_test = app.microphone_monitor = false;
-@@ -4241,9 +4269,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4241,9 +4272,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
          }
          if (hearing && recognizer) {
              if (!microphone.IsOpen() && !microphone_failed && !voice_file) {
@@ -28757,7 +28768,7 @@ index 6dd62ee..fd4ee5b 100644
              }
              const pt::VoiceRecognizer::State state = recognizer->GetState();
              app.microphone_status = microphone_failed || state == pt::VoiceRecognizer::State::Failed ? "pc_mic_unavailable"
-@@ -4418,7 +4450,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4418,7 +4453,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
              ImGui::Render();
          }
          if (photo_mode) {
@@ -28766,7 +28777,7 @@ index 6dd62ee..fd4ee5b 100644
              photo_status_time = std::max(0.0f, photo_status_time - dt);
              if (photo_status_time <= 0.0f) photo_status.clear();
              photo_view = photo_panel.View(language, photo_status);
-@@ -4441,7 +4473,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4441,7 +4476,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          bool warmed = false;
          if (vr) {
              const bool screen = vr->ScreenMode(game);
@@ -28775,7 +28786,7 @@ index 6dd62ee..fd4ee5b 100644
              const float scene_dt = static_cast<float>(game.Time() - last_scene_time);
              auto begin = [&](bool present) { return app.renderer.BeginFrame(present && app.window) || (present && app.renderer.BeginFrame(false)); };
              auto save_shots = [&](const char* suffix) {
-@@ -4456,10 +4488,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4456,10 +4491,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
              if (screen && vr->PrepareScreen(screen_target)) {
                  app.renderer.SetRenderExtent(pt::Renderer::kHudExtent);
                  if (begin(true)) {
@@ -28790,7 +28801,7 @@ index 6dd62ee..fd4ee5b 100644
                      app.scene.SetVrEye(-1);
                      app.scene.Render(camera, draw_items, lighting, dt);
                      ui.SetVrHud(false);
-@@ -4468,21 +4501,22 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4468,21 +4504,22 @@ int RunGame(App& app, pt::Vfs& vfs) {
                      xr_frame.overlay_on_frame = true;
                      app.renderer.SetXrFrame(xr_frame);
                      app.renderer.EndFrame(app.window != nullptr);
@@ -28818,7 +28829,7 @@ index 6dd62ee..fd4ee5b 100644
                                    lighting, vfx_pass, blend);
                  // Views 0 and 1: the eyes; with the game's foveation they are the wide, low-density
                  // views (no screen-space AO or reflections) and 2 and 3 their sharp centres.
-@@ -4620,7 +4654,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4620,7 +4657,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.xr_hdr = false;
  #endif
                  ui.SetVrHud(false);

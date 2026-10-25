@@ -183,7 +183,6 @@ final class GameRunner: @unchecked Sendable {
         case "subtitle_height": s.subtitleHeight = min(max(Int(value) ?? s.subtitleHeight, 0), 40)
         case "fov": s.fov = Int(value) ?? s.fov
         case "game_foveation": s.gameFoveation = flag
-        case "gaze_inset": s.gazeInset = flag
         case "periphery": s.periphery = Int(value) ?? s.periphery
         case "center_deg": s.center = Int(value) ?? s.center
         case "center_up": s.centerUp = Int(value) ?? s.centerUp

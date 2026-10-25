@@ -62,16 +62,17 @@
 - `FitHud` (vr_play.cpp): raycast cabeza→delante, distancia `clamp(hit-0,15, 0,7, 1,6)`, suavizado 0,15 s / 0,5 s, ancho
   y caída escalados; con menú fijo a 1,6 m; guardas `isfinite`.
 
-## Build 71: HUD completo y mirada
+## Build 71–72: HUD completo
 
 - HUD completo: `UifView::Draw` marca `CoversCanvas()` (malla no aditiva, alfa ≥ 0,9, ≥ 90 % del lienzo por área recortada;
   caja ≥ 95 %); `GameUi::FullCanvasUi()` (DemoUi o créditos del port, menú cerrado) → `VrPlay::SetHudFull` →
   `FinishStereo`: quad bloqueado a la cabeza, contain 16:9 en la intersección de los campos de ambos ojos a la distancia
   `d` (`eye_tangents_`, `eye_offset_` = ±½ IPD), ×0,98; transición 0,12 s. Subtítulos escalan con él.
-- Mirada: `Impl::DenseCentre` (fila+columna del mapa, 24 pasos) en `LocateViews` → tangentes por ojo, media; `GazeInset`
-  solo si `gaze_inset`, estimación de ambos ojos y 3 movimientos > 0,03 tan (≥ 0,25 s) en 10 s; `ResetGaze` al iniciar
-  sesión, ajuste off, < 2 vistas, retornos tempranos, estimación inválida, cambio de nº/tamaño de mapas.
-  `PrepareInsets`: SmoothDamp 50 ms, recorte dentro de ambos campos anchos; tamaño del inset con la posición nominal.
-  VPKTAA: `vr_last_camera_[4]` guarda la cámara con offset, sin reset.
-- Ajuste `gaze_inset`: `PTSettings.gazeInset`, `GameRunner.settingFromGame`, toggle en `SettingsView` (gris sin foveado
-  del juego), fila `kVpGazeInset` (`enabled = game_foveation`; no llama `HeadsetCustom()`: no es parte de presets).
+- Build 72: disparador explícito: `DemoUi::FullOverlay()` = imagen de crash (`bug_pick`/`bug_nodes`, recalculado en cada
+  `Draw` según visibilidad real tras `Apply`; solo tras `FindEvent` correcto); `GameUi::subliminal_full_` (subliminal con
+  texto); `FullCanvasUi` = crash || subliminal || `CoversCanvas` || créditos, menú cerrado. Log `ui: full-view overlay on/off`.
+- Botones: `PcText` expande tokens según `SetPcPromptStyle` (main.cpp tras `ApplyControls`, con `ForcedPromptStyle` de
+  input.cpp = ajuste "Iconos de botones" o mando): PS Cross/Circle/Square/Triangle/Options/L1/R1/L2/R2, Xbox A/B/X/Y/Menu/
+  LB/RB/LT/RT, Nintendo B/A/Y/X/+/L/R/ZL/ZR; español Equis/Círculo/Cuadrado/Triángulo. Caché (clave, idioma, estilo).
+  Aviso del teatro (`set_theater_hint`) se recalcula si cambian estilo o idioma.
+- Mirada eliminada (mapa de foveado estático, medido build 71): sin `GazeInset`, `DenseCentre`, `gaze_inset`, `FoveationDiag`.

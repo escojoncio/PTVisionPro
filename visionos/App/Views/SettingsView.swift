@@ -169,8 +169,6 @@ struct SettingsView: View {
     private var foveationSection: some View {
         Section {
             Toggle(L("Foveado del juego", "Game foveation"), isOn: bool(\.gameFoveation))
-            Toggle(L("Zona nítida sigue la mirada", "Sharp zone follows your gaze"), isOn: bool(\.gazeInset))
-                .disabled(!model.settings.gameFoveation)
             LabeledContent(L("Ancho de la zona nítida", "Sharp zone width")) {
                 Stepper("\(model.settings.center)°", value: int(\.center), in: 20...70, step: 5)
             }

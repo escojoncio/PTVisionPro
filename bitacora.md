@@ -6,6 +6,9 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Último hecho
 
+- Build 72 (rama `pt-1.0.5`): pantalla de crash falsa a vista completa por disparador explícito (no estaba invertida:
+  confirmado por el usuario); botones del mando real en avisos del museo; código de mirada eliminado. Ver `notas/pt-1.0.5.md`.
+
 - Build 71 (rama `pt-1.0.5`): HUD a pantalla completa con imágenes 2D que cubren el lienzo (`UifView::CoversCanvas`,
   `DemoUi::FullCanvas`, `GameUi::FullCanvasUi`, `VrPlay::SetHudFull`; tamaño = intersección de los campos de ambos ojos
   con ½ IPD); zona nítida sigue el mapa de foveado (`DenseCentre`/`GazeInset`, ajuste `gaze_inset`, env
@@ -20,8 +23,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 - Rama de trabajo: `pt-1.0.5`. Build 71 probada 67 s (log pt (3)): sin cierres, 47 fps, GPU 4 vistas 20,3 ms.
 - Mapa de foveado ESTÁTICO (log pt (3)): centro fijo vista 0 (0,631, 0,497), vista 1 (0,369, 0,497) durante toda la
   sesión; el objeto se recrea cada frame con el mismo contenido. `GazeInset` nunca se activó. Seguir la mirada: imposible.
-- Pantalla de crash falsa invertida: causa NO encontrada (variantes `sh_bug_*` = mallas con textura propia por la misma
-  ruta UI que los subtítulos, que salen bien). Pendiente del log (`ui: full-canvas picture…` + `ui: bug screen N`).
+- Build 72 sin probar. Crash falsa (log pt (4)): `bug_expression.uigb` vía DemoUi; `CoversCanvas` no la detectaba.
 - Escena final pixelada: causa NO encontrada (no hay condición que salte el inset). Pendiente de `vr: stereo frame:`.
 - `museum: thumbnail capture could not start: Setting the working directory is not supported` (warn, sin investigar).
 - `ui: option animation UI_sys_opt_setin_s missing` (warn). HDR 1.0.5 sin verificar.
@@ -31,12 +33,15 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Pendiente (en orden)
 
-1. Log con crash falsa (variante, orientación) y escena final (`sharp zone drawn/NOT drawn`): el log pt (3) no llegó.
-   Próxima build: quitar `GazeInset`/`DenseCentre`/ajuste `gaze_inset` y `FoveationDiag` (mapa estático, código inútil).
-2. Subtítulos con el HUD completo escalan con él (misma textura); sacarlos a otra capa si molesta.
-3. Nombres de botón genéricos en vez de iconos (`prompt_hint` de 1.0.5 no fusionado).
-4. Otros idiomas (tr, zh, ar, ru, uk) caen al inglés en las claves del visor.
-5. Afinar `vpktaa.frag`. 6. `taa_valid_` (menor). 7. 45→90 reales (spacewarp propio).
+1. Log build 72: crash a vista completa (`ui: full-view overlay`), botones del museo, escena final (`vr: stereo frame:`,
+   aún sin reproducir en un log).
+2. Usuario: aliasing de lejos peor que al estrenar el VPKTAA (build 50). Propuesto interruptor VPKTAA original(50)/actual
+   (diferencias: pesos separables, más cercano por ejes, disoclusión de la 51; post fusionado; mezcla sRGB de reflexiones 1.0.5).
+   Pendiente de su sí.
+3. Subtítulos con el HUD completo escalan con él (misma textura); sacarlos a otra capa si molesta.
+4. Iconos de botón reales (`prompt_hint` de 1.0.5 no fusionado); ahora nombres de texto.
+5. Otros idiomas caen al inglés en claves del visor; PC aún en `pc_note_prompt_style`, `pc_note_display_mode`, `pc_mouse`.
+6. `taa_valid_` (menor). 7. 45→90 reales (spacewarp propio).
 
 ## Decisiones
 

@@ -71,8 +71,6 @@ struct PTSettings: Codable, Equatable {
     var tiledLights = true
     /// The game's own foveation: a wide low-density view of each eye and its centre on top.
     var gameFoveation = true
-    /// The sharp zone follows the headset's own foveation (where you look) when it moves; else straight ahead.
-    var gazeInset = true
     /// Density of everything outside the sharp zone, percent of the image size (10 to 50).
     var periphery = 20
     /// Width of the sharp zone in the middle of the view, degrees across (20 to 70).
@@ -305,7 +303,7 @@ struct PTSettings: Codable, Equatable {
         case taaRes = "vpktaaResolution"
         case taaSharpness = "vpktaaSharpness"
         case taaPeriphery = "vpktaaPeriphery"
-        case sceneDepth, subtitleSize, subtitleHeight, gazeInset
+        case sceneDepth, subtitleSize, subtitleHeight
         case tiledLights = "tiledLights"
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, gameLanguage, showPerformanceOverlay, gamePath
@@ -339,7 +337,6 @@ struct PTSettings: Codable, Equatable {
         subtitleSize = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleSize)) ?? base.subtitleSize, 100), 250)
         subtitleHeight = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleHeight)) ?? base.subtitleHeight, 0), 40)
         gameFoveation = (try? c.decodeIfPresent(Bool.self, forKey: .gameFoveation)) ?? base.gameFoveation
-        gazeInset = (try? c.decodeIfPresent(Bool.self, forKey: .gazeInset)) ?? base.gazeInset
         periphery = min(max((try? c.decodeIfPresent(Int.self, forKey: .periphery)) ?? base.periphery, 10), 50)
         center = (try? c.decodeIfPresent(Int.self, forKey: .center)) ?? base.center
         centerResolution = (try? c.decodeIfPresent(Int.self, forKey: .centerResolution)) ?? base.centerResolution
@@ -419,7 +416,6 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_SUBTITLE_SIZE=\(subtitleSize)",
             "PT_VP_SUBTITLE_HEIGHT=\(subtitleHeight)",
             "PT_VP_GAME_FOVEATION=\(flag(gameFoveation))",
-            "PT_VP_GAZE_INSET=\(flag(gazeInset))",
             "PT_VP_PERIPHERY=\(periphery)",
             "PT_VP_CENTER_DEG=\(center)",
             "PT_VP_CENTER_UP=\(centerUp)",
