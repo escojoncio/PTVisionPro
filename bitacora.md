@@ -6,7 +6,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Último hecho
 
-- Build 57 = mismo código que la 53 (re-ejecución de CI). Probada con log pt (41): **regresión visual** (ver Estado).
+- Build 57 = rama `pt-1.0.5` (6632734: juego pt-pc 1.0.5 + arreglos 1.0.6), no `main`. Log pt (41): **regresión visual**.
 - Build 53 (987694a): icono `AppIcon.solidimagestack`, arte del launcher (`LauncherBackground.swift`, `HomeView`). Solo Swift.
 - Build 52 (112839b): `lighting.glsl`, `light_main.glsl`, `light_all.frag`, `upscale_demod.frag` devueltos a la 50;
   `vpktaa.frag` `DEPTH_GATHER 0`. La 51 duplicaba el coste de luces.
@@ -17,9 +17,9 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 ## Estado
 
 - Funciona (hasta la 51): juego completo de principio a fin, sin cierres desde la build 14.
-- **Roto en la 57 (log pt (41))**: triángulos de colores por toda la escena; en el modo museo (`theater:`) solo se ven esos
+- **Roto en la 57 (rama `pt-1.0.5`, log pt (41))**: triángulos de colores por toda la escena; en el modo museo (`theater:`) solo se ven esos
   triángulos y el resto negro (gpu labels: gbuffer/lighting ≈0, solo `compose and forward/effects`; `cull` 1–5 draws).
-  Sospecha unverified: partículas (`fx_sh_glsrin01_s1` 2228–3032 partículas) y/o desajuste C++↔shaders tras el revert de la 52.
+  Causa unverified: la fusión 1.0.5 (`patches/0002-pt-1.0.5-update.patch`); `main` (build 53) no tiene la fusión.
 - Menú muestra textos de PC (`option menu page PC settings`, iconos "PC page"): no deberían verse en Vision Pro.
 - `museum: thumbnail capture could not start: Setting the working directory is not supported` (warn).
 - HDR: sin verificar (el usuario no ve bien la imagen).
@@ -29,7 +29,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Pendiente (en orden)
 
-1. Diagnosticar y arreglar los triángulos y el museo negro (comparar 51 vs 52/53).
+1. Diagnosticar en `pt-1.0.5` los triángulos y el museo negro (comparar con 987694a).
 2. Ocultar textos/páginas de PC en el menú de Vision Pro.
 3. Revisar HDR una vez se vea bien.
 4. Afinar constantes de `vpktaa.frag` (KEEP_*, SIGMA_*, DISOCCLUSION, afilado).
