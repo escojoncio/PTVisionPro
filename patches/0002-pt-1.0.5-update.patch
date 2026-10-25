@@ -11,6 +11,47 @@ index 0884527..0f2e9e3 100644
  target_include_directories(pt_bc7enc PUBLIC ${bc7enc_SOURCE_DIR})
  if(MSVC)
    target_compile_options(pt_bc7enc PRIVATE /w)
+diff --git a/shaders/compose.frag b/shaders/compose.frag
+index d888847..3aaaefc 100644
+--- a/shaders/compose.frag
++++ b/shaders/compose.frag
+@@ -90,6 +90,11 @@ void main() {
+         TppFog(v.eye.xyz, world_point, inscatter, transmittance);
+         color = color * transmittance + inscatter;
+     }
++    /* A NaN or infinite pixel from any lighting term would spread through the bloom chain as black blotches and poison the
++       exposure measurement; the scene colour leaves here finite. */
++    if (any(isnan(color)) || any(isinf(color))) {
++        color = vec3(0.0);
++    }
+     float bloom_alpha = BloomAlpha(color);
+     if ((tpp & 2u) != 0u) {
+         color = TppShoulder(color);
+diff --git a/shaders/gbuffer.frag b/shaders/gbuffer.frag
+index a05ad2e..f6eafad 100644
+--- a/shaders/gbuffer.frag
++++ b/shaders/gbuffer.frag
+@@ -65,6 +65,11 @@ float TearNoise(vec2 p) {
+     return sum / 0.95;
+ }
+ 
++vec2 CreatureUv(vec2 t) {
++    vec2 f = 1.0 - abs(1.0 - 2.0 * fract(0.5 * t));
++    return vec2(0.04, 0.18) + vec2(0.46, 0.48) * f;
++}
++
+ void main() {
+     g_mip_bias = frame.views[draw.ids.x].jitter.z;
+     float tear_edge = 0.0;
+@@ -76,7 +81,7 @@ void main() {
+     }
+     Material m = materials[creature ? uint(in_color.r + 0.5) : draw.ids.y];
+     uint debug_mode = draw.ids.z & 0xFFu;
+-    vec2 uv = creature ? in_color.gb : in_uv0;
++    vec2 uv = creature ? CreatureUv(in_color.gb) : in_uv0;
+     vec4 base = Tex(m.albedo, uv);
+     if ((m.flags & MAT_CONSTANT_COLOR) != 0u) {
+         base = vec4(m.albedo_factor.rgb, 1.0);
 diff --git a/shaders/luminance.comp b/shaders/luminance.comp
 index 964d13d..a256ccd 100644
 --- a/shaders/luminance.comp
@@ -28,6 +69,38 @@ index 964d13d..a256ccd 100644
                  }
              }
          }
+diff --git a/shaders/reflect_blend_main.glsl b/shaders/reflect_blend_main.glsl
+index 725ac22..a9c3176 100644
+--- a/shaders/reflect_blend_main.glsl
++++ b/shaders/reflect_blend_main.glsl
+@@ -109,7 +109,7 @@ void main() {
+ #endif
+ #ifdef PT_REFLECT_LAYER
+     amount = max(amount, 0.0);
+-    out_color = vec4(min(hit, vec3(1.0)) * amount, amount);
++    out_color = vec4(SrgbEncode(min(hit, vec3(1.0))) * amount, amount);
+ #ifdef PT_RT_REFLECTIONS
+     bool on_screen = refl.w > 1.0e-4 && refl.z > 0.0 && all(greaterThanEqual(coordinate, vec2(0.0))) && all(lessThanEqual(coordinate, vec2(1.0)));
+     out_history = HistoryOffset(v, uv, uv + map_scale * (2.0 * coordinate - 1.0), on_screen);
+@@ -117,6 +117,6 @@ void main() {
+     out_history = HistoryOffset(v, uv, uv + map_scale * (2.0 * refl.xy - 1.0), true);
+ #endif
+ #else
+-    out_color = vec4(mix(min(base.rgb, vec3(1.0)), min(hit, vec3(1.0)), amount), base.a);
++    out_color = vec4(SrgbDecode(mix(SrgbEncode(min(base.rgb, vec3(1.0))), SrgbEncode(min(hit, vec3(1.0))), amount)), base.a);
+ #endif
+ }
+diff --git a/shaders/reflect_temporal.frag b/shaders/reflect_temporal.frag
+index e893146..2a6a4dc 100644
+--- a/shaders/reflect_temporal.frag
++++ b/shaders/reflect_temporal.frag
+@@ -90,5 +90,5 @@ void main() {
+     }
+     result = max(result, vec4(0.0));
+     out_history = result;
+-    out_color = result.a > 0.0 && pass.f1.w < 0.5 ? vec4(min(base.rgb, vec3(1.0)) * (1.0 - result.a) + result.rgb, base.a) : base;
++    out_color = result.a > 0.0 && pass.f1.w < 0.5 ? vec4(SrgbDecode(SrgbEncode(min(base.rgb, vec3(1.0))) * (1.0 - result.a) + result.rgb), base.a) : base;
+ }
 diff --git a/shaders/screen_fx.frag b/shaders/screen_fx.frag
 index 144f24f..937969d 100644
 --- a/shaders/screen_fx.frag
@@ -100,6 +173,259 @@ index 0d965e8..327f612 100644
          }
          out_color = vec4(clamp(color + noise / 255.0, 0.0, 1.0), alpha);
          return;
+diff --git a/shaders/upscale_demod.frag b/shaders/upscale_demod.frag
+index 7355148..8d21506 100644
+--- a/shaders/upscale_demod.frag
++++ b/shaders/upscale_demod.frag
+@@ -14,31 +14,33 @@ layout(location = 0) in vec2 in_uv;
+ layout(location = 0) out vec4 out_color;
+ layout(location = 1) out vec4 out_factor;
+ 
++const float kBeamProbeDistance = 2.0;
++
++float BeamFactor(ivec2 pixel) {
++    if (pass.ids.y == 0xFFFFFFFFu) return 1.0;
++    View v = frame.views[pass.ids.x];
++    Light l = frame.lights[pass.ids.y];
++    Surface s;
++    vec2 frag = vec2(pixel) + 0.5;
++    vec3 ray = vec3(PixelNdc(v, frag) * v.projection_param.xy, 1.0);
++    s.P = normalize(ray) * kBeamProbeDistance;
++    s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
++    s.roughness = 1.0;
++    s.specular = 0.0;
++    s.material_u = 0.0;
++    vec3 to_light = (v.view * vec4(l.position.xyz, 1.0)).xyz - s.P;
++    s.N = to_light / max(length(to_light), 1.0e-6);
++    s.translucency = 0.0;
++    vec3 beam;
++    vec3 specular;
++    if (!EvaluateLight(l, v, s, false, frag, beam, specular)) return 1.0;
++    return min(65504.0, 1.0 + Luma709(max(beam, vec3(0.0))) / pass.f0.x);
++}
++
+ void main() {
+     ivec2 pixel = ivec2(gl_FragCoord.xy);
+     vec4 hdr = ImgFetch(IMG_HDR, pixel);
+-    float factor = 1.0;
+-    float depth = ImgFetch(IMG_DEPTH, pixel).x;
+-    if (depth > 0.0 && hdr.a < 1.0 && pass.ids.y != 0xFFFFFFFFu) {
+-        View v = frame.views[pass.ids.x];
+-        Light l = frame.lights[pass.ids.y];
+-        Surface s;
+-        s.P = ViewPosition(v, PixelNdc(v, gl_FragCoord.xy), depth);
+-        s.world = (v.inv_view * vec4(s.P, 1.0)).xyz;
+-        vec4 g_material = ImgFetch(IMG_MATERIAL, pixel);
+-        s.N = DecodeNormal(ImgFetch(IMG_NORMAL, pixel).xyz);
+-        s.roughness = g_material.x;
+-        s.specular = g_material.y;
+-        s.material_u = g_material.z;
+-        s.translucency = g_material.w;
+-        vec3 dh;
+-        vec3 sh;
+-        if (EvaluateLight(l, v, s, pass.ids.z != 0u, gl_FragCoord.xy, dh, sh)) {
+-            float whole = Luma709(max(ImgFetch(IMG_DIFFUSE, pixel).rgb, vec3(0.0)));
+-            float handy = clamp(Luma709(max(dh, vec3(0.0))), 0.0, whole);
+-            factor = (whole + pass.f0.x) / (whole - handy + pass.f0.x);
+-        }
+-    }
++    float factor = BeamFactor(pixel);
+     out_color = vec4(hdr.rgb / factor, hdr.a);
+     out_factor = vec4(factor, 0.0, 0.0, 0.0);
+ }
+diff --git a/shaders/upscale_resolve.frag b/shaders/upscale_resolve.frag
+index 296f8ef..69678ac 100644
+--- a/shaders/upscale_resolve.frag
++++ b/shaders/upscale_resolve.frag
+@@ -85,7 +85,7 @@ void main() {
+     if (pass.ids.z != 0u) {
+         vec4 reflection = Reflection(uv);
+         if (reflection.a > 0.0) {
+-            color = min(color, vec3(1.0)) * (1.0 - reflection.a) + reflection.rgb;
++            color = SrgbDecode(SrgbEncode(min(color, vec3(1.0))) * (1.0 - reflection.a) + reflection.rgb);
+         }
+     }
+     ivec2 size = ivec2(pass.f1.xy);
+diff --git a/shaders/vfx_particle.frag b/shaders/vfx_particle.frag
+index ad6e68d..8c07773 100644
+--- a/shaders/vfx_particle.frag
++++ b/shaders/vfx_particle.frag
+@@ -29,6 +29,13 @@ layout(location = 8) flat in vec3 in_tangent;
+ layout(location = 9) flat in vec3 in_bitangent;
+ layout(location = 10) flat in vec3 in_normal;
+ layout(location = 11) flat in vec4 in_rain_rotation;
++layout(location = 12) flat in vec4 in_light_position0;
++layout(location = 13) flat in vec4 in_light_position1;
++layout(location = 14) flat in vec4 in_light_position2;
++layout(location = 15) flat in vec4 in_light_color0;
++layout(location = 16) flat in vec4 in_light_color1;
++layout(location = 17) flat in vec4 in_light_color2;
++layout(location = 18) flat in vec4 in_light_factors;
+ 
+ layout(location = 0) out vec4 out_color;
+ 
+@@ -42,6 +49,7 @@ const uint kFlare = 64u;
+ const uint kLiquidHnm = 128u;
+ const uint kClip = 256u;
+ const uint kRain = 1024u;
++const uint kLit = 2048u;
+ const uint kNoTexture = 0xFFFFFFFFu;
+ 
+ const uint kBlendAlpha = 0u;
+@@ -59,6 +67,35 @@ vec3 LinearToSrgb(vec3 c) {
+     return mix(1.055 * pow(max(c, vec3(1e-5)), vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThanEqual(c, vec3(0.0031308)));
+ }
+ 
++vec3 LitTextureToLinear(vec3 c) {
++    vec3 linear = c / 12.92;
++    vec3 nonlinear = pow(max(vec3(1.0e-5), 0.94786733 * (vec3(0.055) + c)), vec3(2.4));
++    return mix(nonlinear, linear, lessThanEqual(c, vec3(0.03928)));
++}
++
++vec3 PointLight(vec4 position, vec4 color) {
++    if (dot(color.rgb, color.rgb) < 1.0e-12) {
++        return vec3(0.0);
++    }
++    vec3 delta = position.xyz - in_world;
++    float distance_to_light = max(length(delta), 0.01);
++    float distance_squared = distance_to_light * distance_to_light;
++    float attenuation = max(0.0, 1.0 / distance_squared - distance_squared * position.w);
++    return color.rgb * attenuation;
++}
++
++vec3 LiquidPointLight(vec4 position, vec4 color, vec3 n, float t) {
++    if (dot(color.rgb, color.rgb) < 1.0e-12) {
++        return vec3(0.0);
++    }
++    vec3 delta = position.xyz - in_world;
++    float distance_to_light = max(length(delta), 0.010002136);
++    float distance_squared = distance_to_light * distance_to_light;
++    float attenuation = clamp(1.0 / distance_squared - distance_squared * position.w, 0.0, 1.0);
++    float diffuse = (1.0 - t) * clamp((1.0 - t) * dot(n, delta / distance_to_light) + t, 0.0, 1.0);
++    return color.rgb * attenuation * diffuse;
++}
++
+ float LinearDepth(float d) {
+     return push.frame.y / max(d, 1e-7);
+ }
+@@ -67,6 +104,23 @@ vec3 ReflectionSample(uint slot, vec3 direction) {
+     return texture(PT_CUBE(slot), direction).rgb;
+ }
+ 
++vec4 LitSample(uint slot, vec2 uv, float computed_lod) {
++    if (any(lessThan(uv, vec2(-1.0e-4))) || any(greaterThan(uv, vec2(1.0001)))) {
++        return textureLod(PT_TEXTURE(slot), uv, computed_lod);
++    }
++    int level_count = max(textureQueryLevels(PT_TEXTURE(slot)), 1);
++    float lod = clamp(computed_lod, 0.0, float(level_count - 1));
++    int low_level = int(floor(lod));
++    int high_level = min(low_level + 1, level_count - 1);
++    vec2 low_size = vec2(textureSize(PT_TEXTURE(slot), low_level));
++    vec2 high_size = vec2(textureSize(PT_TEXTURE(slot), high_level));
++    vec2 low_uv = clamp(uv, 0.5 / low_size, 1.0 - 0.5 / low_size);
++    vec2 high_uv = clamp(uv, 0.5 / high_size, 1.0 - 0.5 / high_size);
++    vec4 low_sample = textureLod(PT_TEXTURE(slot), low_uv, float(low_level));
++    vec4 high_sample = textureLod(PT_TEXTURE(slot), high_uv, float(high_level));
++    return mix(low_sample, high_sample, fract(lod));
++}
++
+ float FoldScreen(float u) {
+     if (u >= 0.995) {
+         u = 0.995 - fract(u / 0.995) * 0.995;
+@@ -128,9 +182,12 @@ void main() {
+         base_uv = in_extra.xy + vec2(in_extra.w * centered.x - in_extra.z * centered.y,
+                                     in_extra.z * centered.x + in_extra.w * centered.y);
+     }
+-    vec4 tex = texture(PT_TEXTURE(in_info.x), base_uv);
++    float lit_lod = textureQueryLod(PT_TEXTURE(in_info.x), base_uv).y;
++    float lit_next_lod = textureQueryLod(PT_TEXTURE(in_info.x), in_uv.zw).y;
++    vec4 tex = (flags & kLit) != 0u ? LitSample(in_info.x, base_uv, lit_lod) : texture(PT_TEXTURE(in_info.x), base_uv);
+     if ((flags & kAnimeBlend) != 0u) {
+-        tex = mix(tex, texture(PT_TEXTURE(in_info.x), in_uv.zw), in_params.w);
++        vec4 next_tex = (flags & kLit) != 0u ? LitSample(in_info.x, in_uv.zw, lit_next_lod) : texture(PT_TEXTURE(in_info.x), in_uv.zw);
++        tex = mix(tex, next_tex, in_params.w);
+     }
+     vec3 rgb;
+     float alpha;
+@@ -154,6 +211,10 @@ void main() {
+         float ndv = dot(n, v);
+         float through = (1.0 - t) * clamp((1.0 - t) * ndv + t, 0.0, 1.0);
+         rgb = in_color.rgb * push.frame.x;
++        if (in_light_factors.w > 0.0) {
++            vec3 lights = LiquidPointLight(in_light_position0, in_light_color0, n, t) + LiquidPointLight(in_light_position1, in_light_color1, n, t);
++            rgb += vec3(unpackHalf2x16(in_info.w), in_extra.w) * lights * (in_light_factors.w * push.frame.x);
++        }
+         if (push.eye.w > 0.0) {
+             vec2 pixel = gl_FragCoord.xy - 0.00390625 - n.xy * (in_extra.y * push.eye.w);
+             vec2 uv = pixel * push.frame.zw;
+@@ -194,6 +255,12 @@ void main() {
+         rgb = SrgbToLinear(tex.rgb) * in_color.rgb;
+         alpha = tex.a * in_color.a;
+     }
++    if ((flags & kLit) != 0u) {
++        vec3 point_lights = PointLight(in_light_position0, in_light_color0) + PointLight(in_light_position1, in_light_color1) +
++                            PointLight(in_light_position2, in_light_color2);
++        vec3 illumination = in_light_factors.xyz + point_lights * in_light_factors.w;
++        rgb = LitTextureToLinear(tex.rgb) * in_color.rgb * illumination;
++    }
+     if ((flags & kExposure) != 0u) {
+         rgb *= push.frame.x;
+     }
+diff --git a/shaders/vfx_particle.vert b/shaders/vfx_particle.vert
+index ad12caa..40ee9d4 100644
+--- a/shaders/vfx_particle.vert
++++ b/shaders/vfx_particle.vert
+@@ -10,6 +10,9 @@ struct Quad {
+     vec4 extra;
+     uvec4 info;
+     vec4 rain_rotation;
++    vec4 light_position[3];
++    vec4 light_color[3];
++    vec4 light_factors;
+ };
+ 
+ layout(std430, set = 1, binding = 0) readonly buffer Quads {
+@@ -35,6 +38,13 @@ layout(location = 8) flat out vec3 out_tangent;
+ layout(location = 9) flat out vec3 out_bitangent;
+ layout(location = 10) flat out vec3 out_normal;
+ layout(location = 11) flat out vec4 out_rain_rotation;
++layout(location = 12) flat out vec4 out_light_position0;
++layout(location = 13) flat out vec4 out_light_position1;
++layout(location = 14) flat out vec4 out_light_position2;
++layout(location = 15) flat out vec4 out_light_color0;
++layout(location = 16) flat out vec4 out_light_color1;
++layout(location = 17) flat out vec4 out_light_color2;
++layout(location = 18) flat out vec4 out_light_factors;
+ 
+ const uint kCorners[6] = uint[6](0u, 2u, 1u, 1u, 2u, 3u);
+ const uint kLiquid = 8u;
+@@ -57,6 +67,13 @@ void main() {
+     out_info = q.info;
+     out_extra = q.extra;
+     out_rain_rotation = q.rain_rotation;
++    out_light_position0 = q.light_position[0];
++    out_light_position1 = q.light_position[1];
++    out_light_position2 = q.light_position[2];
++    out_light_color0 = q.light_color[0];
++    out_light_color1 = q.light_color[1];
++    out_light_color2 = q.light_color[2];
++    out_light_factors = q.light_factors;
+     vec4 p = q.corner[corner];
+     out_world = p.xyz;
+     out_tangent = vec3(1.0, 0.0, 0.0);
+diff --git a/shaders/vpktaa.frag b/shaders/vpktaa.frag
+index fda2800..6a7f728 100644
+--- a/shaders/vpktaa.frag
++++ b/shaders/vpktaa.frag
+@@ -335,7 +335,7 @@ void main() {
+     if (pass.ids.z != 0u) {
+         vec4 reflection = Reflection(uv);
+         if (reflection.a > 0.0) {
+-            color = min(color, vec3(1.0)) * (1.0 - reflection.a) + reflection.rgb;
++            color = SrgbDecode(SrgbEncode(min(color, vec3(1.0))) * (1.0 - reflection.a) + reflection.rgb);
+         }
+     }
+     out_color = vec4(color, own_alpha);
 diff --git a/shaders/vr_hdr.glsl b/shaders/vr_hdr.glsl
 new file mode 100644
 index 0000000..27370a8
@@ -26519,7 +26845,7 @@ index 588808d..2852ec7 100644
      options.invert_y = vertical_;
      options.invert_x = horizontal_;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 1868d99..74ecadf 100644
+index 1868d99..4042a6c 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
 @@ -94,11 +94,55 @@ constexpr Entry kTexts[] = {
@@ -27136,6 +27462,24 @@ index 1868d99..74ecadf 100644
  };
  
  }
+@@ -500,6 +911,17 @@ std::string PcNoteText(std::string_view note, int language) {
+ }
+ 
+ std::string_view PcText(std::string_view key, int language) {
++#if PT_VISIONOS
++    /* The headset's own naming wins over the translated PC tables (VISION PRO, not "PC settings"): the first kTexts match is ours. */
++    if (key == "pc_title" || key == "pc_entry" || key == "pc_note_quit" || key == "pc_vr") {
++        for (const Entry& e : kTexts) {
++            if (e.key == key) {
++                const std::string_view text = language > 0 && language < kLanguages ? e.text[language] : std::string_view();
++                return text.empty() ? e.text[0] : text;
++            }
++        }
++    }
++#endif
+     if (language >= 1) {
+         const auto text = localized::Menu(key, language);
+         if (!text.empty()) return text;
 diff --git a/src/game/ui/pc_settings.h b/src/game/ui/pc_settings.h
 index 43f59a2..dfca32a 100644
 --- a/src/game/ui/pc_settings.h
@@ -27560,10 +27904,20 @@ index b45fa4d..bd33cc5 100644
      };
  
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index 38782fe..cff8ba9 100644
+index 38782fe..f2b7efc 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
-@@ -169,6 +169,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -63,7 +63,8 @@ bool VrPlay::ScreenMode(Game& game) {
+     constexpr bool immersive = false;
+ #endif
+     const bool peephole = game.Nazo().IsPeepholeTheaterActive();
+-    const bool screen = (demo && !immersive) || peephole;
++    // The museum's theater (a sandbox with its own camera) is shown on the virtual screen like the peephole.
++    const bool screen = (demo && !immersive) || peephole || game.ArchiveTheaterActive();
+     const bool cutscene = demo && !screen;
+     if (screen != screen_ || cutscene != cutscene_) {
+         LogInfo("vr: {}", screen ? "virtual screen (a camera the game frames)" : cutscene ? "cutscene in stereo from the scene's camera" : "stereo view");
+@@ -169,6 +170,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          state.pressed |= kPadGouge;
      }
      if (pressed & kRawStart) state.pause = true;
@@ -27589,7 +27943,7 @@ index 2bcbcd6..b936bae 100644
      uint64_t frames_ = 0;
  };
 diff --git a/src/main.cpp b/src/main.cpp
-index 6dd62ee..ba8f670 100644
+index 6dd62ee..cb7ec76 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -98,6 +98,13 @@
@@ -27698,3 +28052,27 @@ index 6dd62ee..ba8f670 100644
              photo_status_time = std::max(0.0f, photo_status_time - dt);
              if (photo_status_time <= 0.0f) photo_status.clear();
              photo_view = photo_panel.View(language, photo_status);
+@@ -4456,10 +4480,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
+             if (screen && vr->PrepareScreen(screen_target)) {
+                 app.renderer.SetRenderExtent(pt::Renderer::kHudExtent);
+                 if (begin(true)) {
+-                    scene_builder.Build(game, camera, scene_dt, lighting, light_blend);
+-                    last_scene_time = game.Time();
++                    // (The museum's theater draws its own sandbox with its own camera: view, not game.)
++                    view_builder.Build(view, camera, theater ? static_cast<float>(dt) : scene_dt, lighting, light_blend);
++                    if (!theater) last_scene_time = game.Time();
+                     pt::vfx::SetFlareStereo(0.0f);
+-                    vfx_scene.Prepare(game, camera, 16.0f / 9.0f, lighting, vfx_pass, blend);
++                    view_vfx.Prepare(view, camera, 16.0f / 9.0f, lighting, vfx_pass, blend);
+                     app.scene.SetVrEye(-1);
+                     app.scene.Render(camera, draw_items, lighting, dt);
+                     ui.SetVrHud(false);
+@@ -4468,7 +4493,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+                     xr_frame.overlay_on_frame = true;
+                     app.renderer.SetXrFrame(xr_frame);
+                     app.renderer.EndFrame(app.window != nullptr);
+-                    take_reflection_readback(game);
++                    take_reflection_readback(view);
+                     save_shots("");
+                 }
+                 vr->FinishScreen();
