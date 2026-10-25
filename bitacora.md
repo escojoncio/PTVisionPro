@@ -8,6 +8,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 - 2026-10-25: `.claude/agents/coder.md`: maxTurns → 70
 - 2026-10-25: `CLAUDE.MD` línea 1: regla de cumplir siempre el rol asignado.
+- 2026-10-25: `CLAUDE.MD` (Sub-agent setup): coder maxTurns 40 → 70.
 - Build 57 = rama `pt-1.0.5` (6632734: juego pt-pc 1.0.5 + arreglos 1.0.6), no `main`. Log pt (41): **regresión visual**.
 - Build 53 (987694a): icono `AppIcon.solidimagestack`, arte del launcher (`LauncherBackground.swift`, `HomeView`). Solo Swift.
 - Build 52 (112839b): `lighting.glsl`, `light_main.glsl`, `light_all.frag`, `upscale_demod.frag` devueltos a la 50;
