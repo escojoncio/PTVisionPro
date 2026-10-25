@@ -5094,10 +5094,10 @@ index 4bb6e4b..82f38e7 100644
      static constexpr int kPauseMenuPriority = 171;
      static constexpr int kLetterboxPriority = 170;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 42d8b01..752d3d2 100644
+index 42d8b01..1868d99 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -16,6 +16,79 @@ struct Entry {
+@@ -16,6 +16,81 @@ struct Entry {
  };
  
  constexpr Entry kTexts[] = {
@@ -5156,6 +5156,8 @@ index 42d8b01..752d3d2 100644
 +    {"pc_note_vp_center_res", {"Resolution inside the sharp zone, relative to the image size. 100% is the most the image size allows. The periphery does not change it.", "", "", "Resolución dentro de la zona nítida, respecto al tamaño de imagen. 100 % es la máxima que permite el tamaño de imagen. La periferia no la cambia.", "", "", ""}},
 +    {"pc_vp_center", {"Sharp zone width", "", "", "Ancho de la zona nítida", "", "", ""}},
 +    {"pc_note_vp_center", {"Diameter in degrees of the sharp circle in the middle of the view. 40° is about what you look at straight ahead. Wider costs much more.", "", "", "Diámetro en grados del círculo nítido en el centro de la vista. 40° es más o menos lo que miras de frente. Más ancho cuesta mucho más.", "", "", ""}},
++    {"pc_vp_border", {"Show the sharp zone's edge", "", "", "Mostrar borde de la zona nítida", "", "", ""}},
++    {"pc_note_vp_border", {"A red ring where the sharp zone ends, to set its width and height. For testing; not kept.", "", "", "Un aro rojo donde acaba la zona nítida, para ajustar su ancho y su altura. Solo para pruebas; no se guarda.", "", "", ""}},
 +    {"pc_vp_dynres", {"Dynamic resolution", "", "", "Resolución dinámica", "", "", ""}},
 +    {"pc_vp_hdr", {"HDR (peak brightness)", "", "", "HDR (brillo máximo)", "", "", ""}},
 +    {"pc_vp_hdr_soft", {"1.4x", "", "", "1,4x", "", "", ""}},
@@ -5783,7 +5785,7 @@ index d1485b2..2bcbcd6 100644
      bool snap_armed_ = true;
      bool settings_previous_ = false;
 diff --git a/src/main.cpp b/src/main.cpp
-index d629ab3..0095855 100644
+index d629ab3..6dd62ee 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -95,11 +95,29 @@
@@ -5836,7 +5838,7 @@ index d629ab3..0095855 100644
              if (app_.options.release_locks) {
                  auto lock = Row(kLoopLock, "pc_loop_lock", {"pc_extras_start"}, 0, "pc_note_loop_lock");
                  lock.action = true;
-@@ -1611,9 +1633,75 @@ public:
+@@ -1611,9 +1633,76 @@ public:
          if (page_ == kVrPage) {
              const pt::AppSettings::Vr& v = app_.settings.vr;
              pt::game::PcSettingSection vr{"pc_vr", 0, {}};
@@ -5891,6 +5893,7 @@ index d629ab3..0095855 100644
 +            for (int i = 0; i <= 8; ++i) periphery.values.push_back(std::format("{}%", 10 + 5 * i));
 +            periphery.wrap = false;
 +            foveation.rows.push_back(std::move(periphery));
++            foveation.rows.push_back(Row(kVpBorder, "pc_vp_border", OffOn(), h.show_border ? 1 : 0, "pc_note_vp_border"));
 +            // Shown VPKTAA, FXAA; kept as aa 5, 0. Then VPKTAA's own two settings.
 +            foveation.rows.push_back(Row(kVpAa, "pc_vp_aa", {"pc_vp_aa_vpktaa", "pc_vp_aa_fxaa"}, VpAaToMenu(h.aa), "pc_note_vp_aa"));
 +            pt::game::PcSettingRow taa_res = Row(kVpTaaRes, "pc_vp_taa_res", {}, VpTaaResToMenu(h.taa_res), "pc_note_vp_taa_res");
@@ -5912,7 +5915,7 @@ index d629ab3..0095855 100644
              return {std::move(vr)};
          }
          if (page_ == kGraphicsPage) return GraphicsSections();
-@@ -1629,6 +1717,9 @@ public:
+@@ -1629,6 +1718,9 @@ public:
              test.rows.push_back(Row(kMicMonitor, "pc_mic_monitor", OffOn(), app_.microphone_monitor ? 1 : 0, "pc_mic_monitor_note"));
              return {std::move(test)};
          }
@@ -5922,7 +5925,7 @@ index d629ab3..0095855 100644
          const pt::AppSettings& s = app_.settings;
          std::vector<pt::game::PcSettingSection> out;
          pt::game::PcSettingSection display{"pc_section_display", 0, {}};
-@@ -1863,12 +1954,134 @@ public:
+@@ -1863,12 +1955,138 @@ public:
              s.vr.enabled = value == 1;
              pt::LogInfo("vr: {} at the next start (PC settings)", s.vr.enabled ? "on" : "off");
              break;
@@ -6013,6 +6016,10 @@ index d629ab3..0095855 100644
 +            pt::visionos::SettingChanged("center_up", std::to_string(pt::visionos::Headset().center_up));
 +            HeadsetCustom();
 +            return;
++        case kVpBorder:
++            pt::visionos::Headset().show_border = value == 1;
++            pt::visionos::SettingChanged("show_border", value == 1 ? "1" : "0");
++            return;
 +        case kVpCenterRes:
 +            pt::visionos::Headset().center_res = 50 + 5 * std::clamp(value, 0, 10);
 +            pt::visionos::SettingChanged("center_res", std::to_string(pt::visionos::Headset().center_res));
@@ -6057,7 +6064,7 @@ index d629ab3..0095855 100644
          case kFrameLimit:
              if (!app_.options.fps_limit_override) s.display.fps_limit = value == 1 ? 60 : 30;
              break;
-@@ -1939,7 +2152,13 @@ public:
+@@ -1939,7 +2157,13 @@ public:
              std::string reason;
              pt::ApplyGraphicsPreset(s,static_cast<pt::GraphicsPreset>(std::clamp(value,0,4)),app_.scene.RayTracingSupported(reason));
              app_.textures.SetAnisotropy(s.graphics.anisotropy);
@@ -6071,7 +6078,7 @@ index d629ab3..0095855 100644
              break;
          }
          case kShadowQuality:
-@@ -1995,6 +2214,11 @@ public:
+@@ -1995,6 +2219,11 @@ public:
              return;
          }
          ApplyGraphicsSettings(app_);
@@ -6083,7 +6090,7 @@ index d629ab3..0095855 100644
          Save();
      }
  
-@@ -2197,6 +2421,9 @@ public:
+@@ -2197,6 +2426,9 @@ public:
          if (id == kGraphics) {
              page_ = kGraphicsPage;
          }
@@ -6093,17 +6100,17 @@ index d629ab3..0095855 100644
          if (id == kMicrophoneTest) {
              page_ = kMicrophonePage;
              app_.microphone_test = true;
-@@ -2285,6 +2512,9 @@ private:
+@@ -2285,6 +2517,9 @@ private:
          kArchive, kArchiveLock,
          kVr, kVrMode, kVrFlashlight, kVrTurn,
          kFrameLimit,
 +        kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpFov, kVpRecenter,
-+        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
++        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
 +        kVpSubtitleSize, kVpSubtitleHeight, kVpTiledLights,
          kLoopFirst = 1000,
          kRunSplitFirst = 3000,
          kModFirst = 2000,
-@@ -2572,6 +2802,9 @@ private:
+@@ -2572,6 +2807,9 @@ private:
      int page_ = kMainPage;
      static constexpr float kMouseSteps[] = {0.25f, 0.35f, 0.5f, 0.7f, 1.0f, 1.4f, 2.0f, 2.8f, 4.0f, 5.0f};
      static constexpr float kDeadZoneSteps[] = {0.0f, 0.05f, 26.0f / 255.0f, 0.15f, 0.2f, 0.25f, 0.3f};
@@ -6113,7 +6120,7 @@ index d629ab3..0095855 100644
  
      static pt::game::PcSettingRow Row(int id, std::string label, std::vector<std::string> values, int value, std::string note) {
          pt::game::PcSettingRow row;
-@@ -2642,6 +2875,85 @@ private:
+@@ -2642,6 +2880,85 @@ private:
          return Row(kEnhancedTextures,"pc_enhanced_textures",std::move(values),app_.settings.graphics.enhanced_textures?1:0,note);
      }
  
@@ -6199,7 +6206,7 @@ index d629ab3..0095855 100644
      std::vector<pt::game::PcSettingSection> GraphicsSections() const {
          const auto& s=app_.settings;
          std::string reason;
-@@ -2690,7 +3002,9 @@ private:
+@@ -2690,7 +3007,9 @@ private:
      std::vector<pt::game::PcSettingSection> TextureSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection textures{"pc_section_textures",0,{}};
@@ -6209,7 +6216,7 @@ index d629ab3..0095855 100644
          auto anisotropy=Row(kAnisotropy,"pc_anisotropy",{"pc_off","2x","4x","8x","16x"},g.anisotropy>=16?4:g.anisotropy>=8?3:g.anisotropy>=4?2:g.anisotropy>=2?1:0,"pc_note_anisotropy");
          anisotropy.wrap=false;textures.rows.push_back(std::move(anisotropy));
          textures.rows.push_back(Row(kTextureDetail,"pc_texture_detail",{"pc_detail_reduced","pc_preset_original","pc_detail_fine"},g.texture_detail,"pc_note_texture_detail"));
-@@ -2724,6 +3038,14 @@ private:
+@@ -2724,6 +3043,14 @@ private:
      std::vector<pt::game::PcSettingSection> EffectSections() const {
          const auto& g=app_.settings.graphics;
          pt::game::PcSettingSection effects{"pc_graphics_effects",0,{}};
@@ -6224,7 +6231,7 @@ index d629ab3..0095855 100644
          effects.rows.push_back(Row(kDepthOfField,"pc_dof",OffOn(),g.depth_of_field?1:0,"pc_note_dof"));
          effects.rows.push_back(Row(kMotionBlur,"pc_motion_blur",OffOn(),g.motion_blur?1:0,"pc_note_motion_blur"));
          effects.rows.push_back(Row(kBloom,"pc_bloom",OffOn(),g.bloom?1:0,"pc_note_bloom"));
-@@ -3095,7 +3417,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3095,7 +3422,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
      game.SetThirdPerson(app.settings.camera.third_person || options.third_person);
      pt::game::GameSound sound(game);
      std::vector<float> captured;
@@ -6234,7 +6241,7 @@ index d629ab3..0095855 100644
          sound.System().SetMasterVolume(app.settings.audio.volume);
          if (options.seed) {
              sound.System().SetRandomSeed(options.seed);
-@@ -3139,14 +3462,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3139,14 +3467,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
      const bool pads = app.window || options.virtual_pads;
      if (pads) {
          input.Init();
@@ -6251,7 +6258,7 @@ index d629ab3..0095855 100644
      script.SetPads(options.virtual_pads ? &virtual_pads : nullptr, &input);
      std::vector<float> offline_audio;
      double audio_device_time = 0.0;
-@@ -3207,7 +3530,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3207,7 +3535,9 @@ int RunGame(App& app, pt::Vfs& vfs) {
      float accumulator = 0.0f;
      pt::Camera tick_camera_from = game.ViewCamera();
      pt::Camera motion_camera_from = tick_camera_from;
@@ -6262,7 +6269,7 @@ index d629ab3..0095855 100644
      TickState tick_state;
      std::vector<glm::mat4> blended_skins;
      static const bool render_trace = std::getenv("PT_RENDER_TRACE") != nullptr;
-@@ -3434,8 +3759,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3434,8 +3764,18 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  visible = false;
                  SDL_Delay(10);
              }
@@ -6282,7 +6289,7 @@ index d629ab3..0095855 100644
          const std::optional<bool> forced_focus = script.ForcedFocus(frame);
          if (app.window || forced_focus || vr) {
              const bool focused = forced_focus ? *forced_focus
-@@ -3487,6 +3822,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3487,6 +3827,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
          float dt = options.display_rate > 0.0f ? 1.0f / options.display_rate : 1.0f / options.tick_rate;
@@ -6296,7 +6303,7 @@ index d629ab3..0095855 100644
          if (app.window) {
              const uint64_t now = SDL_GetTicksNS();
              dt = std::clamp(static_cast<float>(now - last_ticks) * 1e-9f, 0.0001f, 0.1f);
-@@ -3554,7 +3896,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3554,7 +3901,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (polled.pointer_valid) {
              pending_input.pointer = polled.pointer;
              pending_input.pointer_valid = true;
@@ -6305,7 +6312,7 @@ index d629ab3..0095855 100644
              pending_input.pointer_valid = pt::game::UiCanvas::MapDisplayPoint(polled.pointer,
                  {static_cast<uint32_t>(touch_pixels_w), static_cast<uint32_t>(touch_pixels_h)}, app.renderer.RenderExtent(), pending_input.pointer);
              if (!pending_input.pointer_valid) pending_input.click = pending_input.right_click = false;
-@@ -3876,8 +4218,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3876,8 +4223,14 @@ int RunGame(App& app, pt::Vfs& vfs) {
              previous_microphone_test = app.microphone_test;
          }
          const bool voice_file = !voice_input.empty();
@@ -6322,7 +6329,7 @@ index d629ab3..0095855 100644
              if (!recognizer) {
                  recognizer = std::make_unique<pt::VoiceRecognizer>();
                  recognizer->Init(pt::ResourceDir("voice", PT_VOICE_MODEL_DIR), "jack");
-@@ -4105,6 +4453,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4105,6 +4458,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  if (begin(true)) {
                      scene_builder.Build(game, camera, scene_dt, lighting, light_blend);
                      last_scene_time = game.Time();
@@ -6330,7 +6337,7 @@ index d629ab3..0095855 100644
                      vfx_scene.Prepare(game, camera, 16.0f / 9.0f, lighting, vfx_pass, blend);
                      app.scene.SetVrEye(-1);
                      app.scene.Render(camera, draw_items, lighting, dt);
-@@ -4123,23 +4472,148 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4123,23 +4477,148 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.SetRenderExtent(stereo.render);
                  scene_builder.Build(game, stereo.head, scene_dt, lighting, light_blend);
                  last_scene_time = game.Time();
@@ -6485,7 +6492,7 @@ index d629ab3..0095855 100644
                  ui.SetVrHud(false);
                  take_reflection_readback(game);
                  vr->FinishStereo(stereo);
-@@ -4166,6 +4640,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4166,6 +4645,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  view_builder.Build(view, camera, 0.0f, lighting, light_blend);
                  const VkExtent2D warm_extent = app.renderer.RenderExtent();
                  const float warm_aspect = static_cast<float>(warm_extent.width) / static_cast<float>(std::max(1u, warm_extent.height));
@@ -6493,7 +6500,7 @@ index d629ab3..0095855 100644
                  view_vfx.Prepare(view, camera, warm_aspect, lighting, vfx_pass, blend);
                  app.scene.SetMotionReference(camera, 1.0f / options.tick_rate, i > 0 || last_render_frame + 1 == frame);
                  app.scene.Render(camera, draw_items, lighting, dt);
-@@ -4191,6 +4666,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4191,6 +4671,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
              const auto part_t2 = std::chrono::steady_clock::now();
              const VkExtent2D vfx_extent = app.renderer.RenderExtent();
@@ -6501,7 +6508,7 @@ index d629ab3..0095855 100644
              view_vfx.Prepare(view, camera, static_cast<float>(vfx_extent.width) / static_cast<float>(std::max(1u, vfx_extent.height)), lighting,
                               vfx_pass, blend);
              const auto part_t3 = std::chrono::steady_clock::now();
-@@ -4568,6 +5044,16 @@ int main(int argc, char** argv) {
+@@ -4568,6 +5049,16 @@ int main(int argc, char** argv) {
          pt::LogError("SDL_Init: {}", SDL_GetError());
          return 1;
      }
@@ -6518,7 +6525,7 @@ index d629ab3..0095855 100644
      {
          const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
          if (!documents) {
-@@ -4604,6 +5090,7 @@ int main(int argc, char** argv) {
+@@ -4604,6 +5095,7 @@ int main(int argc, char** argv) {
          app.options.game_dir = verified.directory;
          app.options.game_dir_given = true;
      }

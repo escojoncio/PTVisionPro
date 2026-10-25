@@ -23,7 +23,7 @@
 - **Escenas** inmersivas desde la cámara de la escena (`cutscene_`), mirilla en pantalla virtual.
 - **Ajustes y menús**: página VISION PRO (preajuste, 90 reales / 45 reproyectados a 90, profundidad, imagen, campo de visión,
   resolución dinámica, HDR, enlaces); página VR (giro, recentrar, subtítulos | sección "Foveado y nitidez": foveado Apple,
-  foveado del juego, ancho, altura, nitidez zona, periferia, AA). Textos en `pc_settings.cpp`. Sincronía menú →
+  foveado del juego, ancho, altura, nitidez zona, periferia, borde, AA). Textos en `pc_settings.cpp`. Sincronía menú →
   `SettingChanged` → `GameRunner.settingFromGame` → `PTSettings` (UserDefaults). Presets duplicados en `kPresets` (.mm) y
   `PTSettings.defaults(for:)`: mantener iguales (incluyen foveado). M5 solo seleccionable en un M5.
   Las filas del foveado llaman `HeadsetCustom()`.
