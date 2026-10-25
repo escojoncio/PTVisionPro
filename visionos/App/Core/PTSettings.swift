@@ -69,6 +69,8 @@ struct PTSettings: Codable, Equatable {
     var sceneDepth = true
     /// The deferred lights in one tiled full-screen pass instead of one volume per light.
     var tiledLights = true
+    /// Specular antialiasing in the G-buffer: less sparkle on distant bumpy surfaces.
+    var specularAA = true
     /// The game's own foveation: a wide low-density view of each eye and its centre on top.
     var gameFoveation = true
     /// Density of everything outside the sharp zone, percent of the image size (10 to 50).
@@ -305,6 +307,7 @@ struct PTSettings: Codable, Equatable {
         case taaPeriphery = "vpktaaPeriphery"
         case sceneDepth, subtitleSize, subtitleHeight
         case tiledLights = "tiledLights"
+        case specularAA = "specularAA"
         case turnMode, snapDegrees, smoothSpeed, flashlightHand, showHands, pauseWhenAway, immersiveCutscenes
         case voiceRecognition, language, gameLanguage, showPerformanceOverlay, gamePath
     }
@@ -334,6 +337,7 @@ struct PTSettings: Codable, Equatable {
         taaPeriphery = (try? c.decodeIfPresent(Bool.self, forKey: .taaPeriphery)) ?? base.taaPeriphery
         sceneDepth = (try? c.decodeIfPresent(Bool.self, forKey: .sceneDepth)) ?? base.sceneDepth
         tiledLights = (try? c.decodeIfPresent(Bool.self, forKey: .tiledLights)) ?? base.tiledLights
+        specularAA = (try? c.decodeIfPresent(Bool.self, forKey: .specularAA)) ?? base.specularAA
         subtitleSize = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleSize)) ?? base.subtitleSize, 100), 250)
         subtitleHeight = min(max((try? c.decodeIfPresent(Int.self, forKey: .subtitleHeight)) ?? base.subtitleHeight, 0), 40)
         gameFoveation = (try? c.decodeIfPresent(Bool.self, forKey: .gameFoveation)) ?? base.gameFoveation
@@ -413,6 +417,7 @@ struct PTSettings: Codable, Equatable {
             "PT_VP_TAA_PERIPHERY=\(flag(taaPeriphery))",
             "PT_VP_SCENE_DEPTH=\(flag(sceneDepth))",
             "PT_VP_TILED_LIGHTS=\(flag(tiledLights))",
+            "PT_VP_SPECULAR_AA=\(flag(specularAA))",
             "PT_VP_SUBTITLE_SIZE=\(subtitleSize)",
             "PT_VP_SUBTITLE_HEIGHT=\(subtitleHeight)",
             "PT_VP_GAME_FOVEATION=\(flag(gameFoveation))",

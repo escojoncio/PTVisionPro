@@ -6,6 +6,11 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Último hecho
 
+- Build 73 (rama `pt-1.0.5`): AA especular en `gbuffer.frag` (kernel = min(0,25·(|dn/dx|²+|dn/dy|²), 0,18) sobre la normal
+  normalizada, r' = (r⁴+kernel)^¼; derivadas válidas tras `discard` porque Apple compila con vulkan1.3 = demote), ajuste
+  `specular_aa` (fila `kVpSpecularAa`, `Toggles::specular_aa`, bit 0x100 de `ids.z` del gbuffer, `PT_VP_SPECULAR_AA`,
+  `PTSettings.specularAA`); `vpktaa.frag` `SIGMA_EDGE_STILL 1.15` (borde quieto). Jitter previo verificado sin jitter.
+
 - Build 72 (rama `pt-1.0.5`): pantalla de crash falsa a vista completa por disparador explícito (no estaba invertida:
   confirmado por el usuario); botones del mando real en avisos del museo; código de mirada eliminado. Ver `notas/pt-1.0.5.md`.
 
@@ -35,9 +40,8 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 1. Log build 72: crash a vista completa (`ui: full-view overlay`), botones del museo, escena final (`vr: stereo frame:`,
    aún sin reproducir en un log).
-2. Usuario: aliasing de lejos peor que al estrenar el VPKTAA (build 50). Propuesto interruptor VPKTAA original(50)/actual
-   (diferencias: pesos separables, más cercano por ejes, disoclusión de la 51; post fusionado; mezcla sRGB de reflexiones 1.0.5).
-   Pendiente de su sí.
+2. Nitidez (usuario no quiere el VPKTAA de la 50): log build 73 con AA especular on/off. Pendiente de su sí: periferia sin SSAO
+   + más resolución si los fps aguantan.
 3. Subtítulos con el HUD completo escalan con él (misma textura); sacarlos a otra capa si molesta.
 4. Iconos de botón reales (`prompt_hint` de 1.0.5 no fusionado); ahora nombres de texto.
 5. Otros idiomas caen al inglés en claves del visor; PC aún en `pc_note_prompt_style`, `pc_note_display_mode`, `pc_mouse`.
@@ -53,6 +57,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 - Arquitectura (Compositor Services + MoltenVK, misma cola Metal): ver `notas/arquitectura.md`. No cambiar sin motivo.
 - Mirada: visionOS no la da a apps Metal (foveado dinámico oficial solo en RealityKit o streaming con entitlement).
   El mapa de foveado del drawable es estático (medido, build 71): descartado definitivamente.
+- Anisotropía 8× en el preset M2 (decisión del usuario: no sobran frames).
 - Presets duplicados en `kPresets` (.mm) y `PTSettings.defaults(for:)`: mantener iguales.
 
 ## Ficheros en juego

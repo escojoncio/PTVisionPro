@@ -2489,6 +2489,7 @@ void ApplySettings(AppSettings& s) {
     h.subtitle_height = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_HEIGHT", 15.0f)), 0, 40);
     h.scene_depth = Flag("PT_VP_SCENE_DEPTH", true);
     h.tiled_lights = Flag("PT_VP_TILED_LIGHTS", true);
+    h.specular_aa = Flag("PT_VP_SPECULAR_AA", true);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 20.0f)), 10, 50);
     h.center_deg = std::clamp(static_cast<int>(Number("PT_VP_CENTER_DEG", 40.0f)), 20, 70);

@@ -76,3 +76,6 @@
   LB/RB/LT/RT, Nintendo B/A/Y/X/+/L/R/ZL/ZR; español Equis/Círculo/Cuadrado/Triángulo. Caché (clave, idioma, estilo).
   Aviso del teatro (`set_theater_hint`) se recalcula si cambian estilo o idioma.
 - Mirada eliminada (mapa de foveado estático, medido build 71): sin `GazeInset`, `DenseCentre`, `gaze_inset`, `FoveationDiag`.
+- Build 73: AA especular (`gbuffer.frag`, ajuste `specular_aa`, ver bitácora); `SIGMA_EDGE_STILL`. Auditoría VPKTAA: historial
+  Catmull-Rom, recorte YCoCg, mip bias `-0,5+log2(1/ratio)` (+1,0 con texture_detail 0), Halton(2,3) en px de render,
+  `previous_view_projection_` sin jitter; preset M2 = texture_detail 1, anisotropía 8.

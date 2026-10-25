@@ -179,6 +179,7 @@ final class GameRunner: @unchecked Sendable {
         case "taa_sharpness": s.taaSharpness = PTSettings.sanitizedTaaSharpness(Int(value) ?? s.taaSharpness)
         case "scene_depth": s.sceneDepth = flag
         case "tiled_lights": s.tiledLights = flag
+        case "specular_aa": s.specularAA = flag
         case "subtitle_size": s.subtitleSize = min(max(Int(value) ?? s.subtitleSize, 100), 250)
         case "subtitle_height": s.subtitleHeight = min(max(Int(value) ?? s.subtitleHeight, 0), 40)
         case "fov": s.fov = Int(value) ?? s.fov

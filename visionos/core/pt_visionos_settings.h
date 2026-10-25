@@ -53,6 +53,9 @@ struct HeadsetSettings {
     // The deferred lights in one tiled full-screen pass (each pixel only the lights touching its
     // tile) instead of one volume per light. Not part of a preset.
     bool tiled_lights = true;
+    // Specular antialiasing in the G-buffer (roughness widened where the normal changes within a
+    // pixel: less sparkle on distant bumpy surfaces). Not part of a preset.
+    bool specular_aa = true;
     // Dynamic resolution: the eyes drawn smaller while the GPU cannot keep the frame rate.
     bool dynamic_resolution = false;
     // The headset is an M5 (its preset is offered only then).

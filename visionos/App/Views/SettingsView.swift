@@ -203,6 +203,7 @@ struct SettingsView: View {
             .disabled(model.settings.aa != 5)
             Toggle(L("VPKTAA también en la periferia", "VPKTAA also in the periphery"), isOn: bool(\.taaPeriphery))
                 .disabled(model.settings.aa != 5)
+            Toggle(L("AA especular", "Specular AA"), isOn: bool(\.specularAA))
         } header: {
             Text(L("Foveado del juego", "Game foveation"))
         } footer: {
