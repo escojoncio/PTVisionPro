@@ -6,6 +6,11 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Último hecho
 
+- Preset M2: nitidez (RCAS) 100 → 70 en `kPresets` (`xr_host_visionos.mm:2353`) y `PTSettings.defaults(for:)`
+  (`PTSettings.swift:133`). `PTSettings.load()` reaplica el preset al arrancar: el M2 guardado pasa a 70. Sin build.
+- Log pt (5) = build 74 (RCAS + AA especular): sin cierres. RCAS ~0,2 ms/vista nítida; AA especular sin coste
+  visible; escala 0,75 → 30 fps, 1,00 → 20 fps; VPKTAA 85–100 % → 41–44 fps; térmico serious a 763 s (tras pruebas pesadas).
+
 - Commiteado SIN build (usuario pidió no lanzar; run 73 cancelado): RCAS (`shaders/vpkrcas.frag`, FSR1, límite 0,1875,
   proxy HDR p=sqrt(x/(1+x)), clamp 0,99999) tras VPKTAA en vistas nítidas: VPKTAA escribe `upscaled_` (slot 43), RCAS escribe
   `post_hdr_`; historial sin afilar; afilado interno de `vpktaa.frag` eliminado; deslizador nitidez → stops=(1-s)·2
@@ -37,15 +42,15 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 - Escena final pixelada: causa NO encontrada (no hay condición que salte el inset). Pendiente de `vr: stereo frame:`.
 - `museum: thumbnail capture could not start: Setting the working directory is not supported` (warn, sin investigar).
 - `ui: option animation UI_sys_opt_setin_s missing` (warn). HDR 1.0.5 sin verificar.
-- Preset M2 = ajustes del usuario: imagen 50 %, centro 55° al 100 %, altura -10°, periferia 10 %, VPKTAA 80 %, nitidez 100,
-  VPKTAA en periferia, sombras altas, SSAO, bloom, reflejos, anisotrópico 8x, 45 fps, subtítulos 15 %.
+- Preset M2 = ajustes del usuario: imagen 50 %, centro 55° al 100 %, altura -10°, periferia 10 %, VPKTAA 80 %, nitidez 70,
+  AA especular, VPKTAA en periferia, sombras altas, SSAO, bloom, reflejos, anisotrópico 8x, 45 fps, subtítulos 15 %.
 - Rendimiento build 69 (pasillo): 45 fps, GPU 4 vistas ~17,9 ms + composición 1,6 ms, térmico fair.
 
 ## Pendiente (en orden)
 
 1. Log build 72: crash a vista completa (`ui: full-view overlay`), botones del museo, escena final (`vr: stereo frame:`,
    aún sin reproducir en un log).
-2. Nitidez: próxima build = AA especular + RCAS; medir `rcas` y probar nitidez 50–80 %. Límite real del centro = salida
+2. Nitidez: probar RCAS 70 en la próxima build. Límite real del centro = salida
    862 px para 55° (~15,7 px/°, visor ~34): subir % VPKTAA no se nota. Opciones: círculo menor y más denso; anillo
    intermedio (6 vistas, `vr_last_camera_[4]` etc. a 6). Usuario no convencido aún.
 3. Subtítulos con el HUD completo escalan con él (misma textura); sacarlos a otra capa si molesta.

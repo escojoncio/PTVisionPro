@@ -2349,8 +2349,8 @@ struct Preset {
 };
 constexpr Preset kPresets[2] = {
     // Vision Pro M2: the tester's settings (log pt (37), build 50): shadows as on PS4, a 55 degree
-    // sharp circle rebuilt by VPKTAA from 80 % at full sharpness, the periphery steadied too.
-    {0.50f, 3, true, true, true, 45, 8, 55, -10, 100, 10, 5, 80, 100, true},
+    // sharp circle rebuilt by VPKTAA from 80 % at 70 % sharpness, the periphery steadied too.
+    {0.50f, 3, true, true, true, 45, 8, 55, -10, 100, 10, 5, 80, 70, true},
     {0.85f, 3, true, true, true, 90, 16, 70, -10, 100, 15, 5, 100, 50, true},  // Vision Pro M5
 };
 

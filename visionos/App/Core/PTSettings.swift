@@ -127,10 +127,10 @@ struct PTSettings: Codable, Equatable {
             settings.centerUp = -10
             settings.centerResolution = 100
             settings.periphery = 10
-            // VPKTAA from 80 % at full sharpness, the periphery too (log pt (37), build 50).
+            // VPKTAA from 80 % at 70 % sharpness, the periphery too (log pt (37), build 50).
             settings.aa = 5
             settings.taaRes = 80
-            settings.taaSharpness = 100
+            settings.taaSharpness = 70
             settings.taaPeriphery = true
             settings.dynamicResolution = false
             // A picture every other refresh (45 at 90 Hz, 50 at 100 Hz), reprojected in between.
