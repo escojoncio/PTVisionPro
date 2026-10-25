@@ -1893,6 +1893,141 @@ bool Host::Acquire(Swapchain& swapchain) {
 
 void Host::Release(Swapchain& swapchain) { swapchain.acquired = false; }
 
+// Diagnostic (PT_VP_FOV_DIAG, on unless "0"): does the system foveation map follow the gaze? Per
+// frame (headset drawable only) it counts changes of each map's object and physical size; once a
+// second it hands the maps to a background queue, which samples a grid of each on the CPU and logs
+// where it is densest. No effect on the drawing.
+struct FoveationJob {
+    id<MTLRasterizationRateMap> map = nil;  // strong: lives until the background sampling is done
+    MTLSize screen{};
+    NSUInteger layer = 0;
+    size_t view = 0;
+};
+
+static void FoveationSample(const std::vector<FoveationJob>& jobs) {
+    @autoreleasepool {
+        for (const FoveationJob& job : jobs) {
+            id<MTLRasterizationRateMap> map = job.map;
+            const MTLSize screen = job.screen;
+            const NSUInteger layer = job.layer;
+            const MTLSize physical = [map physicalSizeForLayer:layer];
+            constexpr int kGrid = 16;
+            const float sw = static_cast<float>(screen.width);
+            const float sh = static_cast<float>(screen.height);
+            const float hx = 0.5f * sw / kGrid;
+            const float hy = 0.5f * sh / kGrid;
+            // Density of a cell: physical pixels per screen pixel (the geometric mean of x and y),
+            // from the map at the cell's neighbours (central differences over one cell).
+            std::vector<float> density(kGrid * kGrid);
+            for (int j = 0; j < kGrid; ++j) {
+                for (int i = 0; i < kGrid; ++i) {
+                    const float cx = (static_cast<float>(i) + 0.5f) * sw / kGrid;
+                    const float cy = (static_cast<float>(j) + 0.5f) * sh / kGrid;
+                    const MTLCoordinate2D x0 = [map mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(cx - hx, cy) forLayer:layer];
+                    const MTLCoordinate2D x1 = [map mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(cx + hx, cy) forLayer:layer];
+                    const MTLCoordinate2D y0 = [map mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(cx, cy - hy) forLayer:layer];
+                    const MTLCoordinate2D y1 = [map mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(cx, cy + hy) forLayer:layer];
+                    const float dx = std::fabs(x1.x - x0.x) / (2.0f * hx);
+                    const float dy = std::fabs(y1.y - y0.y) / (2.0f * hy);
+                    const float d = std::sqrt(dx * dy);
+                    density[static_cast<size_t>(j * kGrid + i)] = std::isfinite(d) ? d : 0.0f;
+                }
+            }
+            std::vector<int> order(kGrid * kGrid);
+            for (int k = 0; k < kGrid * kGrid; ++k) order[static_cast<size_t>(k)] = k;
+            std::sort(order.begin(), order.end(), [&](int a, int b) { return density[static_cast<size_t>(a)] > density[static_cast<size_t>(b)]; });
+            const size_t top = std::max<size_t>(1, order.size() / 10);
+            double sum = 0.0, sum_x = 0.0, sum_y = 0.0;
+            for (size_t k = 0; k < top; ++k) {
+                const int cell = order[k];
+                const double w = density[static_cast<size_t>(cell)];
+                sum += w;
+                sum_x += w * ((cell % kGrid) + 0.5) / kGrid;
+                sum_y += w * ((cell / kGrid) + 0.5) / kGrid;
+            }
+            const float centre_x = sum > 0.0 ? static_cast<float>(sum_x / sum) : 0.0f;
+            const float centre_y = sum > 0.0 ? static_cast<float>(sum_y / sum) : 0.0f;
+            LogInfo("foveation map: view {} centre ({:.3f}, {:.3f}) density {:.3f}..{:.3f}, screen {}x{} physical {}x{}", job.view, centre_x, centre_y,
+                    density[static_cast<size_t>(order.back())], density[static_cast<size_t>(order.front())], static_cast<unsigned long>(screen.width),
+                    static_cast<unsigned long>(screen.height), static_cast<unsigned long>(physical.width), static_cast<unsigned long>(physical.height));
+        }
+    }
+}
+
+static void FoveationDiag(cp_drawable_t drawable) {
+    static const bool enabled = [] {
+        const char* v = std::getenv("PT_VP_FOV_DIAG");
+        return !(v && v[0] == '0');
+    }();
+    if (!enabled) return;
+    using Clock = std::chrono::steady_clock;
+    static std::mutex mutex;
+    static Clock::time_point last = Clock::now();
+    static const void* seen_map[2] = {nullptr, nullptr};
+    static uint64_t seen_physical[2][2] = {{0, 0}, {0, 0}};  // width << 32 | height, per map and layer
+    static uint32_t pointer_changes = 0;
+    static uint32_t size_changes = 0;
+    static uint32_t frames = 0;
+    static bool started = false;
+    static dispatch_queue_t queue = dispatch_queue_create("pt.foveation-diag", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+    std::vector<FoveationJob> jobs;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        @autoreleasepool {
+            const size_t map_count = std::min<size_t>(2, cp_drawable_get_rasterization_rate_map_count(drawable));
+            if (!started) {
+                started = true;
+                LogInfo("foveation map: diagnostic on ({} map(s)); counting changes of the map object and its physical size per second", map_count);
+            }
+            ++frames;
+            for (size_t m = 0; m < map_count; ++m) {
+                id<MTLRasterizationRateMap> map = cp_drawable_get_rasterization_rate_map(drawable, m);
+                if (!map) continue;
+                const void* pointer = (__bridge const void*)map;
+                if (seen_map[m] && seen_map[m] != pointer) ++pointer_changes;
+                seen_map[m] = pointer;
+                const NSUInteger layers = std::min<NSUInteger>(2, map.layerCount);
+                for (NSUInteger l = 0; l < layers; ++l) {
+                    const MTLSize p = [map physicalSizeForLayer:l];
+                    const uint64_t packed = (static_cast<uint64_t>(p.width) << 32) | static_cast<uint64_t>(p.height);
+                    if (seen_physical[m][l] && seen_physical[m][l] != packed) ++size_changes;
+                    seen_physical[m][l] = packed;
+                }
+            }
+            const Clock::time_point now = Clock::now();
+            const double elapsed = std::chrono::duration<double>(now - last).count();
+            if (elapsed < 1.0) return;
+            last = now;
+            LogInfo("foveation map: in {:.2f}s, {} frame(s), object changed {} time(s), physical size changed {} time(s)", elapsed, frames, pointer_changes,
+                    size_changes);
+            pointer_changes = 0;
+            size_changes = 0;
+            frames = 0;
+            if (!map_count) return;
+            const size_t view_count = std::min<size_t>(2, cp_drawable_get_view_count(drawable));
+            for (size_t v = 0; v < view_count; ++v) {
+                cp_view_texture_map_t texture_map = cp_view_get_view_texture_map(cp_drawable_get_view(drawable, v));
+                const size_t texture_index = cp_view_texture_map_get_texture_index(texture_map);
+                const NSUInteger slice = static_cast<NSUInteger>(cp_view_texture_map_get_slice_index(texture_map));
+                id<MTLRasterizationRateMap> map = cp_drawable_get_rasterization_rate_map(drawable, texture_index < map_count ? texture_index : 0);
+                if (!map) continue;
+                FoveationJob job;
+                job.map = map;
+                job.screen = map.screenSize;
+                job.layer = slice < map.layerCount ? slice : 0;
+                job.view = v;
+                if (!job.screen.width || !job.screen.height) continue;
+                jobs.push_back(job);
+            }
+        }
+    }
+    if (jobs.empty()) return;
+    // The sampling runs off the frame thread, without the mutex (the map's queries are thread-safe).
+    dispatch_async(queue, ^{
+        FoveationSample(jobs);
+    });
+}
+
 // One drawable's whole picture: the eye images over the views, then the virtual screen and the
 // HUD as quads in the world. `origin_from_device` is the head pose the drawable is set to (the
 // one the eye images were drawn for). Encoded into `cb`; the caller presents.
@@ -2161,6 +2296,7 @@ void Host::EndFrame(const FrameLayers& layers) {
         const double ms = (done.GPUEndTime - done.GPUStartTime) * 1000.0;
         if (ms > 0.0 && ms < 1000.0) pt::visionos::g_composite_ms.store(static_cast<float>(ms), std::memory_order_relaxed);
     }];
+    FoveationDiag(x.drawable);
     ComposeFrame(*this, x, x.drawable, layers, x.origin_from_device, should_render_, cb);
     cp_drawable_encode_present(x.drawable, cb);
     [cb commit];

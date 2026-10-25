@@ -17,6 +17,10 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Estado
 
+- Commiteado sin build: diagnóstico del mapa de foveado (`FoveationDiag` en `xr_host_visionos.mm`, llamado en
+  `Host::Present` solo para `x.drawable`; cada 1 s cuenta cambios del mapa y, en cola `pt.foveation-diag`, registra
+  `foveation map: view N centre (x, y) density min..max`; `PT_VP_FOV_DIAG=0` lo apaga). Objetivo: saber si el mapa sigue la mirada.
+
 - Rama de trabajo: `pt-1.0.5`. Build 69: juego visualmente correcto; build 70 sin probar.
 - `museum: thumbnail capture could not start: Setting the working directory is not supported` (warn, sin investigar).
 - `ui: option animation UI_sys_opt_setin_s missing` (warn, 7 veces en el log de la 69).
@@ -27,11 +31,13 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Pendiente (en orden)
 
-1. Log build 70: teatro en estéreo (giro, zoom, salir con Círculo, recorte con modelos pequeños: `kNearPlane` 0,05,
+1. Próxima build: incluye el diagnóstico de foveado. Si `centre` se mueve al mirar sin girar la cabeza, mover el inset
+   del VPKTAA a ese centro (`VrPlay::PrepareInsets`, `Host::InsetWanted`); si no, descartar definitivamente.
+2. Log build 70: teatro en estéreo (giro, zoom, salir con Círculo, recorte con modelos pequeños: `kNearPlane` 0,05,
    `min_distance_` 0,08), pistas del museo, confirmación de reinicio, HUD adaptativo (raycast toca suelo/techo: aceptado).
-2. Nombres de botón genéricos (Select/Back/Menu) en vez de iconos: fusionar `prompt_hint` de 1.0.5 si el usuario lo pide.
-3. Otros idiomas (tr, zh, ar, ru, uk) caen al inglés en las claves del visor; tablas de upstream aún citan teclas.
-4. Afinar constantes de `vpktaa.frag`. 5. `taa_valid_` (conocido menor). 6. 45→90 reales (spacewarp propio).
+3. Nombres de botón genéricos (Select/Back/Menu) en vez de iconos: fusionar `prompt_hint` de 1.0.5 si el usuario lo pide.
+4. Otros idiomas (tr, zh, ar, ru, uk) caen al inglés en las claves del visor; tablas de upstream aún citan teclas.
+5. Afinar `vpktaa.frag`. 6. `taa_valid_` (menor). 7. 45→90 reales (spacewarp propio).
 
 ## Decisiones
 
@@ -41,8 +47,8 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
   luces en una pasada (`PT_LIGHT_ONE_PASS=1`); MetalFX espacial; máscara del centro en anchas; quitar reflejos o bajar
   sombras; ritmo fijo como sustituto de rendimiento.
 - Arquitectura (Compositor Services + MoltenVK, misma cola Metal): ver `notas/arquitectura.md`. No cambiar sin motivo.
-- Zona nítida siguiendo la mirada: imposible en Metal/Compositor Services (visionOS no da la mirada a la app; foveado
-  dinámico solo en RealityKit o streaming con entitlement). La zona sigue anclada a la cabeza.
+- Mirada: visionOS no la da a apps Metal (foveado dinámico oficial solo en RealityKit o streaming con entitlement).
+  Única vía en estudio: inferir el centro del mapa de foveado del drawable (pendiente del diagnóstico).
 - Presets duplicados en `kPresets` (.mm) y `PTSettings.defaults(for:)`: mantener iguales.
 
 ## Ficheros en juego
