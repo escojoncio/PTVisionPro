@@ -28,7 +28,7 @@ index d888847..3aaaefc 100644
      if ((tpp & 2u) != 0u) {
          color = TppShoulder(color);
 diff --git a/shaders/gbuffer.frag b/shaders/gbuffer.frag
-index a05ad2e..5a4bd70 100644
+index a05ad2e..bf2711d 100644
 --- a/shaders/gbuffer.frag
 +++ b/shaders/gbuffer.frag
 @@ -65,6 +65,11 @@ float TearNoise(vec2 p) {
@@ -64,8 +64,8 @@ index a05ad2e..5a4bd70 100644
 +        vec3 nn = normalize(n);
 +        vec3 dn_dx = dFdx(nn);
 +        vec3 dn_dy = dFdy(nn);
-+        float variance = 0.25 * (dot(dn_dx, dn_dx) + dot(dn_dy, dn_dy));
-+        float kernel = isnan(variance) || isinf(variance) ? 0.0 : min(variance, 0.18);
++        float variance = 0.10 * (dot(dn_dx, dn_dx) + dot(dn_dy, dn_dy));
++        float kernel = isnan(variance) || isinf(variance) ? 0.0 : min(variance, 0.06);
 +        if (kernel > 0.0) {
 +            float alpha2 = roughness * roughness * roughness * roughness;
 +            roughness = sqrt(sqrt(min(alpha2 + kernel, 1.0)));
@@ -27352,7 +27352,7 @@ index 588808d..2852ec7 100644
      options.invert_y = vertical_;
      options.invert_x = horizontal_;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 1868d99..fe81414 100644
+index 752d3d2..9cedf8d 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
 @@ -1,6 +1,11 @@
@@ -27376,7 +27376,7 @@ index 1868d99..fe81414 100644
      {"pc_vp_tiled_lights", {"Tiled lights", "", "", "Luces por teselas", "", "", ""}},
      {"pc_note_vp_tiled_lights", {"Computes all the lights in a single pass, only the ones touching each block of the screen, instead of drawing each light separately. Same image; should give more fps where there are many lights (the hallway). Turn it off to compare. Applies right away.", "", "", "Calcula todas las luces en una sola pasada, solo las que tocan cada bloque de la pantalla, en vez de dibujar cada luz por separado. Misma imagen; debería dar más fps donde hay muchas luces (pasillo). Apágalo para comparar. Se aplica al momento.", "", "", ""}},
      {"pc_vp_depth", {"Depth for reprojection", "", "", "Profundidad para la reproyección", "", "", ""}},
-@@ -90,15 +97,66 @@ constexpr Entry kTexts[] = {
+@@ -88,15 +95,66 @@ constexpr Entry kTexts[] = {
      {"pc_vp_recenter", {"Recentre view", "", "", "Recentrar vista", "", "", ""}},
      {"pc_vp_recenter_value", {"Now", "", "", "Ahora", "", "", ""}},
      {"pc_note_vp_recenter", {"Puts you back in the game where you stand now, facing where you look. Also done by itself after a long press of the Digital Crown.", "", "", "Te vuelve a colocar en el juego donde estás ahora, mirando hacia donde miras. También se hace solo tras mantener pulsada la Digital Crown.", "", "", ""}},
@@ -27444,7 +27444,7 @@ index 1868d99..fe81414 100644
      {"pc_loop_f000", {"Start room: the opening"}},
      {"pc_loop_f010", {"Loop 1: the radio"}},
      {"pc_loop_f005", {"Loop 2: the lobby door opens"}},
-@@ -126,9 +184,25 @@ constexpr Entry kTexts[] = {
+@@ -124,9 +182,25 @@ constexpr Entry kTexts[] = {
      {"pc_street_title", {"The street"}},
      {"pc_street_question", {"Explore the street?"}},
      {"pc_street_walk", {"Yes, walk the street"}},
@@ -27471,7 +27471,7 @@ index 1868d99..fe81414 100644
      {"pc_credits_dlss", {"This game uses NVIDIA DLSS."}},
      {"pc_credits_licenses", {"The full license texts are in the licenses folder next to pt.exe."}},
      {"pc_credits_konami", {"P.T. belongs to Konami Digital Entertainment and Kojima Productions."}},
-@@ -166,11 +240,13 @@ constexpr Entry kTexts[] = {
+@@ -164,11 +238,13 @@ constexpr Entry kTexts[] = {
      {"pc_extras", {"Extras"}},
      {"pc_note_extras", {"Loop browser, free camera and photo mode."}},
      {"pc_freecam", {"Free camera"}},
@@ -27487,7 +27487,7 @@ index 1868d99..fe81414 100644
      {"pc_extras_start", {"Start"}},
      {"pc_vr", {"VR (experimental)"}},
      {"pc_note_vr", {"Play in a VR headset through OpenXR. Experimental: not tested on real hardware."}},
-@@ -209,11 +285,11 @@ constexpr Entry kTexts[] = {
+@@ -207,11 +283,11 @@ constexpr Entry kTexts[] = {
      {"pc_photo_auto", {"Auto"}},
      {"pc_photo_metres", {"{value} m"}},
      {"pc_photo_saved", {"Saved to Pictures/PT Photos: {file}"}},
@@ -27501,7 +27501,7 @@ index 1868d99..fe81414 100644
      {"pc_note_photo_reset", {"Returns the camera to where the photo mode started."}},
      {"pc_note_photo_dof", {"Blurs what is nearer or farther than the focus distance."}},
      {"pc_note_photo_focus", {"Auto focuses on what is at the centre of the frame."}},
-@@ -230,17 +306,40 @@ constexpr Entry kTexts[] = {
+@@ -228,17 +304,40 @@ constexpr Entry kTexts[] = {
      {"pc_entry", {"PC Settings"}},
      {"pc_back", {"Back"}},
      {"pc_quit", {"Quit"}},
@@ -27544,7 +27544,7 @@ index 1868d99..fe81414 100644
      {"pc_section_ray_tracing", {"Ray tracing"}},
      {"pc_section_textures", {"Textures"}},
      {"pc_display_mode", {"Display mode"}},
-@@ -261,9 +360,22 @@ constexpr Entry kTexts[] = {
+@@ -259,9 +358,22 @@ constexpr Entry kTexts[] = {
      {"pc_mic_no_word", {"None yet"}},
      {"pc_mic_waiting", {"Waiting for the selected microphone."}},
      {"pc_mic_unavailable", {"Could not open the selected microphone. Check recording permissions and device selection."}},
@@ -27567,7 +27567,7 @@ index 1868d99..fe81414 100644
      {"pc_camera_tilt", {"Camera tilt"}},
      {"pc_vibration", {"Vibration"}},
      {"pc_dead_zone", {"Stick dead zone"}},
-@@ -289,6 +401,13 @@ constexpr Entry kTexts[] = {
+@@ -287,6 +399,13 @@ constexpr Entry kTexts[] = {
      {"pc_note_texture_busy", {"Another game instance is preparing this texture cache. Wait until it finishes, then try again. Original textures are preserved."}},
      {"pc_note_texture_failed", {"Texture preparation failed; original textures are preserved. Check free disk space and pt.log for the cause, then try again."}},
      {"pc_note_texture_preparing", {"Preparing enhanced textures. Original textures stay visible until ready; then they change here without restarting. Off cancels preparation."}},
@@ -27581,7 +27581,7 @@ index 1868d99..fe81414 100644
      {"pc_note_enhanced_textures", {"Generates sharper colour textures once from your game files, walls and people included (4096 px with 10 GB of video memory, else 2048). Switch Off to cancel; original textures stay available."}},
      {"pc_rt_sharp", {"Sharp"}},
      {"pc_rt_soft", {"Soft"}},
-@@ -305,20 +424,50 @@ constexpr Entry kTexts[] = {
+@@ -303,20 +422,50 @@ constexpr Entry kTexts[] = {
      {"pc_quality_custom", {"Custom"}},
      {"pc_system_default", {"System default"}},
      {"pc_reset_value", {"Reset"}},
@@ -27636,7 +27636,7 @@ index 1868d99..fe81414 100644
      {"pc_note_reset_done", {"Progress restarted in this session."}},
      {"pc_note_camera_tilt", {"The camera leans with the head, as in the original."}},
      {"pc_note_voice", {"The microphone listens only where the original game does."}},
-@@ -327,10 +476,96 @@ constexpr Entry kTexts[] = {
+@@ -325,10 +474,96 @@ constexpr Entry kTexts[] = {
      {"pc_note_frame_generation_missing", {"Not in this build."}},
      {"pc_note_frame_generation", {"AMD FSR 3 shows a generated frame between two rendered frames."}},
      {"pc_note_fsr4_vulkan", {"AMD releases FSR 4 for DirectX 12 only; this game renders with Vulkan, so FSR 4 cannot run here."}},
@@ -27733,7 +27733,7 @@ index 1868d99..fe81414 100644
      {"pc_note_dlssg_gpu", {"DLSS Frame Generation needs an NVIDIA GeForce RTX 40 series or newer GPU."}},
      {"pc_note_fsr_fg_gpu", {"FSR 3 frame generation needs an AMD Radeon RX 5000 series or newer GPU."}},
      {"pc_note_dlssg_driver", {"DLSS Frame Generation needs a newer NVIDIA driver."}},
-@@ -340,7 +575,79 @@ constexpr Entry kTexts[] = {
+@@ -338,7 +573,79 @@ constexpr Entry kTexts[] = {
      {"pc_note_dlssg_restart", {"Restart the game to start DLSS Frame Generation."}},
      {"pc_note_vsync_dlssg", {"DLSS Frame Generation runs without v-sync on Vulkan; the setting applies again when frame generation is off."}},
      {"pc_note_fsr_fg_restart", {"Restart the game to switch from DLSS Frame Generation to FSR 3."}},
@@ -27813,7 +27813,7 @@ index 1868d99..fe81414 100644
      {"pc_note_rt_shadows", {"Shadows traced against the scene instead of shadow maps, as sharp as the original's. Not in the original."}},
      {"pc_note_rt_soft", {"Traced shadows with soft edges from each light's size. Not in the original."}},
      {"pc_note_rt_unsupported", {"Needs a GPU with Vulkan ray tracing."}},
-@@ -370,6 +677,8 @@ constexpr Entry kTexts[] = {
+@@ -368,6 +675,8 @@ constexpr Entry kTexts[] = {
      {"pc_standard_reflections", {"Screen reflections"}},
      {"pc_ray_quality", {"Ray quality"}},
      {"pc_ray_balanced", {"Balanced"}},
@@ -27822,7 +27822,7 @@ index 1868d99..fe81414 100644
      {"pc_texture_detail", {"Texture detail"}},
      {"pc_detail_reduced", {"Reduced"}},
      {"pc_detail_fine", {"Fine"}},
-@@ -389,7 +698,10 @@ constexpr Entry kTexts[] = {
+@@ -387,7 +696,10 @@ constexpr Entry kTexts[] = {
      {"pc_note_shadow_quality", {"512, 1024 or original 2048 px shadow maps. Ray-traced shadows replace maps when enabled. Resolution scale is unchanged."}},
      {"pc_note_standard_ao", {"Original screen-space ambient shading. Turn off to reduce cost on slower GPUs."}},
      {"pc_note_standard_reflections", {"Original screen-space floor reflections. Traced reflections replace them when enabled."}},
@@ -27834,7 +27834,7 @@ index 1868d99..fe81414 100644
      {"pc_note_texture_detail", {"Reduced uses coarser texture mips. Fine preserves more texture detail at a distance; may shimmer. Output resolution stays unchanged."}},
      {"pc_note_dof", {"Original camera focus blur. Off keeps nearby surfaces and the background sharp."}},
      {"pc_note_motion_blur", {"Original blur while turning and moving. Off gives a clearer moving image."}},
-@@ -399,8 +711,8 @@ constexpr Entry kTexts[] = {
+@@ -397,8 +709,8 @@ constexpr Entry kTexts[] = {
      {"pc_section_mods", {"Installed mods"}},
      {"pc_note_mods", {"Turning a mod on or off takes effect at the next start. Mods are not part of the original game."}},
      {"pc_archive", {"Museum"}},
@@ -27845,7 +27845,7 @@ index 1868d99..fe81414 100644
      {"pc_note_extras_archive", {"Loop browser, museum, free camera and photo mode."}},
      {"pc_archive_sections", {"Halls"}},
      {"pc_archive_images", {"Subliminal images"}},
-@@ -415,21 +727,25 @@ constexpr Entry kTexts[] = {
+@@ -413,21 +725,25 @@ constexpr Entry kTexts[] = {
      {"pc_note_archive_cutscenes", {"Every cutscene from its start, with its sound and subtitles."}},
      {"pc_note_archive_models", {"Lisa and the hallway's other figures and objects, in the light of the start room."}},
      {"pc_note_archive_unused_section", {"Content in the game's files that the game never shows. It opens once you finish the game."}},
@@ -27882,7 +27882,7 @@ index 1868d99..fe81414 100644
      {"pc_archive_noise", {"Noise"}},
      {"pc_archive_noise_normal", {"Noise distortion"}},
      {"pc_archive_peephole_mask", {"The peephole's view"}},
-@@ -472,8 +788,117 @@ constexpr Entry kTexts[] = {
+@@ -470,8 +786,117 @@ constexpr Entry kTexts[] = {
      {"pc_archive_phone_model", {"The telephone"}},
      {"pc_archive_xmark_photo", {"The X mark photo"}},
      {"pc_archive_clock_model", {"The clock"}},
@@ -28001,7 +28001,7 @@ index 1868d99..fe81414 100644
  };
  
  }
-@@ -499,7 +924,79 @@ std::string PcNoteText(std::string_view note, int language) {
+@@ -497,7 +922,79 @@ std::string PcNoteText(std::string_view note, int language) {
      return text;
  }
  
@@ -28082,7 +28082,7 @@ index 1868d99..fe81414 100644
      if (language >= 1) {
          const auto text = localized::Menu(key, language);
          if (!text.empty()) return text;
-@@ -513,4 +1010,37 @@ std::string_view PcText(std::string_view key, int language) {
+@@ -511,4 +1008,37 @@ std::string_view PcText(std::string_view key, int language) {
      return key;
  }
  
@@ -28943,7 +28943,7 @@ index 2bcbcd6..0c840a8 100644
      uint64_t frames_ = 0;
  };
 diff --git a/src/main.cpp b/src/main.cpp
-index 6dd62ee..53ea9ae 100644
+index 0095855..eb4df06 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -98,6 +98,13 @@
@@ -28960,7 +28960,7 @@ index 6dd62ee..53ea9ae 100644
  namespace {
  
  #if PT_VISIONOS
-@@ -1696,6 +1703,7 @@ public:
+@@ -1695,6 +1702,7 @@ public:
              taa_sharp.wrap = false;
              foveation.rows.push_back(std::move(taa_sharp));
              foveation.rows.push_back(Row(kVpTaaPeriphery, "pc_vp_taa_periphery", OffOn(), h.taa_periphery ? 1 : 0, "pc_note_vp_taa_periphery"));
@@ -28968,7 +28968,7 @@ index 6dd62ee..53ea9ae 100644
              foveation.rows.push_back(Row(kVpTiledLights, "pc_vp_tiled_lights", OffOn(), h.tiled_lights ? 1 : 0, "pc_note_vp_tiled_lights"));
              return {std::move(vr), std::move(foveation)};
  #else
-@@ -2017,6 +2025,10 @@ public:
+@@ -2016,6 +2024,10 @@ public:
              pt::visionos::Headset().scene_depth = value == 1;
              pt::visionos::SettingChanged("scene_depth", value == 1 ? "1" : "0");
              return;
@@ -28979,16 +28979,16 @@ index 6dd62ee..53ea9ae 100644
          case kVpTiledLights:
              pt::visionos::Headset().tiled_lights = value == 1;
              pt::LogInfo("visionos: tiled lights {} (from the game's menu)", value == 1 ? "on" : "off");
-@@ -2519,7 +2531,7 @@ private:
+@@ -2514,7 +2526,7 @@ private:
          kFrameLimit,
          kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpFov, kVpRecenter,
-         kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
+         kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
 -        kVpSubtitleSize, kVpSubtitleHeight, kVpTiledLights,
 +        kVpSubtitleSize, kVpSubtitleHeight, kVpTiledLights, kVpSpecularAa,
          kLoopFirst = 1000,
          kRunSplitFirst = 3000,
          kModFirst = 2000,
-@@ -2536,7 +2548,7 @@ private:
+@@ -2531,7 +2543,7 @@ private:
      uint32_t voice_id_ = 0;
      uint64_t voice_start_ = 0;
  
@@ -28997,7 +28997,7 @@ index 6dd62ee..53ea9ae 100644
  
      const pt::game::ArchiveEntry* EntryOf(int id) const {
          const auto entries = pt::game::ArchiveEntries();
-@@ -2826,7 +2838,7 @@ private:
+@@ -2821,7 +2833,7 @@ private:
      std::vector<pt::game::PcSettingSection> SpeedrunResults() const {
          const pt::game::SpeedrunTimer& run = game_.Speedrun();
          using pt::game::SpeedrunTimer;
@@ -29006,7 +29006,7 @@ index 6dd62ee..53ea9ae 100644
          pt::game::PcSettingSection result{"pc_speedrun_run", 0, {}};
          auto menu = Row(kRunMenu, "pc_speedrun_menu", {""}, 0, "pc_note_speedrun_menu");
          menu.link = true;
-@@ -3020,7 +3032,7 @@ private:
+@@ -3015,7 +3027,7 @@ private:
          pt::game::PcSettingSection left{"pc_section_mods", 0, {}};
          pt::game::PcSettingSection right{"pc_section_mods", 1, {}};
          if (!app_.mods) return {std::move(left)};
@@ -29015,7 +29015,7 @@ index 6dd62ee..53ea9ae 100644
          const std::string restart(pt::game::PcText("pc_note_mods", language));
          const auto& mods = app_.mods->mods;
          for (size_t i = 0; i < mods.size() && i < static_cast<size_t>(kMaxModRows); ++i) {
-@@ -3688,6 +3700,15 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3683,6 +3695,15 @@ int RunGame(App& app, pt::Vfs& vfs) {
      };
      std::unique_ptr<TheaterView> theater;
      bool theater_paused = false;
@@ -29031,7 +29031,7 @@ index 6dd62ee..53ea9ae 100644
      auto start_theater = [&](const std::string& id) {
          if (id == "-") {
              if (theater) theater->theater->Stop();
-@@ -3716,14 +3737,10 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3711,14 +3732,10 @@ int RunGame(App& app, pt::Vfs& vfs) {
              theater_paused = true;
              if (game.Audio()) game.Audio()->PostEvent("Pause_All", nullptr);
          }
@@ -29048,7 +29048,7 @@ index 6dd62ee..53ea9ae 100644
          theater = std::move(view);
          game.SetArchiveTheaterActive(true);
          pt::LogInfo("archive: theater opens {}", id);
-@@ -3732,6 +3749,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3727,6 +3744,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          if (!theater) return;
          vkDeviceWaitIdle(app.renderer.Context().device);
          theater.reset();
@@ -29056,7 +29056,7 @@ index 6dd62ee..53ea9ae 100644
          ui.SetTheaterHint({}, {});
          ui.SetMenuSuspended(false);
          ui.LeaveTheater(game);
-@@ -3868,7 +3886,12 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3863,7 +3881,12 @@ int RunGame(App& app, pt::Vfs& vfs) {
              polled.prompts = *options.forced_prompts;
          }
          if (vr) {
@@ -29070,7 +29070,7 @@ index 6dd62ee..53ea9ae 100644
          }
          if (polled.pc_settings && !freecam) {
              if (options.dev_ui && app.window) {
-@@ -4207,12 +4230,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4202,12 +4225,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
  
@@ -29100,7 +29100,7 @@ index 6dd62ee..53ea9ae 100644
          }
          if (!ui.MenuOpen() || ui.Menu().CurrentPage() != pt::game::OptionsMenu::Page::Pc)
              app.microphone_test = app.microphone_monitor = false;
-@@ -4241,9 +4277,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4236,9 +4272,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
          }
          if (hearing && recognizer) {
              if (!microphone.IsOpen() && !microphone_failed && !voice_file) {
@@ -29117,7 +29117,7 @@ index 6dd62ee..53ea9ae 100644
              }
              const pt::VoiceRecognizer::State state = recognizer->GetState();
              app.microphone_status = microphone_failed || state == pt::VoiceRecognizer::State::Failed ? "pc_mic_unavailable"
-@@ -4418,7 +4458,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4413,7 +4453,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
              ImGui::Render();
          }
          if (photo_mode) {
@@ -29126,7 +29126,7 @@ index 6dd62ee..53ea9ae 100644
              photo_status_time = std::max(0.0f, photo_status_time - dt);
              if (photo_status_time <= 0.0f) photo_status.clear();
              photo_view = photo_panel.View(language, photo_status);
-@@ -4441,7 +4481,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4436,7 +4476,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          bool warmed = false;
          if (vr) {
              const bool screen = vr->ScreenMode(game);
@@ -29135,7 +29135,7 @@ index 6dd62ee..53ea9ae 100644
              const float scene_dt = static_cast<float>(game.Time() - last_scene_time);
              auto begin = [&](bool present) { return app.renderer.BeginFrame(present && app.window) || (present && app.renderer.BeginFrame(false)); };
              auto save_shots = [&](const char* suffix) {
-@@ -4456,10 +4496,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4451,10 +4491,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
              if (screen && vr->PrepareScreen(screen_target)) {
                  app.renderer.SetRenderExtent(pt::Renderer::kHudExtent);
                  if (begin(true)) {
@@ -29150,7 +29150,7 @@ index 6dd62ee..53ea9ae 100644
                      app.scene.SetVrEye(-1);
                      app.scene.Render(camera, draw_items, lighting, dt);
                      ui.SetVrHud(false);
-@@ -4468,21 +4509,22 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4463,21 +4504,22 @@ int RunGame(App& app, pt::Vfs& vfs) {
                      xr_frame.overlay_on_frame = true;
                      app.renderer.SetXrFrame(xr_frame);
                      app.renderer.EndFrame(app.window != nullptr);
@@ -29178,7 +29178,7 @@ index 6dd62ee..53ea9ae 100644
                                    lighting, vfx_pass, blend);
                  // Views 0 and 1: the eyes; with the game's foveation they are the wide, low-density
                  // views (no screen-space AO or reflections) and 2 and 3 their sharp centres.
-@@ -4566,6 +4608,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4561,6 +4603,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
                      app.scene.SetVrEye(eye);
  #if PT_VISIONOS
                      app.scene.toggles.tiled_lights = pt::visionos::Headset().tiled_lights;
@@ -29186,7 +29186,7 @@ index 6dd62ee..53ea9ae 100644
  #endif
  #if PT_VISIONOS
                      app.scene.SetVrLowDetail(stereo.inset && !inset);
-@@ -4620,7 +4663,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4615,7 +4658,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.xr_hdr = false;
  #endif
                  ui.SetVrHud(false);

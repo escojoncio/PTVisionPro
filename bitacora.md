@@ -6,6 +6,10 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Último hecho
 
+- AA especular más suave (tipo HDRP): `gbuffer.frag` (0002) varianza 0,25→0,10, tope 0,18→0,06; el usuario veía brillos
+  apagados. Quitada la opción de prueba `show_border` (fila `kVpBorder`, claves `pc_vp_border`/`pc_note_vp_border`,
+  `pt_visionos_settings.h`, anillo `rim` de `inset_fragment` en `.mm`, `GameRunner.swift`). Sin build.
+
 - Preset M2: nitidez (RCAS) 100 → 70 en `kPresets` (`xr_host_visionos.mm:2353`) y `PTSettings.defaults(for:)`
   (`PTSettings.swift:133`). `PTSettings.load()` reaplica el preset al arrancar: el M2 guardado pasa a 70. Sin build.
 - Log pt (5) = build 74 (RCAS + AA especular): sin cierres. RCAS ~0,2 ms/vista nítida; AA especular sin coste

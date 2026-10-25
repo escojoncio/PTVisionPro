@@ -412,17 +412,11 @@ fragment SceneOut inset_fragment(Varyings in [[stage_in]], texture2d<float> tex 
     float r = length(in.uv * 2.0 - 1.0);  // 0 at the centre, 1 at the circle's edge
     float f = max(u.pad.y, 1.0e-3);
     float a = 1.0 - smoothstep(1.0 - f, 1.0, r);
-    float rim = 0.0;
-    if (u.color.a > 0.0) {
-        // The sharp zone's edge shown (a test setting): an opaque red ring halfway through the
-        // fade, where the sharp picture is half blended into the periphery.
-        rim = 1.0 - smoothstep(0.006, 0.012, abs(r - (1.0 - 0.5 * f)));
-    }
-    if (a <= 0.0 && rim <= 0.0) discard_fragment();
+    if (a <= 0.0) discard_fragment();
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 c = SceneLight(tex.sample(s, in.uv), u.grade);
     SceneOut result;
-    result.color = float4(mix(c * a, u.color.rgb, rim), max(a, rim));
+    result.color = float4(c * a, a);
     result.depth = SceneDepth(distances, in.uv, u);
     return result;
 }
@@ -2028,8 +2022,6 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                     Uniforms w = u;
                     w.p0 = simd_make_float4(m00 * t.x - m20, m11 * t.w - m21, m00 * t.y - m20, m11 * t.z - m21);
                     w.pad[1] = 0.15f;  // the fade, as a fraction of the circle's radius
-                    // The menu's "show the sharp zone's edge": a red frame where it ends.
-                    w.color = pt::visionos::Headset().show_border ? simd_make_float4(1.0f, 0.1f, 0.1f, 1.0f) : simd_make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                     w.grade = u.grade;  // as its wide view (no seam)
                     id<MTLTexture> inset_picture = x.textures[4 + v][image(4 + static_cast<int>(v))];
                     id<MTLTexture> inset_distances = distances(4 + static_cast<int>(v));
