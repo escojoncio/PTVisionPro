@@ -435,11 +435,77 @@ index ad12caa..40ee9d4 100644
      vec4 p = q.corner[corner];
      out_world = p.xyz;
      out_tangent = vec3(1.0, 0.0, 0.0);
+diff --git a/shaders/vpkrcas.frag b/shaders/vpkrcas.frag
+new file mode 100644
+index 0000000..1142258
+--- /dev/null
++++ b/shaders/vpkrcas.frag
+@@ -0,0 +1,51 @@
++#version 460
++// VPKTAA's sharpening: AMD FidelityFX RCAS (Robust Contrast-Adaptive Sharpening, from FSR 1;
++// MIT licence, (c) Advanced Micro Devices, Inc.), as a pass over VPKTAA's output so the history
++// keeps the unsharpened picture. 5-tap cross; the lobe is limited so no tap can overshoot the
++// ring's range (no halos); the denoise option is left out. The scene is linear HDR (exposure
++// applied): RCAS works on a perceptual proxy, sqrt(x / (1 + x)), then inverts it.
++#include "common.glsl"
++
++#define IMG_UPSCALED 43
++// FSR_RCAS_LIMIT: 0.25 - 1/16.
++#define RCAS_LIMIT 0.1875
++
++layout(push_constant) uniform PassPush {
++    uvec4 ids;
++    vec4 f0;  // x the strength: exp2(-stops), stops 0 (sharpest) to 2
++    vec4 f1;
++    vec4 f2;
++    mat4 m;
++} pass;
++
++layout(location = 0) in vec2 in_uv;
++layout(location = 0) out vec4 out_color;
++
++vec3 Tap(ivec2 p, ivec2 size) {
++    vec3 c = ImgFetch(IMG_UPSCALED, clamp(p, ivec2(0), size - 1)).rgb;
++    c = any(isnan(c)) || any(isinf(c)) ? vec3(0.0) : clamp(c, vec3(0.0), vec3(60000.0));
++    return sqrt(c / (1.0 + c));
++}
++
++void main() {
++    ivec2 p = ivec2(gl_FragCoord.xy);
++    ivec2 size = ivec2(ImgSize(IMG_UPSCALED));
++    vec4 centre = ImgFetch(IMG_UPSCALED, clamp(p, ivec2(0), size - 1));
++    // b / d e f / h
++    vec3 b = Tap(p + ivec2(0, -1), size);
++    vec3 d = Tap(p + ivec2(-1, 0), size);
++    vec3 e = Tap(p, size);
++    vec3 f = Tap(p + ivec2(1, 0), size);
++    vec3 h = Tap(p + ivec2(0, 1), size);
++    vec3 mn = min(min(b, d), min(f, h));
++    vec3 mx = max(max(b, d), max(f, h));
++    // Largest lobe that keeps every channel inside [0, 1] and the ring's range.
++    vec3 hit_min = min(mn, e) / max(4.0 * mx, vec3(1.0e-5));
++    vec3 hit_max = (1.0 - max(mx, e)) / min(4.0 * mn - 4.0, vec3(-1.0e-5));
++    vec3 lobe3 = max(-hit_min, hit_max);
++    float lobe = max(-RCAS_LIMIT, min(max(lobe3.r, max(lobe3.g, lobe3.b)), 0.0)) * pass.f0.x;
++    vec3 q = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
++    q = clamp(q, vec3(0.0), vec3(0.99999));
++    q *= q;
++    out_color = vec4(q / (1.0 - q), centre.a);
++}
 diff --git a/shaders/vpktaa.frag b/shaders/vpktaa.frag
-index fda2800..ee08b33 100644
+index fda2800..1678968 100644
 --- a/shaders/vpktaa.frag
 +++ b/shaders/vpktaa.frag
-@@ -26,6 +26,8 @@
+@@ -2,7 +2,7 @@
+ // VPKTAA: the headset's temporal antialiasing, in the pass that hands the scene to the post chain
+ // (it replaces the upscale resolve for a headset view). For each output pixel, in one pass:
+ //   1. reconstruct the current frame at the pixel's centre from the 3x3 jittered render samples
+-//      (sharpened by the filter itself: no separate sharpening pass);
++//      (Gaussian fit; sharpening is a separate pass over the output, vpkrcas.frag);
+ //   2. reproject the view's history with the motion of the nearest surface around (the camera's
+ //      own motion computed here from the depth; moving objects' from the motion target);
+ //   3. reject what the history cannot hold: a surface that was hidden the frame before (its
+@@ -26,15 +26,16 @@
  #define KEEP_MOVING 0.80
  #define SIGMA_FLAT 1.25
  #define SIGMA_EDGE 0.85
@@ -448,7 +514,45 @@ index fda2800..ee08b33 100644
  #define DISOCCLUSION 0.05
  // 1: the 3x3's depths with 3 gathers + 1 fetch (the same values as 9 fetches); 0: 9 fetches.
  #define DEPTH_GATHER 0
-@@ -281,7 +283,7 @@ void main() {
+ 
+ layout(push_constant) uniform PassPush {
+-    uvec4 ids;  // x the history to read (image slot), y flags (1 history valid, 2 the TAA is on the
+-                // periphery: no sharpening), z the reflection layer (0 none), w the view
++    uvec4 ids;  // x the history to read (image slot), y flags (1 history valid), z the reflection layer (0 none), w the view
+     vec4 f0;    // xy the jitter in render uv, zw 1 / output size
+-    vec4 f1;    // xy render size, z sharpness 0-1
++    vec4 f1;    // xy render size
+     vec4 f2;    // particles layer: x < 0 none, 0 this view's own, > 0 a wider view's (0.5 + (uv - 0.5) * xy + zw)
+     mat4 m;     // the previous frame's view-projection
+ } pass;
+@@ -256,32 +257,18 @@ void main() {
+     float speed = min(length(motion * output_size), 64.0);  // output pixels a frame
+     float still = 1.0 - clamp(speed * 0.5, 0.0, 1.0);
+ 
+-    // The current frame at this pixel: the Gaussian fit summed in the loop, then sharpened against
+-    // the 3x3's mean (the accumulation converges on the sharpened value, so the picture comes out
+-    // sharp without a separate pass, and the history is never sharpened twice).
++    // The current frame at this pixel: the Gaussian fit summed in the loop (not sharpened here:
++    // the sharpening is a pass over the output, vpkrcas.frag, so the history stays unsharpened).
+     gauss /= max(dot(wx, vec3(1.0)) * dot(wy, vec3(1.0)), 1.0e-5);
+     vec3 mean = m1 / 9.0;
+     vec3 current = gauss;
+-    bool periphery = (pass.ids.y & 2u) != 0u;
+-    if (!periphery) {
+-        // Contrast-adaptive (as AMD's CAS): less where the neighbourhood already spans a wide
+-        // range (strong edges: no halos) or is near black/white. More while moving, where the
+-        // history blurs the most.
+-        float lo = box_lo.x;
+-        float hi = box_hi.x;
+-        float amp = sqrt(clamp(min(lo, 1.0 - hi) / max(hi, 1.0e-4), 0.0, 1.0));
+-        float amount = pass.f1.z * amp * (1.0 + 0.6 * (1.0 - still));
+-        current = gauss + amount * 1.2 * (gauss - mean);
+-        // Never outside what the samples hold (no ringing).
+-        current = clamp(current, box_lo, box_hi);
+-    }
+ 
+     // Edges (a depth step in the 3x3) get a narrow box: the history cannot drag an edge's old
+     // place along. Flat areas get a wide one: less flicker of fine detail.
      float depth_range = (closest - farthest) / max(closest, 1.0e-6);
      float edge = smoothstep(0.02, 0.15, depth_range);
      vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
@@ -457,7 +561,7 @@ index fda2800..ee08b33 100644
      vec3 lo = max(mean - k * sigma, box_lo);
      vec3 hi = min(mean + k * sigma, box_hi);
      lo = min(lo, current);
-@@ -335,7 +337,7 @@ void main() {
+@@ -335,7 +322,7 @@ void main() {
      if (pass.ids.z != 0u) {
          vec4 reflection = Reflection(uv);
          if (reflection.a > 0.0) {
@@ -16011,7 +16115,7 @@ index 756cba0..c8817e1 100644
      renderer_->grain[1] = screen.grain_alt ? 1.0f : 0.0f;
      renderer_->grain[2] = screen.grain_strength * graphics.film_grain;
 diff --git a/src/engine/render/scene_renderer.h b/src/engine/render/scene_renderer.h
-index 705d57c..3f2002e 100644
+index 705d57c..9acdcfc 100644
 --- a/src/engine/render/scene_renderer.h
 +++ b/src/engine/render/scene_renderer.h
 @@ -138,6 +138,7 @@ struct RenderToggles {
@@ -16044,7 +16148,41 @@ index 705d57c..3f2002e 100644
      bool Init(Renderer& renderer, TextureManager& textures);
      void Shutdown();
      bool LoadResources(Vfs& vfs);
-@@ -718,6 +734,7 @@ private:
+@@ -215,7 +231,7 @@ public:
+     // antialiasing, instead of FXAA: the upscaler's jitter and motion, and one pass that resolves,
+     // accumulates and writes the view's next history. render_scale: the inset drawn at this
+     // fraction of its size (0.8 to 1) and rebuilt to the full size from the past frames;
+-    // sharpness 0 to 1 (built into its reconstruction filter, no extra pass). periphery: the wide,
++    // sharpness 0 to 1 (an RCAS pass after VPKTAA on the sharp views, 0 skips it). periphery: the wide,
+     // low-density views too (at their own size: it steadies their edges, it cannot add detail).
+     void SetVrTaa(bool on, float render_scale = 1.0f, float sharpness = 0.5f, bool periphery = true) {
+         vr_taa_ = on;
+@@ -224,6 +240,8 @@ public:
+         vr_taa_sharpness_ = sharpness < 0.0f ? 0.0f : sharpness > 1.0f ? 1.0f : sharpness;
+     }
+     bool TaaReady() const { return taa_ != VK_NULL_HANDLE; }
++    // RCAS over VPKTAA's output (the sharp views; upscaled_ is its scratch there): slider 0 skips it.
++    bool RcasOn() const { return vr_taa_sharpness_ > 0.0f && rcas_ && upscaled_.Valid() && !VrSkipsUpscale(); }
+     // (Headset) Where this view's depth goes for the compositor (xr_depth.frag): an R32 float
+     // image and its view, written at the end of the next Render. Null: none.
+     void SetVrDepthOut(VkImage image, VkImageView view, VkExtent2D extent) {
+@@ -455,6 +473,7 @@ private:
+     void RecordParticles(VkCommandBuffer cmd, RenderTarget& output, SceneVfxContext& context, uint32_t& recorded);
+     void RecordUpscaleInputs(VkCommandBuffer cmd, const ViewSetup& view);
+     void RecordVpkTaa(VkCommandBuffer cmd);
++    void RecordVpkRcas(VkCommandBuffer cmd);
+     void RecordUpscale(VkCommandBuffer cmd, float dt);
+     void ReadUpscaleTimestamps(FrameSlot& slot);
+ 
+@@ -682,6 +701,7 @@ private:
+     VkPipeline up_resolve_ = VK_NULL_HANDLE;
+     VkPipeline up_demod_ = VK_NULL_HANDLE;
+     VkPipeline taa_ = VK_NULL_HANDLE;
++    VkPipeline rcas_ = VK_NULL_HANDLE;
+ 
+     std::unique_ptr<RayTracing> rt_;
+     SubsurfacePass sss_;
+@@ -718,6 +738,7 @@ private:
      gpu::FrameData* frame_ = nullptr;
      std::vector<glm::mat4> skin_matrices_;
      std::vector<Draw> draws_;
@@ -16064,6 +16202,117 @@ index cb25b6f..aa119f4 100644
      uint32_t CubeSlot(uint32_t texture) const;
      // Main render thread; logs changed counts at most once/second, plus explicit shutdown.
      void ReportCounts(const char* scope, bool force = false);
+diff --git a/src/engine/render/upscale/scene_upscale.cpp b/src/engine/render/upscale/scene_upscale.cpp
+index 8f7d2f5..0b820f6 100644
+--- a/src/engine/render/upscale/scene_upscale.cpp
++++ b/src/engine/render/upscale/scene_upscale.cpp
+@@ -132,6 +132,15 @@ bool SceneRenderer::CreateUpscalePipelines() {
+     if (!taa_) {
+         LogWarn("vpktaa: pipeline creation failed (FXAA instead)");
+     }
++    // RCAS (vpkrcas.frag), VPKTAA's sharpening: one post target in, the same out.
++    PipelineDesc rcas;
++    rcas.layout = layout_;
++    rcas.fragment = "vpkrcas.frag";
++    rcas.colors = {kUpscaleColorFormat};
++    rcas_ = CreateGraphicsPipeline(device_, rcas);
++    if (!rcas_) {
++        LogWarn("vpktaa: RCAS pipeline creation failed (no sharpening)");
++    }
+ 
+     if (!up_motion_ || !up_object_motion_ || !up_reactive_ || !up_resolve_ || !up_demod_) {
+         LogError("scene renderer: upscale pipeline creation failed");
+@@ -141,7 +150,7 @@ bool SceneRenderer::CreateUpscalePipelines() {
+ }
+ 
+ void SceneRenderer::DestroyUpscalePipelines() {
+-    VkPipeline* all[] = {&up_motion_, &up_object_motion_, &up_reactive_, &up_resolve_, &up_demod_, &taa_};
++    VkPipeline* all[] = {&up_motion_, &up_object_motion_, &up_reactive_, &up_resolve_, &up_demod_, &taa_, &rcas_};
+     for (VkPipeline* p : all) {
+         if (*p) {
+             vkDestroyPipeline(device_, *p, nullptr);
+@@ -157,8 +166,9 @@ bool SceneRenderer::CreateUpscaleTargets(VkExtent2D render, VkExtent2D output) {
+                     CreateTarget(opaque_, kHdrTargetFormat, render, color | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
+                     CreateTarget(handy_factor_, kHandyFactorFormat, render, color, c) &&
+                     CreateTarget(exposure_image_, kExposureFormat, {1, 1}, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, c) &&
+-                    // (The upscalers' output: not on the headset, whose VPKTAA writes the post targets itself.)
+-                    (VrView() || CreateTarget(upscaled_, kUpscaleColorFormat, output,
++                    // (The upscalers' output: not on the headset, whose VPKTAA writes the post targets itself;
++                    // its sharp views keep one as VPKTAA's output before RCAS.)
++                    ((VrView() && VrSkipsUpscale()) || CreateTarget(upscaled_, kUpscaleColorFormat, output,
+                                               VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                               c)) &&
+@@ -543,6 +553,7 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+         // VPKTAA: this render + the view's history -> the post targets and its next history, in
+         // one pass (no copies).
+         RecordVpkTaa(cmd);
++        RecordVpkRcas(cmd);
+         up_.reset = false;
+         vr_reset_[vr_eye_] = false;
+         vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, slot.upscale_queries, 3);
+@@ -669,6 +680,8 @@ void SceneRenderer::RecordUpscale(VkCommandBuffer cmd, float dt) {
+ void SceneRenderer::RecordVpkTaa(VkCommandBuffer cmd) {
+     static constexpr uint32_t kSlots[4] = {gpu::kImgTaaHistory, gpu::kImgTaaHistory1, gpu::kImgTaaHistory2, gpu::kImgTaaHistory3};
+     BeginLabel(cmd, "vpktaa");
++    // (With RCAS the output goes to upscaled_ first; the history is written as it is.)
++    RenderTarget& out_color = RcasOn() ? upscaled_ : post_hdr_;
+     const int eye = vr_eye_;
+     const int column = eye & 1;  // (left 0, right 1: the wide views 0/1 and the insets 2/3 are in different target sets)
+     const int read = column * 2 + taa_turn_[eye];
+@@ -692,23 +705,23 @@ void SceneRenderer::RecordVpkTaa(VkCommandBuffer cmd) {
+                      {&object_velocity_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&taa_history_[read], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&taa_history_[write], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+-                     {&post_hdr_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
++                     {&out_color, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+                      {&post_depth_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+                      {&post_object_velocity_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
+     if (particles) {
+         UseTargets(cmd, {{&particles_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
+     }
+-    BeginPass(cmd, output_extent_, {{&post_hdr_, false, {}}, {&post_depth_, false, {}}, {&post_object_velocity_, false, {}}, {&taa_history_[write], false, {}}});
++    BeginPass(cmd, output_extent_, {{&out_color, false, {}}, {&post_depth_, false, {}}, {&post_object_velocity_, false, {}}, {&taa_history_[write], false, {}}});
+     gpu::PassPush push;
+-    push.ids = glm::uvec4(kSlots[read], (valid ? 1u : 0u) | (VrSkipsUpscale() ? 2u : 0u), reflection, main_view_.index);
++    push.ids = glm::uvec4(kSlots[read], (valid ? 1u : 0u), reflection, main_view_.index);
+     push.f0 = glm::vec4(up_.jitter_pixels.x / static_cast<float>(extent_.width), up_.jitter_pixels.y / static_cast<float>(extent_.height),
+                         1.0f / static_cast<float>(output_extent_.width), 1.0f / static_cast<float>(output_extent_.height));
+-    push.f1 = glm::vec4(static_cast<float>(extent_.width), static_cast<float>(extent_.height), vr_taa_sharpness_, 0.0f);
++    push.f1 = glm::vec4(static_cast<float>(extent_.width), static_cast<float>(extent_.height), 0.0f, 0.0f);
+     push.f2 = particles ? taa_particles_place_ : glm::vec4(-1.0f, 0.0f, 0.0f, 0.0f);
+     push.m = previous_view_projection_;
+     Fullscreen(cmd, taa_, push);
+     vkCmdEndRendering(cmd);
+-    UseTargets(cmd, {{&post_hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
++    UseTargets(cmd, {{&out_color, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&post_depth_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&post_object_velocity_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                      {&taa_history_[write], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
+@@ -718,6 +731,23 @@ void SceneRenderer::RecordVpkTaa(VkCommandBuffer cmd) {
+     EndLabel(cmd);
+ }
+ 
++// RCAS over VPKTAA's output (upscaled_) into the post chain's colour. Sharpness in stops =
++// (1 - slider) * 2, so the slider at its top is the sharpest; 0 never gets here.
++void SceneRenderer::RecordVpkRcas(VkCommandBuffer cmd) {
++    if (!RcasOn()) {
++        return;
++    }
++    BeginLabel(cmd, "rcas");
++    UseTargets(cmd, {{&upscaled_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}, {&post_hdr_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}});
++    BeginPass(cmd, output_extent_, {{&post_hdr_, false, {}}});
++    gpu::PassPush push;
++    push.f0 = glm::vec4(std::exp2(-2.0f * (1.0f - vr_taa_sharpness_)), 0.0f, 0.0f, 0.0f);
++    Fullscreen(cmd, rcas_, push);
++    vkCmdEndRendering(cmd);
++    UseTargets(cmd, {{&post_hdr_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}});
++    EndLabel(cmd);
++}
++
+ void SceneRenderer::ReadUpscaleTimestamps(FrameSlot& slot) {
+     if (!slot.upscale_timed) {
+         return;
 diff --git a/src/engine/ui/asset_browser.cpp b/src/engine/ui/asset_browser.cpp
 index f25a76d..ff0c50f 100644
 --- a/src/engine/ui/asset_browser.cpp

@@ -6,7 +6,12 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Último hecho
 
-- Build 73 (rama `pt-1.0.5`): AA especular en `gbuffer.frag` (kernel = min(0,25·(|dn/dx|²+|dn/dy|²), 0,18) sobre la normal
+- Commiteado SIN build (usuario pidió no lanzar; run 73 cancelado): RCAS (`shaders/vpkrcas.frag`, FSR1, límite 0,1875,
+  proxy HDR p=sqrt(x/(1+x)), clamp 0,99999) tras VPKTAA en vistas nítidas: VPKTAA escribe `upscaled_` (slot 43), RCAS escribe
+  `post_hdr_`; historial sin afilar; afilado interno de `vpktaa.frag` eliminado; deslizador nitidez → stops=(1-s)·2
+  (0 = sin pasada); etiqueta `rcas` en `gpu labels`. SSAO fuera de la periferia: descartado (ahorro 0,1–0,3 ms).
+
+- Build 73 (CANCELADA en CI, código commiteado): AA especular en `gbuffer.frag` (kernel = min(0,25·(|dn/dx|²+|dn/dy|²), 0,18) sobre la normal
   normalizada, r' = (r⁴+kernel)^¼; derivadas válidas tras `discard` porque Apple compila con vulkan1.3 = demote), ajuste
   `specular_aa` (fila `kVpSpecularAa`, `Toggles::specular_aa`, bit 0x100 de `ids.z` del gbuffer, `PT_VP_SPECULAR_AA`,
   `PTSettings.specularAA`); `vpktaa.frag` `SIGMA_EDGE_STILL 1.15` (borde quieto). Jitter previo verificado sin jitter.
@@ -40,8 +45,9 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 1. Log build 72: crash a vista completa (`ui: full-view overlay`), botones del museo, escena final (`vr: stereo frame:`,
    aún sin reproducir en un log).
-2. Nitidez (usuario no quiere el VPKTAA de la 50): log build 73 con AA especular on/off. Pendiente de su sí: periferia sin SSAO
-   + más resolución si los fps aguantan.
+2. Nitidez: próxima build = AA especular + RCAS; medir `rcas` y probar nitidez 50–80 %. Límite real del centro = salida
+   862 px para 55° (~15,7 px/°, visor ~34): subir % VPKTAA no se nota. Opciones: círculo menor y más denso; anillo
+   intermedio (6 vistas, `vr_last_camera_[4]` etc. a 6). Usuario no convencido aún.
 3. Subtítulos con el HUD completo escalan con él (misma textura); sacarlos a otra capa si molesta.
 4. Iconos de botón reales (`prompt_hint` de 1.0.5 no fusionado); ahora nombres de texto.
 5. Otros idiomas caen al inglés en claves del visor; PC aún en `pc_note_prompt_style`, `pc_note_display_mode`, `pc_mouse`.
