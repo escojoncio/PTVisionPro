@@ -516,6 +516,26 @@ struct Host::Impl {
     ar_session_t ar_session = nil;
     ar_world_tracking_provider_t world_tracking = nil;
     ar_device_anchor_t anchor = nil;
+    // The system foveation map's dense zone (LocateViews), as tangents from the eyes' axes; `gaze_proven` once it has moved by more
+    // than a small threshold in this session: a map that never moves is no gaze.
+    glm::vec2 gaze_tangent{0.0f};
+    bool gaze_valid = false;
+    glm::vec2 gaze_anchor{0.0f};
+    bool gaze_have_anchor = false;
+    bool gaze_proven = false;
+    // Proof that the map follows a gaze: three separate moves (0.25 s apart at least) within 10 s; the maps' shapes it was seen on.
+    std::chrono::steady_clock::time_point gaze_moves[3]{};
+    int gaze_move_count = 0;
+    size_t gaze_map_count = 0;
+    uint64_t gaze_physical[2] = {0, 0};
+    void ResetGaze() {
+        gaze_valid = false;
+        gaze_have_anchor = false;
+        gaze_proven = false;
+        gaze_move_count = 0;
+        gaze_map_count = 0;
+        gaze_physical[0] = gaze_physical[1] = 0;
+    }
 
     // Metal: the queue MoltenVK submits to (so our pass is ordered after the game's work).
     id<MTLDevice> mtl_device = nil;
@@ -1379,6 +1399,7 @@ bool Host::StartSession(vk::Context& ctx, float scale) {
         if (!x.overlay_textures[1]) x.overlay_textures[0] = nil;
     }
     x.running = true;
+    x.ResetGaze();  // (a new session learns the gaze again)
     x.divisor = pt::visionos::Headset().target_fps == 45 ? 2 : 1;
     cp_layer_renderer_set_minimum_frame_repeat_count(x.layer, x.divisor - 1);
     x.last_stats = std::chrono::steady_clock::now();
@@ -1622,13 +1643,63 @@ bool Host::BeginFrame() {
     return true;
 }
 
+// Where a rate map is densest, as fractions of its screen (x right, y down). The map is separable (a rate per column and per row),
+// so the density along the middle row and along the middle column says it all: the centre of the intervals within 20 % of the
+// densest one's excess over the sparsest, weighted by that excess. false: a uniform map (no foveation).
+static bool DenseCentre(id<MTLRasterizationRateMap> map, NSUInteger layer, float& fraction_x, float& fraction_y) {
+    const MTLSize screen = map.screenSize;
+    if (!screen.width || !screen.height) return false;
+    constexpr int kSteps = 24;
+    const float sw = static_cast<float>(screen.width);
+    const float sh = static_cast<float>(screen.height);
+    auto centre = [&](bool across, float& out) {
+        float density[kSteps];
+        MTLCoordinate2D previous{};
+        for (int i = 0; i <= kSteps; ++i) {
+            const float t = static_cast<float>(i) / kSteps;
+            const MTLCoordinate2D p = [map mapScreenToPhysicalCoordinates:(across ? MTLCoordinate2DMake(t * sw, 0.5f * sh) : MTLCoordinate2DMake(0.5f * sw, t * sh))
+                                                                 forLayer:layer];
+            if (i > 0) {
+                const float d = across ? std::fabs(p.x - previous.x) : std::fabs(p.y - previous.y);
+                density[i - 1] = std::isfinite(d) ? d : 0.0f;
+            }
+            previous = p;
+        }
+        float lo = density[0], hi = density[0];
+        for (int i = 1; i < kSteps; ++i) {
+            lo = std::min(lo, density[i]);
+            hi = std::max(hi, density[i]);
+        }
+        if (!(hi > 0.0f) || !(hi > lo * 1.15f)) return false;
+        const float threshold = lo + 0.8f * (hi - lo);
+        double sum = 0.0, sum_t = 0.0;
+        for (int i = 0; i < kSteps; ++i) {
+            if (density[i] <= threshold) continue;
+            const double w = density[i] - threshold;
+            sum += w;
+            sum_t += w * (static_cast<double>(i) + 0.5) / kSteps;
+        }
+        if (!(sum > 0.0)) return false;
+        out = static_cast<float>(sum_t / sum);
+        return true;
+    };
+    return centre(true, fraction_x) && centre(false, fraction_y);
+}
+
 void Host::LocateViews() {
     Impl& x = *impl_;
     auto guard = x.GameCall();
     views_valid_ = false;
-    if (!x.drawable || !x.anchor_valid) return;
+    // (No frame to read a gaze from: nothing learned before may survive it.)
+    if (!x.drawable || !x.anchor_valid) {
+        x.ResetGaze();
+        return;
+    }
     const size_t count = cp_drawable_get_view_count(x.drawable);
-    if (count < 2) return;
+    if (count < 2) {
+        x.ResetGaze();
+        return;
+    }
     for (int i = 0; i < 2; ++i) {
         cp_view_t view = cp_drawable_get_view(x.drawable, i);
         const simd_float4x4 world = simd_mul(x.origin_from_device, cp_view_get_transform(view));
@@ -1646,6 +1717,71 @@ void Host::LocateViews() {
         x.eye_tangents[i] = simd_make_float4(tan_left, tan_right, tan_down, tan_up) * k;
     }
     x.have_tangents = true;
+    // Where the system's foveation map is densest in each view (the gaze), as a tangent from the eye's axis: the game's sharp zone can
+    // sit there (GazeInset). A few dozen map queries a frame; the view's field is its whole screen (NDC -1..1 across the map).
+    if (pt::visionos::Headset().gaze_inset && cp_drawable_get_view_count(x.drawable) >= 2) {
+        glm::vec2 sum(0.0f);
+        int found = 0;
+        const size_t map_count = cp_drawable_get_rasterization_rate_map_count(x.drawable);
+        uint64_t physical[2] = {0, 0};
+        @autoreleasepool {
+            for (int i = 0; map_count > 0 && i < 2; ++i) {
+                cp_view_texture_map_t texture_map = cp_view_get_view_texture_map(cp_drawable_get_view(x.drawable, i));
+                const size_t texture_index = cp_view_texture_map_get_texture_index(texture_map);
+                const NSUInteger slice = static_cast<NSUInteger>(cp_view_texture_map_get_slice_index(texture_map));
+                id<MTLRasterizationRateMap> map = cp_drawable_get_rasterization_rate_map(x.drawable, texture_index < map_count ? texture_index : 0);
+                if (!map) continue;
+                const NSUInteger layer = slice < map.layerCount ? slice : 0;
+                const MTLSize size = [map physicalSizeForLayer:layer];
+                physical[i] = (static_cast<uint64_t>(size.width) << 32) | static_cast<uint64_t>(size.height);
+                float fraction_x = 0.0f, fraction_y = 0.0f;
+                if (!DenseCentre(map, layer, fraction_x, fraction_y)) continue;
+                const simd_float4x4 p = cp_drawable_compute_projection(x.drawable, cp_axis_direction_convention_right_up_back, static_cast<size_t>(i));
+                const float ndc_x = 2.0f * fraction_x - 1.0f, ndc_y = 1.0f - 2.0f * fraction_y;
+                sum += glm::vec2((ndc_x + p.columns[2][0]) / p.columns[0][0], (ndc_y + p.columns[2][1]) / p.columns[1][1]);
+                ++found;
+            }
+        }
+        // The maps' shape changed (dynamic resolution, the centre or periphery settings, another drawable): what was learned is void.
+        if (map_count != x.gaze_map_count || physical[0] != x.gaze_physical[0] || physical[1] != x.gaze_physical[1]) {
+            x.ResetGaze();
+            x.gaze_map_count = map_count;
+            x.gaze_physical[0] = physical[0];
+            x.gaze_physical[1] = physical[1];
+        }
+        if (found == 2 && std::isfinite(sum.x + sum.y)) {
+            const glm::vec2 gaze = sum / static_cast<float>(found);
+            const auto now = std::chrono::steady_clock::now();
+            if (!x.gaze_have_anchor) {
+                x.gaze_anchor = gaze;
+                x.gaze_have_anchor = true;
+            } else if (glm::distance(gaze, x.gaze_anchor) > 0.03f) {
+                x.gaze_anchor = gaze;
+                // A move counts when it comes 0.25 s after the last one; three within 10 s prove a gaze (one jump is a re-layout).
+                if (x.gaze_move_count == 0 || now - x.gaze_moves[x.gaze_move_count - 1] > std::chrono::milliseconds(250)) {
+                    if (x.gaze_move_count == 3) {
+                        x.gaze_moves[0] = x.gaze_moves[1];
+                        x.gaze_moves[1] = x.gaze_moves[2];
+                        x.gaze_move_count = 2;
+                    }
+                    x.gaze_moves[x.gaze_move_count++] = now;
+                    if (x.gaze_move_count == 3 && now - x.gaze_moves[0] <= std::chrono::seconds(10)) x.gaze_proven = true;
+                }
+            }
+            x.gaze_tangent = gaze;
+            x.gaze_valid = true;
+        } else {
+            // (Invalid estimate: what was proven is void too.)
+            const size_t keep_count = x.gaze_map_count;
+            const uint64_t keep_physical[2] = {x.gaze_physical[0], x.gaze_physical[1]};
+            x.ResetGaze();
+            x.gaze_map_count = keep_count;
+            x.gaze_physical[0] = keep_physical[0];
+            x.gaze_physical[1] = keep_physical[1];
+        }
+    } else {
+        x.ResetGaze();
+    }
     // Variable rasterization rate: the rate maps (and eye images) once the eyes' fields are known,
     // and again when they or the centre's size change (the menu). Between frames for the game: it
     // takes the eye images after this.
@@ -2157,7 +2293,7 @@ static void ComposeFrame(Host& host, Host::Impl& x, cp_drawable_t drawable, cons
                 [enc setDepthStencilState:eye_distances ? x.depth_out : x.depth_write];
                 [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
                 // The game's foveation: the eye's sharp centre over its wide view, faded in at the
-                // edge. Symmetric around the eye's forward axis (tangents left, right, up, down).
+                // edge. `inset_tangents` (left, right, up, down) are the circle's square around its centre: the eye's axis or, following the gaze, where the foveation map is sharpest.
                 if (layers.inset && v < 2 && x.inset_pipeline && !x.textures[4 + v].empty()) {
                     const glm::vec4& t = layers.inset_tangents;
                     Uniforms w = u;
@@ -2355,6 +2491,15 @@ bool Host::InsetWanted(float& center, float& density, float& lift) const {
     density = std::clamp(static_cast<float>(h.center_res) / 100.0f, 0.5f, 1.0f) / std::max(impl_->eye_factor, 0.1f);
     // What the eye images are now (the setting takes effect with them, after its short wait).
     return impl_->running && impl_->eye_factor < 0.999f && !vrr_.active;
+}
+
+bool Host::GazeInset(glm::vec2& tangent) const {
+    const Impl& x = *impl_;
+    // Only a map that has moved (in this session) is a gaze, a fixed one being the system's idea of the middle; once it has, the zone
+    // follows it while the estimate is valid.
+    if (!pt::visionos::Headset().gaze_inset || !x.gaze_valid || !x.gaze_proven) return false;
+    tangent = x.gaze_tangent;
+    return true;
 }
 
 bool Host::EnsureInsetImages(VkExtent2D extent) {
@@ -2626,6 +2771,7 @@ void ApplySettings(AppSettings& s) {
     h.scene_depth = Flag("PT_VP_SCENE_DEPTH", true);
     h.tiled_lights = Flag("PT_VP_TILED_LIGHTS", true);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);
+    h.gaze_inset = Flag("PT_VP_GAZE_INSET", true);
     h.periphery = std::clamp(static_cast<int>(Number("PT_VP_PERIPHERY", 20.0f)), 10, 50);
     h.center_deg = std::clamp(static_cast<int>(Number("PT_VP_CENTER_DEG", 40.0f)), 20, 70);
     h.center_up = std::clamp(static_cast<int>(Number("PT_VP_CENTER_UP", -8.0f)), -20, 10);

@@ -17518,8 +17518,28 @@ index 399ce75..71922c8 100644
      int silence_chunks_ = 0;
      int voiced_chunks_ = 0;
  };
+diff --git a/src/engine/xr/xr_host.cpp b/src/engine/xr/xr_host.cpp
+index ff8142b..cc3da95 100644
+--- a/src/engine/xr/xr_host.cpp
++++ b/src/engine/xr/xr_host.cpp
+@@ -58,6 +58,7 @@ float Host::GpuBudgetMs() const { return 0.0f; }
+ void Host::SetPointerWanted(bool) {}
+ bool Host::TakeRecenter() { return false; }
+ bool Host::InsetWanted(float&, float&, float&) const { return false; }
++bool Host::GazeInset(glm::vec2&) const { return false; }
+ bool Host::EnsureInsetImages(VkExtent2D) { return false; }
+ bool Host::Acquire(Swapchain&) { return false; }
+ void Host::Release(Swapchain&) {}
+@@ -876,6 +877,7 @@ float Host::GpuBudgetMs() const { return 0.0f; }
+ void Host::SetPointerWanted(bool) {}
+ bool Host::TakeRecenter() { return false; }
+ bool Host::InsetWanted(float&, float&, float&) const { return false; }
++bool Host::GazeInset(glm::vec2&) const { return false; }
+ bool Host::EnsureInsetImages(VkExtent2D) { return false; }
+ 
+ #endif
 diff --git a/src/engine/xr/xr_host.h b/src/engine/xr/xr_host.h
-index c1d987a..03948bc 100644
+index c1d987a..07be109 100644
 --- a/src/engine/xr/xr_host.h
 +++ b/src/engine/xr/xr_host.h
 @@ -45,6 +45,10 @@ struct ControllerState {
@@ -17533,6 +17553,16 @@ index c1d987a..03948bc 100644
      int prompt_style = 0;  // 0 Xbox, 1 PlayStation, 2 Nintendo
      bool pointer_valid = false;
      glm::vec2 pointer{0.0f};
+@@ -131,6 +135,9 @@ public:
+     // pixel density over the wide view's and its centre's height (a tangent above the eye's
+     // forward axis, negative below); the eye images are then the wide, low-density views.
+     bool InsetWanted(float& center, float& density, float& lift) const;
++    // Where the system's foveation map is sharpest (the gaze), as tangents from the eyes' axes (right, up), when the sharp zone should
++    // follow it: the setting is on and the map has moved lately (a fixed map is no gaze). false: keep the straight-ahead zone.
++    bool GazeInset(glm::vec2& tangent) const;
+     // The inset images at this size (made again when it changes); false: no insets.
+     bool EnsureInsetImages(VkExtent2D extent);
+     bool Acquire(Swapchain& swapchain);
 diff --git a/src/game/archive_model_camera.h b/src/game/archive_model_camera.h
 new file mode 100644
 index 0000000..2ff8fc3
@@ -26827,6 +26857,86 @@ index a42d9f0..7717789 100644
  
      Game& game_;
      std::unordered_map<Key, bool, KeyHash> traps_;
+diff --git a/src/game/ui/demo_ui.cpp b/src/game/ui/demo_ui.cpp
+index 6654480..60f770e 100644
+--- a/src/game/ui/demo_ui.cpp
++++ b/src/game/ui/demo_ui.cpp
+@@ -277,6 +277,7 @@ void DemoUi::Update(Game& game, float dt, bool paused) {
+ }
+ 
+ void DemoUi::Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language) {
++    full_canvas_ = false;
+     for (auto& instance : instances_) {
+         if (!instance->started) {
+             continue;
+@@ -287,6 +288,7 @@ void DemoUi::Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language) {
+             }
+             for (ModelView& model : layout.models) {
+                 model.view->Draw(batch, canvas, language, 1.0f);
++                full_canvas_ = full_canvas_ || model.view->CoversCanvas();
+             }
+         }
+     }
+diff --git a/src/game/ui/demo_ui.h b/src/game/ui/demo_ui.h
+index 8aa87d6..4df86f4 100644
+--- a/src/game/ui/demo_ui.h
++++ b/src/game/ui/demo_ui.h
+@@ -27,6 +27,8 @@ public:
+     void Update(Game& game, float dt, bool paused);
+     void Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language);
+     bool Active() const { return !instances_.empty(); }
++    // The last Draw showed a picture over the whole canvas (the fake crash screens, the ending).
++    bool FullCanvas() const { return full_canvas_; }
+     void Clear() { instances_.clear(); }
+ 
+     bool Create(std::string_view demo_id, uint64_t graph, std::string_view path);
+@@ -34,6 +36,7 @@ public:
+     bool Text(uint64_t graph, uint64_t text, int bug_screen = -1);
+ 
+ private:
++    bool full_canvas_ = false;
+     struct ModelView {
+         const ui::UifModel* model = nullptr;
+         std::unique_ptr<UifView> view;
+diff --git a/src/game/ui/game_ui.cpp b/src/game/ui/game_ui.cpp
+index 2fc326b..8e453a7 100644
+--- a/src/game/ui/game_ui.cpp
++++ b/src/game/ui/game_ui.cpp
+@@ -909,6 +909,13 @@ void GameUi::Record(VkCommandBuffer cmd, VkImageView target, VkExtent2D extent)
+     for (const Layer& layer : layers) {
+         layer.draw();
+     }
++    const bool full_canvas = !menu_.IsOpen() && ((demo_ui_.Active() && demo_ui_.FullCanvas()) || port_credits_time_ >= 0.0f);
++    if (full_canvas != full_canvas_ && vr_hud_) {
++        LogInfo("ui: full-canvas picture {} (demo graphs {}, port credits {}); the UI's scene-colour source is {}x{}", full_canvas ? "shown" : "gone",
++                demo_ui_.Active() && demo_ui_.FullCanvas(), port_credits_time_ >= 0.0f, renderer_ ? renderer_->SceneColor().extent.width : 0,
++                renderer_ ? renderer_->SceneColor().extent.height : 0);
++    }
++    full_canvas_ = full_canvas;
+     batch.Record(cmd, extent);
+ }
+ 
+diff --git a/src/game/ui/game_ui.h b/src/game/ui/game_ui.h
+index 82f38e7..362aaba 100644
+--- a/src/game/ui/game_ui.h
++++ b/src/game/ui/game_ui.h
+@@ -77,6 +77,8 @@ public:
+     void ShowCaptionKey(uint32_t key, float offset_seconds) { subtitles_.PlayKey(key, offset_seconds); }
+     void SetLetterbox(float aspect) { letterbox_ = aspect; }
+     void SetVrHud(bool enabled) { vr_hud_ = enabled; }
++    // The last frame's UI was a full-screen picture (a crash screen, the credits): in the headset the HUD then fills the view.
++    bool FullCanvasUi() const { return full_canvas_; }
+     SubtitlePlayer& Subtitles() { return subtitles_; }
+     DemoUi& DemoGraphs() { return demo_ui_; }
+     void SetMenuSuspended(bool suspended) { menu_suspended_ = suspended; }
+@@ -150,6 +152,7 @@ private:
+     bool pc_request_ = false;
+     float letterbox_ = 0.0f;
+     bool vr_hud_ = false;
++    bool full_canvas_ = false;
+     std::string save_dialog_text_;
+     bool menu_suspended_ = false;
+     SubtitlePlayer other_subtitles_;
 diff --git a/src/game/ui/options_menu.cpp b/src/game/ui/options_menu.cpp
 index 588808d..2852ec7 100644
 --- a/src/game/ui/options_menu.cpp
@@ -26845,7 +26955,7 @@ index 588808d..2852ec7 100644
      options.invert_y = vertical_;
      options.invert_x = horizontal_;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 1868d99..4a60389 100644
+index 1868d99..8263bf7 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
 @@ -1,6 +1,9 @@
@@ -26858,7 +26968,16 @@ index 1868d99..4a60389 100644
  #include <utility>
  #include "engine/core/localized_text.h"
  
-@@ -90,15 +93,66 @@ constexpr Entry kTexts[] = {
+@@ -71,6 +74,8 @@ constexpr Entry kTexts[] = {
+     {"pc_note_vp_center_res", {"Resolution inside the sharp zone, relative to the image size. 100% is the most the image size allows. The periphery does not change it.", "", "", "Resolución dentro de la zona nítida, respecto al tamaño de imagen. 100 % es la máxima que permite el tamaño de imagen. La periferia no la cambia.", "", "", ""}},
+     {"pc_vp_center", {"Sharp zone width", "", "", "Ancho de la zona nítida", "", "", ""}},
+     {"pc_note_vp_center", {"Diameter in degrees of the sharp circle in the middle of the view. 40° is about what you look at straight ahead. Wider costs much more.", "", "", "Diámetro en grados del círculo nítido en el centro de la vista. 40° es más o menos lo que miras de frente. Más ancho cuesta mucho más.", "", "", ""}},
++    {"pc_vp_gaze", {"Sharp zone follows your gaze", "", "", "Zona nítida sigue la mirada", "", "", ""}},
++    {"pc_note_vp_gaze", {"The sharp zone moves to where the headset's own foveation is sharpest (where you look) instead of staying straight ahead. Only when the headset follows the gaze; otherwise it stays in the middle. Applies right away.", "", "", "La zona nítida se mueve a donde el foveado del propio visor es más nítido (donde miras) en vez de quedarse al frente. Solo si el visor sigue la mirada; si no, se queda en el centro. Se aplica al momento.", "", "", ""}},
+     {"pc_vp_border", {"Show the sharp zone's edge", "", "", "Mostrar borde de la zona nítida", "", "", ""}},
+     {"pc_note_vp_border", {"A red ring where the sharp zone ends, to set its width and height. For testing; not kept.", "", "", "Un aro rojo donde acaba la zona nítida, para ajustar su ancho y su altura. Solo para pruebas; no se guarda.", "", "", ""}},
+     {"pc_vp_dynres", {"Dynamic resolution", "", "", "Resolución dinámica", "", "", ""}},
+@@ -90,15 +95,66 @@ constexpr Entry kTexts[] = {
      {"pc_vp_recenter", {"Recentre view", "", "", "Recentrar vista", "", "", ""}},
      {"pc_vp_recenter_value", {"Now", "", "", "Ahora", "", "", ""}},
      {"pc_note_vp_recenter", {"Puts you back in the game where you stand now, facing where you look. Also done by itself after a long press of the Digital Crown.", "", "", "Te vuelve a colocar en el juego donde estás ahora, mirando hacia donde miras. También se hace solo tras mantener pulsada la Digital Crown.", "", "", ""}},
@@ -26926,7 +27045,7 @@ index 1868d99..4a60389 100644
      {"pc_loop_f000", {"Start room: the opening"}},
      {"pc_loop_f010", {"Loop 1: the radio"}},
      {"pc_loop_f005", {"Loop 2: the lobby door opens"}},
-@@ -126,9 +180,25 @@ constexpr Entry kTexts[] = {
+@@ -126,9 +182,25 @@ constexpr Entry kTexts[] = {
      {"pc_street_title", {"The street"}},
      {"pc_street_question", {"Explore the street?"}},
      {"pc_street_walk", {"Yes, walk the street"}},
@@ -26953,7 +27072,7 @@ index 1868d99..4a60389 100644
      {"pc_credits_dlss", {"This game uses NVIDIA DLSS."}},
      {"pc_credits_licenses", {"The full license texts are in the licenses folder next to pt.exe."}},
      {"pc_credits_konami", {"P.T. belongs to Konami Digital Entertainment and Kojima Productions."}},
-@@ -166,11 +236,13 @@ constexpr Entry kTexts[] = {
+@@ -166,11 +238,13 @@ constexpr Entry kTexts[] = {
      {"pc_extras", {"Extras"}},
      {"pc_note_extras", {"Loop browser, free camera and photo mode."}},
      {"pc_freecam", {"Free camera"}},
@@ -26969,7 +27088,7 @@ index 1868d99..4a60389 100644
      {"pc_extras_start", {"Start"}},
      {"pc_vr", {"VR (experimental)"}},
      {"pc_note_vr", {"Play in a VR headset through OpenXR. Experimental: not tested on real hardware."}},
-@@ -209,11 +281,11 @@ constexpr Entry kTexts[] = {
+@@ -209,11 +283,11 @@ constexpr Entry kTexts[] = {
      {"pc_photo_auto", {"Auto"}},
      {"pc_photo_metres", {"{value} m"}},
      {"pc_photo_saved", {"Saved to Pictures/PT Photos: {file}"}},
@@ -26983,7 +27102,7 @@ index 1868d99..4a60389 100644
      {"pc_note_photo_reset", {"Returns the camera to where the photo mode started."}},
      {"pc_note_photo_dof", {"Blurs what is nearer or farther than the focus distance."}},
      {"pc_note_photo_focus", {"Auto focuses on what is at the centre of the frame."}},
-@@ -230,17 +302,40 @@ constexpr Entry kTexts[] = {
+@@ -230,17 +304,40 @@ constexpr Entry kTexts[] = {
      {"pc_entry", {"PC Settings"}},
      {"pc_back", {"Back"}},
      {"pc_quit", {"Quit"}},
@@ -27026,7 +27145,7 @@ index 1868d99..4a60389 100644
      {"pc_section_ray_tracing", {"Ray tracing"}},
      {"pc_section_textures", {"Textures"}},
      {"pc_display_mode", {"Display mode"}},
-@@ -261,9 +356,22 @@ constexpr Entry kTexts[] = {
+@@ -261,9 +358,22 @@ constexpr Entry kTexts[] = {
      {"pc_mic_no_word", {"None yet"}},
      {"pc_mic_waiting", {"Waiting for the selected microphone."}},
      {"pc_mic_unavailable", {"Could not open the selected microphone. Check recording permissions and device selection."}},
@@ -27049,7 +27168,7 @@ index 1868d99..4a60389 100644
      {"pc_camera_tilt", {"Camera tilt"}},
      {"pc_vibration", {"Vibration"}},
      {"pc_dead_zone", {"Stick dead zone"}},
-@@ -289,6 +397,13 @@ constexpr Entry kTexts[] = {
+@@ -289,6 +399,13 @@ constexpr Entry kTexts[] = {
      {"pc_note_texture_busy", {"Another game instance is preparing this texture cache. Wait until it finishes, then try again. Original textures are preserved."}},
      {"pc_note_texture_failed", {"Texture preparation failed; original textures are preserved. Check free disk space and pt.log for the cause, then try again."}},
      {"pc_note_texture_preparing", {"Preparing enhanced textures. Original textures stay visible until ready; then they change here without restarting. Off cancels preparation."}},
@@ -27063,7 +27182,7 @@ index 1868d99..4a60389 100644
      {"pc_note_enhanced_textures", {"Generates sharper colour textures once from your game files, walls and people included (4096 px with 10 GB of video memory, else 2048). Switch Off to cancel; original textures stay available."}},
      {"pc_rt_sharp", {"Sharp"}},
      {"pc_rt_soft", {"Soft"}},
-@@ -305,20 +420,50 @@ constexpr Entry kTexts[] = {
+@@ -305,20 +422,50 @@ constexpr Entry kTexts[] = {
      {"pc_quality_custom", {"Custom"}},
      {"pc_system_default", {"System default"}},
      {"pc_reset_value", {"Reset"}},
@@ -27118,7 +27237,7 @@ index 1868d99..4a60389 100644
      {"pc_note_reset_done", {"Progress restarted in this session."}},
      {"pc_note_camera_tilt", {"The camera leans with the head, as in the original."}},
      {"pc_note_voice", {"The microphone listens only where the original game does."}},
-@@ -327,10 +472,96 @@ constexpr Entry kTexts[] = {
+@@ -327,10 +474,96 @@ constexpr Entry kTexts[] = {
      {"pc_note_frame_generation_missing", {"Not in this build."}},
      {"pc_note_frame_generation", {"AMD FSR 3 shows a generated frame between two rendered frames."}},
      {"pc_note_fsr4_vulkan", {"AMD releases FSR 4 for DirectX 12 only; this game renders with Vulkan, so FSR 4 cannot run here."}},
@@ -27215,7 +27334,7 @@ index 1868d99..4a60389 100644
      {"pc_note_dlssg_gpu", {"DLSS Frame Generation needs an NVIDIA GeForce RTX 40 series or newer GPU."}},
      {"pc_note_fsr_fg_gpu", {"FSR 3 frame generation needs an AMD Radeon RX 5000 series or newer GPU."}},
      {"pc_note_dlssg_driver", {"DLSS Frame Generation needs a newer NVIDIA driver."}},
-@@ -340,7 +571,79 @@ constexpr Entry kTexts[] = {
+@@ -340,7 +573,79 @@ constexpr Entry kTexts[] = {
      {"pc_note_dlssg_restart", {"Restart the game to start DLSS Frame Generation."}},
      {"pc_note_vsync_dlssg", {"DLSS Frame Generation runs without v-sync on Vulkan; the setting applies again when frame generation is off."}},
      {"pc_note_fsr_fg_restart", {"Restart the game to switch from DLSS Frame Generation to FSR 3."}},
@@ -27295,7 +27414,7 @@ index 1868d99..4a60389 100644
      {"pc_note_rt_shadows", {"Shadows traced against the scene instead of shadow maps, as sharp as the original's. Not in the original."}},
      {"pc_note_rt_soft", {"Traced shadows with soft edges from each light's size. Not in the original."}},
      {"pc_note_rt_unsupported", {"Needs a GPU with Vulkan ray tracing."}},
-@@ -370,6 +673,8 @@ constexpr Entry kTexts[] = {
+@@ -370,6 +675,8 @@ constexpr Entry kTexts[] = {
      {"pc_standard_reflections", {"Screen reflections"}},
      {"pc_ray_quality", {"Ray quality"}},
      {"pc_ray_balanced", {"Balanced"}},
@@ -27304,7 +27423,7 @@ index 1868d99..4a60389 100644
      {"pc_texture_detail", {"Texture detail"}},
      {"pc_detail_reduced", {"Reduced"}},
      {"pc_detail_fine", {"Fine"}},
-@@ -389,7 +694,10 @@ constexpr Entry kTexts[] = {
+@@ -389,7 +696,10 @@ constexpr Entry kTexts[] = {
      {"pc_note_shadow_quality", {"512, 1024 or original 2048 px shadow maps. Ray-traced shadows replace maps when enabled. Resolution scale is unchanged."}},
      {"pc_note_standard_ao", {"Original screen-space ambient shading. Turn off to reduce cost on slower GPUs."}},
      {"pc_note_standard_reflections", {"Original screen-space floor reflections. Traced reflections replace them when enabled."}},
@@ -27316,7 +27435,7 @@ index 1868d99..4a60389 100644
      {"pc_note_texture_detail", {"Reduced uses coarser texture mips. Fine preserves more texture detail at a distance; may shimmer. Output resolution stays unchanged."}},
      {"pc_note_dof", {"Original camera focus blur. Off keeps nearby surfaces and the background sharp."}},
      {"pc_note_motion_blur", {"Original blur while turning and moving. Off gives a clearer moving image."}},
-@@ -399,8 +707,8 @@ constexpr Entry kTexts[] = {
+@@ -399,8 +709,8 @@ constexpr Entry kTexts[] = {
      {"pc_section_mods", {"Installed mods"}},
      {"pc_note_mods", {"Turning a mod on or off takes effect at the next start. Mods are not part of the original game."}},
      {"pc_archive", {"Museum"}},
@@ -27327,7 +27446,7 @@ index 1868d99..4a60389 100644
      {"pc_note_extras_archive", {"Loop browser, museum, free camera and photo mode."}},
      {"pc_archive_sections", {"Halls"}},
      {"pc_archive_images", {"Subliminal images"}},
-@@ -415,21 +723,25 @@ constexpr Entry kTexts[] = {
+@@ -415,21 +725,25 @@ constexpr Entry kTexts[] = {
      {"pc_note_archive_cutscenes", {"Every cutscene from its start, with its sound and subtitles."}},
      {"pc_note_archive_models", {"Lisa and the hallway's other figures and objects, in the light of the start room."}},
      {"pc_note_archive_unused_section", {"Content in the game's files that the game never shows. It opens once you finish the game."}},
@@ -27364,7 +27483,7 @@ index 1868d99..4a60389 100644
      {"pc_archive_noise", {"Noise"}},
      {"pc_archive_noise_normal", {"Noise distortion"}},
      {"pc_archive_peephole_mask", {"The peephole's view"}},
-@@ -472,8 +784,117 @@ constexpr Entry kTexts[] = {
+@@ -472,8 +786,117 @@ constexpr Entry kTexts[] = {
      {"pc_archive_phone_model", {"The telephone"}},
      {"pc_archive_xmark_photo", {"The X mark photo"}},
      {"pc_archive_clock_model", {"The clock"}},
@@ -27483,7 +27602,7 @@ index 1868d99..4a60389 100644
  };
  
  }
-@@ -499,7 +920,61 @@ std::string PcNoteText(std::string_view note, int language) {
+@@ -499,7 +922,61 @@ std::string PcNoteText(std::string_view note, int language) {
      return text;
  }
  
@@ -27546,7 +27665,7 @@ index 1868d99..4a60389 100644
      if (language >= 1) {
          const auto text = localized::Menu(key, language);
          if (!text.empty()) return text;
-@@ -513,4 +988,19 @@ std::string_view PcText(std::string_view key, int language) {
+@@ -513,4 +990,19 @@ std::string_view PcText(std::string_view key, int language) {
      return key;
  }
  
@@ -27895,6 +28014,116 @@ index 2dc73b6..637b54e 100644
      void Apply(UifView& view) const;
  
  private:
+diff --git a/src/game/ui/uif_view.cpp b/src/game/ui/uif_view.cpp
+index 141d472..4e1c7da 100644
+--- a/src/game/ui/uif_view.cpp
++++ b/src/game/ui/uif_view.cpp
+@@ -1,8 +1,10 @@
+ #include "game/ui/uif_view.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <cmath>
+ #include <cstdlib>
++#include <vector>
+ #include "engine/core/log.h"
+ #include "game/ui/pc_settings.h"
+ 
+@@ -12,6 +14,39 @@
+ namespace pt::game {
+ namespace {
+ 
++// The area of triangle abc inside the rectangle [lo, hi] (Sutherland-Hodgman against its four sides; a triangle clipped by four
++// lines has at most seven corners).
++float ClippedTriangleArea(glm::vec2 a, glm::vec2 b, glm::vec2 c, glm::vec2 lo, glm::vec2 hi) {
++    std::array<glm::vec2, 8> poly{a, b, c};
++    std::array<glm::vec2, 8> out;
++    size_t count = 3;
++    for (int side = 0; side < 4 && count > 0; ++side) {
++        auto inside = [&](glm::vec2 p) {
++            return side == 0 ? p.x >= lo.x : side == 1 ? p.x <= hi.x : side == 2 ? p.y >= lo.y : p.y <= hi.y;
++        };
++        auto cut = [&](glm::vec2 p, glm::vec2 q) {
++            const float t = side < 2 ? ((side == 0 ? lo.x : hi.x) - p.x) / (q.x - p.x) : ((side == 2 ? lo.y : hi.y) - p.y) / (q.y - p.y);
++            return p + (q - p) * t;
++        };
++        size_t n = 0;
++        for (size_t i = 0; i < count && n + 2 <= out.size(); ++i) {
++            const glm::vec2 p = poly[i];
++            const glm::vec2 q = poly[(i + 1) % count];
++            if (inside(p)) out[n++] = p;
++            if (inside(p) != inside(q)) out[n++] = cut(p, q);
++        }
++        poly = out;
++        count = n;
++    }
++    float area = 0.0f;
++    for (size_t i = 0; i < count; ++i) {
++        const glm::vec2 p = poly[i];
++        const glm::vec2 q = poly[(i + 1) % count];
++        area += p.x * q.y - q.x * p.y;
++    }
++    return std::fabs(area) * 0.5f;
++}
++
+ glm::mat3 Affine(glm::vec2 translate, float angle, glm::vec2 scale) {
+     const float c = std::cos(angle);
+     const float s = std::sin(angle);
+@@ -236,6 +271,7 @@ std::optional<glm::vec2> UifView::TextSpan(uint16_t id) const {
+ }
+ 
+ void UifView::Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language, float root_alpha, glm::vec2 root_offset) {
++    covers_canvas_ = false;
+     if (!model_ || !assets_) {
+         return;
+     }
+@@ -290,6 +326,25 @@ void UifView::Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language, flo
+                 const glm::vec2 local = positions[i] * node.size;
+                 vertices.push_back({canvas.FromUnits(Apply(world.transform, local)), uvs[i], world.color});
+             }
++            // A full-screen picture: an alpha-blended (not additive) mesh, opaque in its colour, whose triangles cover 90 % of the canvas.
++            if (!covers_canvas_ && !node.Additive() && world.color.a >= 0.9f && vertices.size() >= 3) {
++                const glm::vec2 size = glm::vec2(UiCanvas::kWidth, UiCanvas::kHeight) * canvas.scale;
++                // (Its box must reach over the canvas before the areas are worked out.)
++                glm::vec2 box_lo = vertices[0].position;
++                glm::vec2 box_hi = box_lo;
++                for (const ui::UiVertex& v : vertices) {
++                    box_lo = glm::min(box_lo, v.position);
++                    box_hi = glm::max(box_hi, v.position);
++                }
++                float covered = 0.0f;
++                const bool reaches = box_lo.x <= canvas.origin.x + 0.05f * size.x && box_lo.y <= canvas.origin.y + 0.05f * size.y &&
++                                     box_hi.x >= canvas.origin.x + 0.95f * size.x && box_hi.y >= canvas.origin.y + 0.95f * size.y;
++                for (size_t v = 0; reaches && v + 2 < vertices.size(); v += 3) {
++                    covered += ClippedTriangleArea(vertices[v].position, vertices[v + 1].position, vertices[v + 2].position, canvas.origin,
++                                                   canvas.origin + size);
++                }
++                if (covered >= 0.9f * size.x * size.y) covers_canvas_ = true;
++            }
+             batch.Draw(vertices, params, ui::UiShade::Material, blend);
+         } else if (state.text && !state.text->empty()) {
+             const int font_language = language;
+diff --git a/src/game/ui/uif_view.h b/src/game/ui/uif_view.h
+index 08de4e8..9182f0d 100644
+--- a/src/game/ui/uif_view.h
++++ b/src/game/ui/uif_view.h
+@@ -84,6 +84,8 @@ public:
+     glm::vec2 WorldPosition(uint16_t id) const;
+     std::optional<glm::vec2> TextSpan(uint16_t id) const;
+     void Draw(ui::UiBatch& batch, const UiCanvas& canvas, int language, float root_alpha, glm::vec2 root_offset = glm::vec2(0.0f));
++    // The last Draw put a (mostly opaque) mesh over the whole canvas: a full-screen picture.
++    bool CoversCanvas() const { return covers_canvas_; }
+ 
+ private:
+     struct World {
+@@ -100,6 +102,7 @@ private:
+     const ui::UifModel* model_ = nullptr;
+     UiAssets* assets_ = nullptr;
+     bool descriptions_audited_ = false;
++    bool covers_canvas_ = false;
+     std::vector<UifNodeState> states_;
+     std::vector<std::optional<glm::vec2>> text_spans_;
+     std::unordered_multimap<uint32_t, size_t> hash_index_;
 diff --git a/src/game/vfx_scene.cpp b/src/game/vfx_scene.cpp
 index 2983bb2..d190cf2 100644
 --- a/src/game/vfx_scene.cpp
@@ -27990,10 +28219,19 @@ index b45fa4d..bd33cc5 100644
      };
  
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index 38782fe..0296401 100644
+index 38782fe..49823ce 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
-@@ -13,6 +13,10 @@ namespace pt::game {
+@@ -3,6 +3,8 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdlib>
++#include <format>
++#include <string>
+ 
+ #include "engine/core/log.h"
+ #include "engine/physics/collision_world.h"
+@@ -13,6 +15,10 @@ namespace pt::game {
  namespace {
  
  constexpr float kHudDistance = 1.6f;
@@ -28004,7 +28242,25 @@ index 38782fe..0296401 100644
  constexpr float kHudWidth = 1.4f;
  constexpr float kHudDrop = 0.08f;
  constexpr float kHudDeadZone = 0.349f;
-@@ -63,8 +67,15 @@ bool VrPlay::ScreenMode(Game& game) {
+@@ -24,6 +30,17 @@ constexpr float kHeadDrop = 0.8f;
+ constexpr float kWallMargin = 0.12f;
+ constexpr float kNearPlane = 0.05f;
+ 
++// Critically damped approach to `target` (smooth_time: about the time it takes), no overshoot.
++float SmoothDamp(float current, float target, float& velocity, float smooth_time, float dt) {
++    const float omega = 2.0f / smooth_time;
++    const float x = omega * dt;
++    const float e = 1.0f / (1.0f + x + 0.48f * x * x + 0.235f * x * x * x);
++    const float change = current - target;
++    const float temp = (velocity + omega * change) * dt;
++    velocity = (velocity - omega * temp) * e;
++    return target + (change + temp) * e;
++}
++
+ }
+ 
+ void VrPlay::BeginLoop(bool& running) {
+@@ -63,8 +80,15 @@ bool VrPlay::ScreenMode(Game& game) {
      constexpr bool immersive = false;
  #endif
      const bool peephole = game.Nazo().IsPeepholeTheaterActive();
@@ -28022,7 +28278,7 @@ index 38782fe..0296401 100644
      if (screen != screen_ || cutscene != cutscene_) {
          LogInfo("vr: {}", screen ? "virtual screen (a camera the game frames)" : cutscene ? "cutscene in stereo from the scene's camera" : "stereo view");
      }
-@@ -111,8 +122,10 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -111,8 +135,10 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
              state.left_stick = move;
              state.left_stick_from_pad = true;
          }
@@ -28035,7 +28291,7 @@ index 38782fe..0296401 100644
          if (c.dpad_left) raw |= kRawLeft;
          if (c.dpad_right) raw |= kRawRight;
          if (c.l1) raw |= kRawL1;
-@@ -124,10 +137,16 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -124,10 +150,16 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          // hold the zoom" interaction of the original (the peephole, the clock, the picture, the bag)
          // goes on X as well: pressing X is pressing R3, holding it is holding R3.
          if (c.zoom || (c.interact && !menu_open)) raw |= kRawR3;
@@ -28053,7 +28309,7 @@ index 38782fe..0296401 100644
              if (glm::length(look) > glm::length(state.right_stick)) state.right_stick = look;
          } else if (!menu_open && centered_) {
              const float x = c.turn.x;
-@@ -169,6 +188,13 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+@@ -169,6 +201,13 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          state.pressed |= kPadGouge;
      }
      if (pressed & kRawStart) state.pause = true;
@@ -28067,7 +28323,26 @@ index 38782fe..0296401 100644
      if (c.settings && !settings_previous_) state.pc_settings = true;
      settings_previous_ = c.settings;
      if (pressed) state.any_button = true;
-@@ -288,6 +314,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -251,6 +290,18 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+     }
+     head_frustum_ = frusta_[0];
+ #endif
++    {
++        // The eyes' fields and places in the head's frame (head_frustum_ is the union of the fields; the full-view HUD needs what both see).
++        const xr::ViewPose& head_pose = host_.Head();
++        const glm::quat to_head = glm::inverse(head_pose.orientation);
++        eye_fields_valid_ = true;
++        for (int i = 0; i < 2; ++i) {
++            eye_tangents_[i] = tangents[i];
++            const glm::vec3 offset = to_head * (host_.Eye(i).position - head_pose.position);
++            eye_offset_[i] = glm::vec2(offset.x, offset.y);
++            eye_fields_valid_ = eye_fields_valid_ && std::isfinite(offset.x + offset.y) && std::isfinite(tangents[i].x + tangents[i].y + tangents[i].z + tangents[i].w);
++        }
++    }
+     if (cutscene_) {
+         // A cutscene in stereo: the scene's camera is where the head was when it began, pointing
+         // where the head pointed (so nothing jumps); the head then turns and leans freely
+@@ -288,6 +339,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
                                          glm::normalize(heading * rig_.ToWorld(pose.orientation)), frusta_[i], kNearPlane);
          }
          out.render = {draw.x, draw.y};
@@ -28075,7 +28350,7 @@ index 38782fe..0296401 100644
          Place(head.position, head.orientation, menu_open, dt);
          auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
              if (!host_.Acquire(sc)) return false;
-@@ -346,6 +373,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+@@ -346,6 +398,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
          out.eyes[i] = xr::EyeCamera(anchor + rig_.Offset(pose.position) + correction, rig_.ToWorld(pose.orientation), frusta_[i], kNearPlane);
      }
      out.render = {draw.x, draw.y};
@@ -28083,17 +28358,159 @@ index 38782fe..0296401 100644
      Place(head.position, head.orientation, menu_open, dt);
      auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
          if (!host_.Acquire(sc)) return false;
-@@ -537,7 +565,8 @@ void VrPlay::FinishStereo(const Stereo& stereo) {
+@@ -412,6 +465,52 @@ bool VrPlay::PrepareInsets(Stereo& out) {
+     out.inset_render = {scaled(images.x), scaled(images.y)};
+     const float tan_x = tan_r;
+     const float tan_y = tan_r;
++    // The sharp zone's centre: straight ahead (and `lift_y` up), or where the headset's foveation map is sharpest (the gaze) when it is
++    // moving, smoothed (50 ms), always with the whole circle inside both eyes' wide fields (so the nominal place is never moved).
++    float centre_x = 0.0f;
++    float centre_y = lift_y;
++    {
++        const auto now = std::chrono::steady_clock::now();
++        const float dt = gaze_time_ == std::chrono::steady_clock::time_point{} ? 1.0f / 45.0f
++                                                                              : std::clamp(std::chrono::duration<float>(now - gaze_time_).count(), 0.001f, 0.1f);
++        gaze_time_ = now;
++        float lo_x = -1.0e9f, hi_x = 1.0e9f, lo_y = -1.0e9f, hi_y = 1.0e9f;
++        for (int i = 0; i < 2; ++i) {
++            lo_x = std::max(lo_x, frusta_[i].center.x - frusta_[i].tan_x);
++            hi_x = std::min(hi_x, frusta_[i].center.x + frusta_[i].tan_x);
++            lo_y = std::max(lo_y, frusta_[i].center.y - frusta_[i].tan_y);
++            hi_y = std::min(hi_y, frusta_[i].center.y + frusta_[i].tan_y);
++        }
++        const float margin = tan_r / 0.98f;
++        lo_x += margin; hi_x -= margin; lo_y += margin; hi_y -= margin;
++        const bool room = lo_x <= hi_x && lo_y <= hi_y;
++        glm::vec2 goal(0.0f, lift_y);
++        glm::vec2 gaze(0.0f);
++        const bool following = room && host_.GazeInset(gaze);
++        if (following) goal = glm::vec2(std::clamp(gaze.x, lo_x, hi_x), std::clamp(gaze.y, lo_y, hi_y));
++        if (!gaze_started_ || !std::isfinite(gaze_smooth_.x + gaze_smooth_.y)) {
++            gaze_smooth_ = goal;
++            gaze_velocity_ = glm::vec2(0.0f);
++            gaze_started_ = true;
++        } else {
++            gaze_smooth_.x = SmoothDamp(gaze_smooth_.x, goal.x, gaze_velocity_.x, 0.05f, dt);
++            gaze_smooth_.y = SmoothDamp(gaze_smooth_.y, goal.y, gaze_velocity_.y, 0.05f, dt);
++        }
++        centre_x = gaze_smooth_.x;
++        centre_y = gaze_smooth_.y;
++        if (room) {
++            centre_x = std::clamp(centre_x, lo_x, hi_x);
++            centre_y = std::clamp(centre_y, lo_y, hi_y);
++        } else {
++            centre_x = 0.0f;
++            centre_y = lift_y;
++        }
++        if (now - gaze_logged_ >= std::chrono::seconds(1)) {
++            gaze_logged_ = now;
++            LogInfo("vr: sharp zone centre {:.1f} degrees right, {:.1f} up ({}; gaze {})", glm::degrees(std::atan(centre_x)), glm::degrees(std::atan(centre_y)),
++                    following ? "following the foveation map" : "straight ahead", following ? std::format("{:.1f}, {:.1f}", glm::degrees(std::atan(gaze.x)), glm::degrees(std::atan(gaze.y))) : std::string("none"));
++        }
++    }
+     if (inset_logged_ != images || std::fabs(inset_lift_logged_ - lift_y) > 1.0e-3f) {
+         inset_logged_ = images;
+         inset_lift_logged_ = lift_y;
+@@ -420,25 +519,25 @@ bool VrPlay::PrepareInsets(Stereo& out) {
+                 glm::degrees(2.0f * std::atan(tan_r)), glm::degrees(std::atan(lift_y)), images.x, images.y, density, render_size_.x, render_size_.y);
+     }
+     // Left, right, up, down (the composition places it by these).
+-    out.inset_tangents = glm::vec4(-tan_x, tan_x, lift_y + tan_y, lift_y - tan_y);
++    out.inset_tangents = glm::vec4(centre_x - tan_x, centre_x + tan_x, centre_y + tan_y, centre_y - tan_y);
+     for (int i = 0; i < 2; ++i) {
+         // The inset's field in its wide view's image (image y is down).
+         const xr::EyeFrustum& f = frusta_[i];
+-        out.inset_share[i] = glm::vec4(tan_x / f.tan_x, tan_y / f.tan_y, -f.center.x / (2.0f * f.tan_x), (f.center.y - lift_y) / (2.0f * f.tan_y));
++        out.inset_share[i] = glm::vec4(tan_x / f.tan_x, tan_y / f.tan_y, (centre_x - f.center.x) / (2.0f * f.tan_x), (f.center.y - centre_y) / (2.0f * f.tan_y));
+     }
+     {
+         const xr::EyeFrustum& l = frusta_[0];
+         const xr::EyeFrustum& r = frusta_[1];
+         out.bloom_place[0] = out.inset_share[0];
+-        out.bloom_place[1] = glm::vec4(tan_x / l.tan_x, tan_y / l.tan_y, -l.center.x / (2.0f * l.tan_x), (l.center.y - lift_y) / (2.0f * l.tan_y));
++        out.bloom_place[1] = glm::vec4(tan_x / l.tan_x, tan_y / l.tan_y, (centre_x - l.center.x) / (2.0f * l.tan_x), (l.center.y - centre_y) / (2.0f * l.tan_y));
+         out.bloom_place[2] = glm::vec4(r.tan_x / l.tan_x, r.tan_y / l.tan_y, (r.center.x - l.center.x) / (2.0f * l.tan_x),
+                                        (l.center.y - r.center.y) / (2.0f * l.tan_y));
+     }
+     for (int i = 0; i < 2; ++i) {
+         out.insets[i] = out.eyes[i];
+         out.insets[i].fov_y = 2.0f * std::atan(tan_y);
+-        // Off-centre vertically by `lift_y` (as OwnFrustumFor: centre over the half field).
+-        out.insets[i].offset = glm::vec2(0.0f, lift_y / tan_y);
++        // Off-centre by the zone's centre (as OwnFrustumFor: centre over the half field).
++        out.insets[i].offset = glm::vec2(-centre_x / tan_x, centre_y / tan_y);
+         xr::Swapchain& sc = host_.InsetSwapchain(i);
+         if (!host_.Acquire(sc)) {
+             if (i == 1) host_.Release(host_.InsetSwapchain(0));
+@@ -521,6 +620,16 @@ void VrPlay::ReportGpu(float frame_gpu_ms) {
+ }
+ 
+ void VrPlay::FinishStereo(const Stereo& stereo) {
++    {
++        // Which kind of picture the headset gets, once per change (the ending scene, cutscenes, the theater: is the sharp zone drawn?).
++        static int logged = -1;
++        const int state = (stereo.inset ? 1 : 0) | (cutscene_ ? 2 : 0) | (theater_ ? 4 : 0) | (hud_full_wanted_ ? 8 : 0);
++        if (state != logged) {
++            logged = state;
++            LogInfo("vr: stereo frame: sharp zone {}, cutscene {}, theater {}, HUD full-view {}, wide views {}x{}, sharp zone {}x{}", stereo.inset ? "drawn" : "NOT drawn",
++                    cutscene_, theater_, hud_full_wanted_, stereo.render.width, stereo.render.height, stereo.inset_render.width, stereo.inset_render.height);
++        }
++    }
+     host_.Release(host_.EyeSwapchain(0));
+     host_.Release(host_.EyeSwapchain(1));
+     host_.Release(host_.HudSwapchain());
+@@ -535,9 +644,47 @@ void VrPlay::FinishStereo(const Stereo& stereo) {
+     layers.eyes[0] = stereo.poses[0];
+     layers.eyes[1] = stereo.poses[1];
      layers.hud = true;
-     layers.hud_orientation = hud_orientation_;
-     layers.hud_position = hud_position_;
+-    layers.hud_orientation = hud_orientation_;
+-    layers.hud_position = hud_position_;
 -    layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
-+    const float hud_width = kHudWidth * hud_distance_ / kHudDistance;  // the same angular size at any distance
++    glm::quat hud_rotation = hud_orientation_;
++    glm::vec3 hud_at = hud_position_;
++    float hud_width = kHudWidth * hud_distance_ / kHudDistance;  // the same angular size at any distance
++    {
++        // A full-screen picture in the UI: the HUD grows to fill the region both eyes see, head-locked, and shrinks back afterwards.
++        const auto now = std::chrono::steady_clock::now();
++        // (No time passes across a gap: FinishStereo is not called on the virtual screen.)
++        const float gap = std::chrono::duration<float>(now - hud_full_time_).count();
++        const float dt = hud_full_time_ == std::chrono::steady_clock::time_point{} || gap > 0.25f ? 0.0f : std::min(gap, 0.1f);
++        hud_full_time_ = now;
++        const float goal = hud_full_wanted_ ? 1.0f : 0.0f;
++        hud_full_ += (goal - hud_full_) * (1.0f - std::exp(-dt / 0.12f));
++        if (std::fabs(goal - hud_full_) < 0.01f) hud_full_ = goal;
++    }
++    // The region both eyes see on the plane at the HUD's distance, in the head's frame: each eye's field there is its tangents times the
++    // distance from the eye's own place (half the eyes' separation to each side). Empty, or no fields yet: the normal HUD.
++    const float distance = hud_distance_;
++    glm::vec2 shared_lo(0.0f), shared_hi(0.0f);
++    bool shared = false;
++    if (eye_fields_valid_ && distance > 0.0f) {
++        shared_lo = glm::vec2(-1.0e9f);
++        shared_hi = glm::vec2(1.0e9f);
++        for (int i = 0; i < 2; ++i) {
++            const glm::vec4& t = eye_tangents_[i];
++            shared_lo = glm::max(shared_lo, eye_offset_[i] + glm::vec2(t.x, t.w) * distance);
++            shared_hi = glm::min(shared_hi, eye_offset_[i] + glm::vec2(t.y, t.z) * distance);
++        }
++        shared = shared_hi.x > shared_lo.x && shared_hi.y > shared_lo.y;
++    }
++    if (hud_full_ > 0.0f && shared) {
++        // The whole 16:9 canvas inside that region (contain, not cover: text near its edges stays in view), centred on it.
++        const glm::vec2 half = 0.5f * (shared_hi - shared_lo);
++        const float fit = 2.0f * 0.98f * std::min(half.x, half.y * 16.0f / 9.0f);
++        hud_width += (fit - hud_width) * hud_full_;
++        const glm::vec3 centre(0.5f * (shared_lo.x + shared_hi.x), 0.5f * (shared_lo.y + shared_hi.y), -distance);
++        hud_rotation = glm::slerp(hud_orientation_, head_orientation_local_, hud_full_);
++        hud_at = glm::mix(hud_position_, head_local_ + head_orientation_local_ * centre, hud_full_);
++    }
++    layers.hud_orientation = hud_rotation;
++    layers.hud_position = hud_at;
 +    layers.hud_size = glm::vec2(hud_width, hud_width * 9.0f / 16.0f);
      host_.EndFrame(layers);
      if (++frames_ == 1) {
          LogInfo("vr: first stereo frame submitted");
-@@ -612,6 +641,24 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
+@@ -612,7 +759,27 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
      }
  }
  
@@ -28116,9 +28533,12 @@ index 38782fe..0296401 100644
 +}
 +
  void VrPlay::Place(const glm::vec3& head_local, const glm::quat& head_orientation_local, bool menu_open, float dt) {
++    head_local_ = head_local;
++    head_orientation_local_ = head_orientation_local;
      const float head_yaw_local = xr::AnglesOf(head_orientation_local).yaw;
      if (!menu_open) {
-@@ -621,7 +668,7 @@ void VrPlay::Place(const glm::vec3& head_local, const glm::quat& head_orientatio
+         // In play the HUD (subtitles, prompts) rides with the head, like the performance panel:
+@@ -621,7 +788,7 @@ void VrPlay::Place(const glm::vec3& head_local, const glm::quat& head_orientatio
          hud_placed_ = true;
          menu_was_open_ = false;
          hud_orientation_ = head_orientation_local;
@@ -28128,10 +28548,19 @@ index 38782fe..0296401 100644
      }
      // A menu stays where it opened (in the world, turning after the head beyond a dead zone),
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index 2bcbcd6..9072c63 100644
+index 2bcbcd6..d7cbe23 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
-@@ -71,6 +71,8 @@ public:
+@@ -63,6 +63,8 @@ public:
+     void FinishScreen();
+     void EndEmpty();
+ 
++    // The UI shows a full-screen picture (a fake crash screen, the credits): the HUD fills the view while it does, head-locked.
++    void SetHudFull(bool full) { hud_full_wanted_ = full; }
+     void Rumble(uint8_t large_motor, uint8_t small_motor);
+     VkExtent2D EyeRenderSize() const { return {render_size_.x, render_size_.y}; }
+     // Dynamic resolution: the GPU time of the views drawn this frame, measured. While it stays
+@@ -71,12 +73,31 @@ public:
      void ReportGpu(float frame_gpu_ms);
  
  private:
@@ -28140,7 +28569,30 @@ index 2bcbcd6..9072c63 100644
      void Place(const glm::vec3& head_local, const glm::quat& head_orientation_local, bool menu_open, float dt);
      // The insets of `out` (its eyes already set): false when there are none this frame.
      bool PrepareInsets(Stereo& out);
-@@ -86,6 +88,7 @@ private:
+     glm::uvec2 inset_logged_{0u, 0u};
+     glm::uvec2 inset_images_{0u, 0u};  // the inset images' size now (PrepareInsets)
+     float inset_lift_logged_ = 0.0f;
++    // The sharp zone's centre (tangents from the eye axis) smoothed towards the gaze (PrepareInsets).
++    glm::vec2 gaze_smooth_{0.0f};
++    glm::vec2 gaze_velocity_{0.0f};
++    bool gaze_started_ = false;
++    std::chrono::steady_clock::time_point gaze_time_{};
++    std::chrono::steady_clock::time_point gaze_logged_{};
++    // The HUD filling the view (SetHudFull): 0 normal, 1 full; the head it is locked to.
++    bool hud_full_wanted_ = false;
++    float hud_full_ = 0.0f;
++    std::chrono::steady_clock::time_point hud_full_time_{};
++    // Each eye's field (tangents left, right, up, down from its own axes) and where the eye sits in the head's frame (right, up), as of
++    // the last PrepareStereo: the full-view HUD fills the region both see at its distance.
++    glm::vec4 eye_tangents_[2]{};
++    glm::vec2 eye_offset_[2]{};
++    bool eye_fields_valid_ = false;
++    glm::vec3 head_local_{0.0f};
++    glm::quat head_orientation_local_{1.0f, 0.0f, 0.0f, 0.0f};
+     // The size the eyes are drawn at this frame: render_size_ times the dynamic resolution.
+     glm::uvec2 DrawSize() const;
+ 
+@@ -86,6 +107,7 @@ private:
      bool waited_ = false;
      bool centered_ = false;
      bool screen_ = false;
@@ -28148,7 +28600,7 @@ index 2bcbcd6..9072c63 100644
      bool cutscene_ = false;  // a scene's camera drawn in stereo (immersive cutscenes)
      bool cutscene_entered_ = false;  // where the head was when it began (below) is known
      float cutscene_ref_yaw_ = 0.0f;  // the head's heading in the world then: the scene's camera points there
-@@ -96,6 +99,7 @@ private:
+@@ -96,6 +118,7 @@ private:
      bool hud_placed_ = false;
      bool menu_was_open_ = false;
      float hud_yaw_ = 0.0f;
@@ -28156,7 +28608,7 @@ index 2bcbcd6..9072c63 100644
      glm::quat hud_orientation_{1.0f, 0.0f, 0.0f, 0.0f};
      glm::vec3 hud_position_{0.0f};
      float eye_height_ = -1.0f;
-@@ -123,6 +127,7 @@ private:
+@@ -123,6 +146,7 @@ private:
      uint32_t raw_previous_ = 0;
      bool snap_armed_ = true;
      bool settings_previous_ = false;
@@ -28165,7 +28617,7 @@ index 2bcbcd6..9072c63 100644
      uint64_t frames_ = 0;
  };
 diff --git a/src/main.cpp b/src/main.cpp
-index 6dd62ee..ab9103c 100644
+index 6dd62ee..fd4ee5b 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -98,6 +98,13 @@
@@ -28182,7 +28634,37 @@ index 6dd62ee..ab9103c 100644
  namespace {
  
  #if PT_VISIONOS
-@@ -2536,7 +2543,7 @@ private:
+@@ -1684,6 +1691,9 @@ public:
+             for (int i = 0; i <= 8; ++i) periphery.values.push_back(std::format("{}%", 10 + 5 * i));
+             periphery.wrap = false;
+             foveation.rows.push_back(std::move(periphery));
++            pt::game::PcSettingRow gaze = Row(kVpGazeInset, "pc_vp_gaze", OffOn(), h.gaze_inset ? 1 : 0, "pc_note_vp_gaze");
++            gaze.enabled = h.game_foveation;
++            foveation.rows.push_back(std::move(gaze));
+             foveation.rows.push_back(Row(kVpBorder, "pc_vp_border", OffOn(), h.show_border ? 1 : 0, "pc_note_vp_border"));
+             // Shown VPKTAA, FXAA; kept as aa 5, 0. Then VPKTAA's own two settings.
+             foveation.rows.push_back(Row(kVpAa, "pc_vp_aa", {"pc_vp_aa_vpktaa", "pc_vp_aa_fxaa"}, VpAaToMenu(h.aa), "pc_note_vp_aa"));
+@@ -2042,6 +2052,10 @@ public:
+             pt::visionos::SettingChanged("center_up", std::to_string(pt::visionos::Headset().center_up));
+             HeadsetCustom();
+             return;
++        case kVpGazeInset:
++            pt::visionos::Headset().gaze_inset = value == 1;
++            pt::visionos::SettingChanged("gaze_inset", value == 1 ? "1" : "0");
++            return;
+         case kVpBorder:
+             pt::visionos::Headset().show_border = value == 1;
+             pt::visionos::SettingChanged("show_border", value == 1 ? "1" : "0");
+@@ -2518,7 +2532,7 @@ private:
+         kVr, kVrMode, kVrFlashlight, kVrTurn,
+         kFrameLimit,
+         kVpPreset, kVpFps, kVpScale, kVpFoveation, kVrSnapDegrees, kVrSmoothSpeed, kVpFov, kVpRecenter,
+-        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
++        kVpGameFoveation, kVpPeriphery, kVpCenter, kVpDynamicRes, kVpHdr, kVpCenterRes, kVpBorder, kVpGazeInset, kVpCenterUp, kVpAa, kVpTaaRes, kVpTaaSharp, kVpTaaPeriphery, kVpSceneDepth,
+         kVpSubtitleSize, kVpSubtitleHeight, kVpTiledLights,
+         kLoopFirst = 1000,
+         kRunSplitFirst = 3000,
+@@ -2536,7 +2550,7 @@ private:
      uint32_t voice_id_ = 0;
      uint64_t voice_start_ = 0;
  
@@ -28191,7 +28673,7 @@ index 6dd62ee..ab9103c 100644
  
      const pt::game::ArchiveEntry* EntryOf(int id) const {
          const auto entries = pt::game::ArchiveEntries();
-@@ -2826,7 +2833,7 @@ private:
+@@ -2826,7 +2840,7 @@ private:
      std::vector<pt::game::PcSettingSection> SpeedrunResults() const {
          const pt::game::SpeedrunTimer& run = game_.Speedrun();
          using pt::game::SpeedrunTimer;
@@ -28200,7 +28682,7 @@ index 6dd62ee..ab9103c 100644
          pt::game::PcSettingSection result{"pc_speedrun_run", 0, {}};
          auto menu = Row(kRunMenu, "pc_speedrun_menu", {""}, 0, "pc_note_speedrun_menu");
          menu.link = true;
-@@ -3020,7 +3027,7 @@ private:
+@@ -3020,7 +3034,7 @@ private:
          pt::game::PcSettingSection left{"pc_section_mods", 0, {}};
          pt::game::PcSettingSection right{"pc_section_mods", 1, {}};
          if (!app_.mods) return {std::move(left)};
@@ -28209,7 +28691,7 @@ index 6dd62ee..ab9103c 100644
          const std::string restart(pt::game::PcText("pc_note_mods", language));
          const auto& mods = app_.mods->mods;
          for (size_t i = 0; i < mods.size() && i < static_cast<size_t>(kMaxModRows); ++i) {
-@@ -3716,7 +3723,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3716,7 +3730,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
              theater_paused = true;
              if (game.Audio()) game.Audio()->PostEvent("Pause_All", nullptr);
          }
@@ -28218,7 +28700,7 @@ index 6dd62ee..ab9103c 100644
          ui.SetMenuSuspended(true);
          ui.EnterTheater(view->theater->Sandbox());
          if (options.make_museum_previews.empty()) {
-@@ -3868,7 +3875,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3868,7 +3882,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
              polled.prompts = *options.forced_prompts;
          }
          if (vr) {
@@ -28228,7 +28710,7 @@ index 6dd62ee..ab9103c 100644
          }
          if (polled.pc_settings && !freecam) {
              if (options.dev_ui && app.window) {
-@@ -4207,12 +4215,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4207,12 +4222,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
  
@@ -28258,7 +28740,7 @@ index 6dd62ee..ab9103c 100644
          }
          if (!ui.MenuOpen() || ui.Menu().CurrentPage() != pt::game::OptionsMenu::Page::Pc)
              app.microphone_test = app.microphone_monitor = false;
-@@ -4241,9 +4262,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4241,9 +4269,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
          }
          if (hearing && recognizer) {
              if (!microphone.IsOpen() && !microphone_failed && !voice_file) {
@@ -28275,7 +28757,7 @@ index 6dd62ee..ab9103c 100644
              }
              const pt::VoiceRecognizer::State state = recognizer->GetState();
              app.microphone_status = microphone_failed || state == pt::VoiceRecognizer::State::Failed ? "pc_mic_unavailable"
-@@ -4418,7 +4443,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4418,7 +4450,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
              ImGui::Render();
          }
          if (photo_mode) {
@@ -28284,7 +28766,7 @@ index 6dd62ee..ab9103c 100644
              photo_status_time = std::max(0.0f, photo_status_time - dt);
              if (photo_status_time <= 0.0f) photo_status.clear();
              photo_view = photo_panel.View(language, photo_status);
-@@ -4441,7 +4466,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4441,7 +4473,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
          bool warmed = false;
          if (vr) {
              const bool screen = vr->ScreenMode(game);
@@ -28293,7 +28775,7 @@ index 6dd62ee..ab9103c 100644
              const float scene_dt = static_cast<float>(game.Time() - last_scene_time);
              auto begin = [&](bool present) { return app.renderer.BeginFrame(present && app.window) || (present && app.renderer.BeginFrame(false)); };
              auto save_shots = [&](const char* suffix) {
-@@ -4456,10 +4481,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4456,10 +4488,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
              if (screen && vr->PrepareScreen(screen_target)) {
                  app.renderer.SetRenderExtent(pt::Renderer::kHudExtent);
                  if (begin(true)) {
@@ -28308,7 +28790,7 @@ index 6dd62ee..ab9103c 100644
                      app.scene.SetVrEye(-1);
                      app.scene.Render(camera, draw_items, lighting, dt);
                      ui.SetVrHud(false);
-@@ -4468,21 +4494,22 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4468,21 +4501,22 @@ int RunGame(App& app, pt::Vfs& vfs) {
                      xr_frame.overlay_on_frame = true;
                      app.renderer.SetXrFrame(xr_frame);
                      app.renderer.EndFrame(app.window != nullptr);
@@ -28336,12 +28818,13 @@ index 6dd62ee..ab9103c 100644
                                    lighting, vfx_pass, blend);
                  // Views 0 and 1: the eyes; with the game's foveation they are the wide, low-density
                  // views (no screen-space AO or reflections) and 2 and 3 their sharp centres.
-@@ -4620,7 +4647,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4620,7 +4654,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
                  app.renderer.xr_hdr = false;
  #endif
                  ui.SetVrHud(false);
 -                take_reflection_readback(game);
 +                take_reflection_readback(view);
++                vr->SetHudFull(ui_ready && ui.FullCanvasUi());
                  vr->FinishStereo(stereo);
                  static const bool vr_trace = std::getenv("PT_VR_TRACE") != nullptr;
                  if (vr_trace || !shots.empty()) {

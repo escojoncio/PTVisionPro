@@ -28,6 +28,8 @@ struct HeadsetSettings {
     int center_up = -8;    // -20 to 10: its centre's degrees above the eye's forward axis (below if negative)
     int center_res = 100;  // 50 to 100
     bool show_border = false;  // a red frame where the sharp zone ends (the menu; not kept)
+    // The sharp zone follows the system foveation map's dense zone (the gaze) when that map moves; else straight ahead.
+    bool gaze_inset = true;
     // Native HDR: the scene's real light above white, up to this percent of SDR white (100: off,
     // up to the headset's 200). Not part of a preset: it costs almost nothing.
     int hdr = 200;
