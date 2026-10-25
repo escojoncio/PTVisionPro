@@ -6,6 +6,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Último hecho
 
+- Build 75 (2f0aad3, CI OK): RCAS 70 en M2 + AA especular suave. Sin probar en el visor.
 - AA especular más suave (tipo HDRP): `gbuffer.frag` (0002) varianza 0,25→0,10, tope 0,18→0,06; el usuario veía brillos
   apagados. Sin build.
 
