@@ -50,3 +50,14 @@
   que de `localized::Menu` (en español salía "CONFIGURACIÓN DE PC"). Claves nuevas del visor: añadirlas a esa lista.
 - Teatro del museo en VR: `vr_play.cpp` `ScreenMode` incluye `game.ArchiveTheaterActive()`; main.cpp rama de pantalla
   virtual usa `view`/`view_builder`/`view_vfx`/`take_reflection_readback(view)` y el dt del teatro.
+
+## Build 70: textos, teatro, HUD
+
+- `PcText` (PT_VISIONOS): `HeadsetKey()` = claves que ganan sobre `localized::Menu` (pc_title, pc_entry, pc_note_quit, pc_vr,
+  pistas del museo, pc_note_freecam, pc_note_photo_mode, pc_photo_hint); tokens expandidos a texto plano con caché
+  (`std::map` + mutex, vistas estables); `{kb}…{/kb}` se descarta, `{pad}…{/pad}` se conserva; `{1}`/`{2}` intactos.
+- Teatro: `ScreenMode` `screen = ((demo||theater) && !immersive) || peephole`; estéreo por la rama `cutscene_` con ancla
+  `ViewCamera`; `theater_` reinicia `cutscene_entered_`; main.cpp pasa `view` a `PrepareStereo`. Menú de pausa suspendido
+  durante el teatro: `menu_open = MenuOpen() && !ArchiveTheaterActive()` (ApplyControls y rama VR).
+- `FitHud` (vr_play.cpp): raycast cabeza→delante, distancia `clamp(hit-0,15, 0,7, 1,6)`, suavizado 0,15 s / 0,5 s, ancho
+  y caída escalados; con menú fijo a 1,6 m; guardas `isfinite`.

@@ -6,32 +6,32 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Último hecho
 
-- Build 58 (rama `pt-1.0.5`): shaders de v1.0.5 fusionados (causa de los triángulos: `vfx_particle.*` con Quad de 192 B y
-  el C++ 1.0.5 con 304 B), menú VISION PRO en todos los idiomas (`PcText`), teatro del museo en pantalla virtual.
-  Detalle: `notas/pt-1.0.5.md`. Shaders compilan; .cpp sin compilar en local; revisión adversarial sin fallos.
-- Build 57 (rama `pt-1.0.5`, 6632734, log pt (41)): triángulos de colores en toda la escena; museo negro salvo triángulos;
-  menú "CONFIGURACIÓN DE PC".
-- Builds 54–56: fallos de CI de la fusión 1.0.5 (ver `notas/pt-1.0.5.md`).
-- `main` = build 53 (sin la fusión): icono y arte del launcher; build 52 luces devueltas a la 50.
+- Build 70 (rama `pt-1.0.5`): `pc_reset_confirm` restaurado (1.0.5 lo borró de las tablas); `PcText` (PT_VISIONOS) expande
+  tokens `{accept}`/`{back}`/`{kb}`/`{pad}`… a texto de mando (0002 no trae `prompt_hint`); pistas del museo = controles VR;
+  teatro del museo en estéreo por la rama `cutscene_` (ancla `ViewCamera`, L2/R2 zoom, Círculo sale, D-pad arriba/abajo
+  anulado); HUD a distancia adaptativa (`FitHud`); preset M2 centro 55°; subtítulos 15 % por defecto. Detalle: `notas/pt-1.0.5.md`.
+- Build 69 (log pt.log 25-oct, probada): triángulos resueltos (shaders 1.0.5 fusionados). Fallos que la 70 ataca: museo en
+  2D sin zoom, textos del museo de PC, `pc_reset_confirm` en crudo, subtítulos con profundidad incómoda.
+- Build 57: triángulos por Quad de partículas 192 B vs 304 B (C++ 1.0.5 sin shaders 1.0.5).
+- `main` = build 53 (sin la fusión).
 
 ## Estado
 
-- Rama de trabajo: `pt-1.0.5` (juego pt-pc 1.0.5 + arreglos 1.0.6 sobre el port). `main` sin la fusión.
-- Build 58 sin probar en el visor. Hasta la 51/53: juego completo de principio a fin, sin cierres desde la build 14.
-- HDR: cambios de la 1.0.5 en `vr_hdr.glsl`/`xr_copy.frag` sin verificar en el visor.
+- Rama de trabajo: `pt-1.0.5`. Build 69: juego visualmente correcto; build 70 sin probar.
 - `museum: thumbnail capture could not start: Setting the working directory is not supported` (warn, sin investigar).
-- Ajustes del usuario = preset M2: imagen 50 %, centro 60° al 100 %, altura -10°, periferia 10 %, VPKTAA 80 %, nitidez 100,
-  VPKTAA en periferia, sombras altas, SSAO, bloom, reflejos, anisotrópico 8x, 45 fps.
-- Referencia build 50 (pasillo, 765→956): GPU ~6,6–7,5 ms; inset/lighting/lights 1,4–1,7; wide/shadows 1,4–1,8.
+- `ui: option animation UI_sys_opt_setin_s missing` (warn, 7 veces en el log de la 69).
+- HDR de la 1.0.5 (`vr_hdr.glsl`, `xr_copy.frag`): sin verificar en el visor.
+- Ajustes del usuario (log 69) = nuevo preset M2: imagen 50 %, centro 55° al 100 %, altura -10°, periferia 10 %, VPKTAA 80 %,
+  nitidez 100, VPKTAA en periferia, sombras altas, SSAO, bloom, reflejos, anisotrópico 8x, 45 fps, subtítulos 15 %.
+- Rendimiento build 69 (pasillo): 45 fps, GPU 4 vistas ~17,9 ms + composición 1,6 ms, térmico fair.
 
 ## Pendiente (en orden)
 
-1. Log build 58: sin triángulos; museo visible en pantalla virtual (controles del teatro con los sticks: unverified);
-   menú VISION PRO; HDR.
-2. Textos de PC restantes en otros idiomas/museo (`pc_note_reset`, pistas `{kb}` según `prompt_style`): unverified.
-3. Afinar constantes de `vpktaa.frag` (KEEP_*, SIGMA_*, DISOCCLUSION, afilado).
-4. Conocido menor: `taa_valid_` no caduca si una vista se salta frames con otra vista en la misma columna.
-5. 45→90 reales (spacewarp propio) si la reproyección con profundidad convence.
+1. Log build 70: teatro en estéreo (giro, zoom, salir con Círculo, recorte con modelos pequeños: `kNearPlane` 0,05,
+   `min_distance_` 0,08), pistas del museo, confirmación de reinicio, HUD adaptativo (raycast toca suelo/techo: aceptado).
+2. Nombres de botón genéricos (Select/Back/Menu) en vez de iconos: fusionar `prompt_hint` de 1.0.5 si el usuario lo pide.
+3. Otros idiomas (tr, zh, ar, ru, uk) caen al inglés en las claves del visor; tablas de upstream aún citan teclas.
+4. Afinar constantes de `vpktaa.frag`. 5. `taa_valid_` (conocido menor). 6. 45→90 reales (spacewarp propio).
 
 ## Decisiones
 
@@ -41,6 +41,8 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
   luces en una pasada (`PT_LIGHT_ONE_PASS=1`); MetalFX espacial; máscara del centro en anchas; quitar reflejos o bajar
   sombras; ritmo fijo como sustituto de rendimiento.
 - Arquitectura (Compositor Services + MoltenVK, misma cola Metal): ver `notas/arquitectura.md`. No cambiar sin motivo.
+- Zona nítida siguiendo la mirada: imposible en Metal/Compositor Services (visionOS no da la mirada a la app; foveado
+  dinámico solo en RealityKit o streaming con entitlement). La zona sigue anclada a la cabeza.
 - Presets duplicados en `kPresets` (.mm) y `PTSettings.defaults(for:)`: mantener iguales.
 
 ## Ficheros en juego

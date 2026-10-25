@@ -26845,10 +26845,31 @@ index 588808d..2852ec7 100644
      options.invert_y = vertical_;
      options.invert_x = horizontal_;
 diff --git a/src/game/ui/pc_settings.cpp b/src/game/ui/pc_settings.cpp
-index 1868d99..4042a6c 100644
+index 1868d99..4a60389 100644
 --- a/src/game/ui/pc_settings.cpp
 +++ b/src/game/ui/pc_settings.cpp
-@@ -94,11 +94,55 @@ constexpr Entry kTexts[] = {
+@@ -1,6 +1,9 @@
+ #include "game/ui/pc_settings.h"
+ 
+ #include <array>
++#include <map>
++#include <mutex>
++#include <string>
+ #include <utility>
+ #include "engine/core/localized_text.h"
+ 
+@@ -90,15 +93,66 @@ constexpr Entry kTexts[] = {
+     {"pc_vp_recenter", {"Recentre view", "", "", "Recentrar vista", "", "", ""}},
+     {"pc_vp_recenter_value", {"Now", "", "", "Ahora", "", "", ""}},
+     {"pc_note_vp_recenter", {"Puts you back in the game where you stand now, facing where you look. Also done by itself after a long press of the Digital Crown.", "", "", "Te vuelve a colocar en el juego donde estás ahora, mirando hacia donde miras. También se hace solo tras mantener pulsada la Digital Crown.", "", "", ""}},
++    {"pc_reset_confirm", {"Confirm", "Confirmer", "Bestätigen", "Confirmar", "決定", "Conferma", "Confirmar"}},
++    {"pc_archive_model_hint", {"Sticks left / right: turn. Left stick up / R2: nearer. Left stick down / L2: farther. {back}: back.", "", "", "Sticks izquierda / derecha: girar. Stick izquierdo arriba / R2: acercar. Stick izquierdo abajo / L2: alejar. {back}: volver.", "", "", ""}},
++    {"pc_archive_free_hint", {"{back}: stop", "", "", "{back}: detener", "", "", ""}},
++    {"pc_note_archive_free", {"Not available in the headset.", "", "", "No disponible en el visor.", "", "", ""}},
++    {"pc_note_freecam", {"Not available in the headset.", "", "", "No disponible en el visor.", "", "", ""}},
++    {"pc_note_photo_mode", {"Not available in the headset.", "", "", "No disponible en el visor.", "", "", ""}},
++    {"pc_photo_hint", {"{dpad}: choose and change. {back}: leave.", "", "", "{dpad}: elegir y cambiar. {back}: salir.", "", "", ""}},
+ #endif
      {"pc_frame_limit", {"Frame rate"}},
      {"pc_note_frame_limit", {"Choose 30 or 60 frames per second. Game speed and image quality stay the same."}},
      {"pc_note_frame_limit_fixed", {"Frame rate is fixed for this run. Restart normally to change it."}},
@@ -26905,7 +26926,7 @@ index 1868d99..4042a6c 100644
      {"pc_loop_f000", {"Start room: the opening"}},
      {"pc_loop_f010", {"Loop 1: the radio"}},
      {"pc_loop_f005", {"Loop 2: the lobby door opens"}},
-@@ -126,9 +170,25 @@ constexpr Entry kTexts[] = {
+@@ -126,9 +180,25 @@ constexpr Entry kTexts[] = {
      {"pc_street_title", {"The street"}},
      {"pc_street_question", {"Explore the street?"}},
      {"pc_street_walk", {"Yes, walk the street"}},
@@ -26932,7 +26953,7 @@ index 1868d99..4042a6c 100644
      {"pc_credits_dlss", {"This game uses NVIDIA DLSS."}},
      {"pc_credits_licenses", {"The full license texts are in the licenses folder next to pt.exe."}},
      {"pc_credits_konami", {"P.T. belongs to Konami Digital Entertainment and Kojima Productions."}},
-@@ -166,11 +226,13 @@ constexpr Entry kTexts[] = {
+@@ -166,11 +236,13 @@ constexpr Entry kTexts[] = {
      {"pc_extras", {"Extras"}},
      {"pc_note_extras", {"Loop browser, free camera and photo mode."}},
      {"pc_freecam", {"Free camera"}},
@@ -26948,7 +26969,7 @@ index 1868d99..4042a6c 100644
      {"pc_extras_start", {"Start"}},
      {"pc_vr", {"VR (experimental)"}},
      {"pc_note_vr", {"Play in a VR headset through OpenXR. Experimental: not tested on real hardware."}},
-@@ -209,11 +271,11 @@ constexpr Entry kTexts[] = {
+@@ -209,11 +281,11 @@ constexpr Entry kTexts[] = {
      {"pc_photo_auto", {"Auto"}},
      {"pc_photo_metres", {"{value} m"}},
      {"pc_photo_saved", {"Saved to Pictures/PT Photos: {file}"}},
@@ -26962,7 +26983,7 @@ index 1868d99..4042a6c 100644
      {"pc_note_photo_reset", {"Returns the camera to where the photo mode started."}},
      {"pc_note_photo_dof", {"Blurs what is nearer or farther than the focus distance."}},
      {"pc_note_photo_focus", {"Auto focuses on what is at the centre of the frame."}},
-@@ -230,17 +292,40 @@ constexpr Entry kTexts[] = {
+@@ -230,17 +302,40 @@ constexpr Entry kTexts[] = {
      {"pc_entry", {"PC Settings"}},
      {"pc_back", {"Back"}},
      {"pc_quit", {"Quit"}},
@@ -27005,7 +27026,7 @@ index 1868d99..4042a6c 100644
      {"pc_section_ray_tracing", {"Ray tracing"}},
      {"pc_section_textures", {"Textures"}},
      {"pc_display_mode", {"Display mode"}},
-@@ -261,9 +346,22 @@ constexpr Entry kTexts[] = {
+@@ -261,9 +356,22 @@ constexpr Entry kTexts[] = {
      {"pc_mic_no_word", {"None yet"}},
      {"pc_mic_waiting", {"Waiting for the selected microphone."}},
      {"pc_mic_unavailable", {"Could not open the selected microphone. Check recording permissions and device selection."}},
@@ -27028,7 +27049,7 @@ index 1868d99..4042a6c 100644
      {"pc_camera_tilt", {"Camera tilt"}},
      {"pc_vibration", {"Vibration"}},
      {"pc_dead_zone", {"Stick dead zone"}},
-@@ -289,6 +387,13 @@ constexpr Entry kTexts[] = {
+@@ -289,6 +397,13 @@ constexpr Entry kTexts[] = {
      {"pc_note_texture_busy", {"Another game instance is preparing this texture cache. Wait until it finishes, then try again. Original textures are preserved."}},
      {"pc_note_texture_failed", {"Texture preparation failed; original textures are preserved. Check free disk space and pt.log for the cause, then try again."}},
      {"pc_note_texture_preparing", {"Preparing enhanced textures. Original textures stay visible until ready; then they change here without restarting. Off cancels preparation."}},
@@ -27042,7 +27063,7 @@ index 1868d99..4042a6c 100644
      {"pc_note_enhanced_textures", {"Generates sharper colour textures once from your game files, walls and people included (4096 px with 10 GB of video memory, else 2048). Switch Off to cancel; original textures stay available."}},
      {"pc_rt_sharp", {"Sharp"}},
      {"pc_rt_soft", {"Soft"}},
-@@ -305,20 +410,50 @@ constexpr Entry kTexts[] = {
+@@ -305,20 +420,50 @@ constexpr Entry kTexts[] = {
      {"pc_quality_custom", {"Custom"}},
      {"pc_system_default", {"System default"}},
      {"pc_reset_value", {"Reset"}},
@@ -27097,7 +27118,7 @@ index 1868d99..4042a6c 100644
      {"pc_note_reset_done", {"Progress restarted in this session."}},
      {"pc_note_camera_tilt", {"The camera leans with the head, as in the original."}},
      {"pc_note_voice", {"The microphone listens only where the original game does."}},
-@@ -327,10 +462,96 @@ constexpr Entry kTexts[] = {
+@@ -327,10 +472,96 @@ constexpr Entry kTexts[] = {
      {"pc_note_frame_generation_missing", {"Not in this build."}},
      {"pc_note_frame_generation", {"AMD FSR 3 shows a generated frame between two rendered frames."}},
      {"pc_note_fsr4_vulkan", {"AMD releases FSR 4 for DirectX 12 only; this game renders with Vulkan, so FSR 4 cannot run here."}},
@@ -27194,7 +27215,7 @@ index 1868d99..4042a6c 100644
      {"pc_note_dlssg_gpu", {"DLSS Frame Generation needs an NVIDIA GeForce RTX 40 series or newer GPU."}},
      {"pc_note_fsr_fg_gpu", {"FSR 3 frame generation needs an AMD Radeon RX 5000 series or newer GPU."}},
      {"pc_note_dlssg_driver", {"DLSS Frame Generation needs a newer NVIDIA driver."}},
-@@ -340,7 +561,79 @@ constexpr Entry kTexts[] = {
+@@ -340,7 +571,79 @@ constexpr Entry kTexts[] = {
      {"pc_note_dlssg_restart", {"Restart the game to start DLSS Frame Generation."}},
      {"pc_note_vsync_dlssg", {"DLSS Frame Generation runs without v-sync on Vulkan; the setting applies again when frame generation is off."}},
      {"pc_note_fsr_fg_restart", {"Restart the game to switch from DLSS Frame Generation to FSR 3."}},
@@ -27274,7 +27295,7 @@ index 1868d99..4042a6c 100644
      {"pc_note_rt_shadows", {"Shadows traced against the scene instead of shadow maps, as sharp as the original's. Not in the original."}},
      {"pc_note_rt_soft", {"Traced shadows with soft edges from each light's size. Not in the original."}},
      {"pc_note_rt_unsupported", {"Needs a GPU with Vulkan ray tracing."}},
-@@ -370,6 +663,8 @@ constexpr Entry kTexts[] = {
+@@ -370,6 +673,8 @@ constexpr Entry kTexts[] = {
      {"pc_standard_reflections", {"Screen reflections"}},
      {"pc_ray_quality", {"Ray quality"}},
      {"pc_ray_balanced", {"Balanced"}},
@@ -27283,7 +27304,7 @@ index 1868d99..4042a6c 100644
      {"pc_texture_detail", {"Texture detail"}},
      {"pc_detail_reduced", {"Reduced"}},
      {"pc_detail_fine", {"Fine"}},
-@@ -389,7 +684,10 @@ constexpr Entry kTexts[] = {
+@@ -389,7 +694,10 @@ constexpr Entry kTexts[] = {
      {"pc_note_shadow_quality", {"512, 1024 or original 2048 px shadow maps. Ray-traced shadows replace maps when enabled. Resolution scale is unchanged."}},
      {"pc_note_standard_ao", {"Original screen-space ambient shading. Turn off to reduce cost on slower GPUs."}},
      {"pc_note_standard_reflections", {"Original screen-space floor reflections. Traced reflections replace them when enabled."}},
@@ -27295,7 +27316,7 @@ index 1868d99..4042a6c 100644
      {"pc_note_texture_detail", {"Reduced uses coarser texture mips. Fine preserves more texture detail at a distance; may shimmer. Output resolution stays unchanged."}},
      {"pc_note_dof", {"Original camera focus blur. Off keeps nearby surfaces and the background sharp."}},
      {"pc_note_motion_blur", {"Original blur while turning and moving. Off gives a clearer moving image."}},
-@@ -399,8 +697,8 @@ constexpr Entry kTexts[] = {
+@@ -399,8 +707,8 @@ constexpr Entry kTexts[] = {
      {"pc_section_mods", {"Installed mods"}},
      {"pc_note_mods", {"Turning a mod on or off takes effect at the next start. Mods are not part of the original game."}},
      {"pc_archive", {"Museum"}},
@@ -27306,7 +27327,7 @@ index 1868d99..4042a6c 100644
      {"pc_note_extras_archive", {"Loop browser, museum, free camera and photo mode."}},
      {"pc_archive_sections", {"Halls"}},
      {"pc_archive_images", {"Subliminal images"}},
-@@ -415,21 +713,25 @@ constexpr Entry kTexts[] = {
+@@ -415,21 +723,25 @@ constexpr Entry kTexts[] = {
      {"pc_note_archive_cutscenes", {"Every cutscene from its start, with its sound and subtitles."}},
      {"pc_note_archive_models", {"Lisa and the hallway's other figures and objects, in the light of the start room."}},
      {"pc_note_archive_unused_section", {"Content in the game's files that the game never shows. It opens once you finish the game."}},
@@ -27343,7 +27364,7 @@ index 1868d99..4042a6c 100644
      {"pc_archive_noise", {"Noise"}},
      {"pc_archive_noise_normal", {"Noise distortion"}},
      {"pc_archive_peephole_mask", {"The peephole's view"}},
-@@ -472,8 +774,117 @@ constexpr Entry kTexts[] = {
+@@ -472,8 +784,117 @@ constexpr Entry kTexts[] = {
      {"pc_archive_phone_model", {"The telephone"}},
      {"pc_archive_xmark_photo", {"The X mark photo"}},
      {"pc_archive_clock_model", {"The clock"}},
@@ -27462,13 +27483,58 @@ index 1868d99..4042a6c 100644
  };
  
  }
-@@ -500,6 +911,17 @@ std::string PcNoteText(std::string_view note, int language) {
+@@ -499,7 +920,61 @@ std::string PcNoteText(std::string_view note, int language) {
+     return text;
  }
  
- std::string_view PcText(std::string_view key, int language) {
+-std::string_view PcText(std::string_view key, int language) {
 +#if PT_VISIONOS
-+    /* The headset's own naming wins over the translated PC tables (VISION PRO, not "PC settings"): the first kTexts match is ours. */
-+    if (key == "pc_title" || key == "pc_entry" || key == "pc_note_quit" || key == "pc_vr") {
++namespace {
++
++/* The headset's keys: these win over the translated PC tables, which name the PC and its keyboard (the first kTexts match is ours). */
++bool HeadsetKey(std::string_view key) {
++    static constexpr std::string_view keys[] = {"pc_title", "pc_entry", "pc_note_quit", "pc_vr", "pc_archive_model_hint", "pc_archive_free_hint",
++                                                "pc_note_archive_free", "pc_note_freecam", "pc_note_photo_mode", "pc_photo_hint"};
++    for (const std::string_view k : keys) if (k == key) return true;
++    return false;
++}
++
++/* The prompt tokens ({accept}, {kb}...{/kb}, {pad}...{/pad}) as plain words for a controller; the UI of this port does not draw the
++   prompt pictures. {1}, {2}... and other arguments are left for the caller. */
++std::string ExpandHeadsetTokens(std::string_view text) {
++    static constexpr std::pair<std::string_view, std::string_view> words[] = {
++        {"accept", "Select"}, {"back", "Back"}, {"pause", "Menu"}, {"columns", "L1 / R1"}, {"updown", "up / down"}, {"leftright", "left / right"},
++        {"dpad", "D-pad"}, {"photo", ""}, {"hide", ""}, {"walk", ""}, {"look", ""}, {"rise", ""}, {"sink", ""}, {"fast", ""},
++        {"seek", "L1 / R1"}, {"restart", "Square"}, {"loop", "Triangle"}, {"tabprev", "L1"}, {"tabnext", "R1"}, {"donate", ""}};
++    std::string out;
++    int block = 0;  // 1: inside {kb} (dropped), 2: inside {pad}
++    for (size_t i = 0; i < text.size();) {
++        if (text[i] == '{') {
++            if (const size_t end = text.find('}', i); end != std::string_view::npos) {
++                const std::string_view name = text.substr(i + 1, end - i - 1);
++                if (name == "kb" || name == "pad") { block = name == "kb" ? 1 : 2; i = end + 1; continue; }
++                if (name == "/kb" || name == "/pad") { block = 0; i = end + 1; continue; }
++                bool known = false;
++                for (const auto& [token, word] : words) {
++                    if (token != name) continue;
++                    known = true;
++                    if (block != 1) out += word;
++                }
++                if (known) { i = end + 1; continue; }
++            }
++        }
++        if (block != 1) out += text[i];
++        ++i;
++    }
++    return out;
++}
++
++}
++#endif
++
++static std::string_view PcTextLookup(std::string_view key, int language) {
++#if PT_VISIONOS
++    if (HeadsetKey(key)) {
 +        for (const Entry& e : kTexts) {
 +            if (e.key == key) {
 +                const std::string_view text = language > 0 && language < kLanguages ? e.text[language] : std::string_view();
@@ -27480,6 +27546,26 @@ index 1868d99..4042a6c 100644
      if (language >= 1) {
          const auto text = localized::Menu(key, language);
          if (!text.empty()) return text;
+@@ -513,4 +988,19 @@ std::string_view PcText(std::string_view key, int language) {
+     return key;
+ }
+ 
++std::string_view PcText(std::string_view key, int language) {
++    const std::string_view text = PcTextLookup(key, language);
++#if PT_VISIONOS
++    if (text.find('{') == std::string_view::npos) return text;
++    static std::mutex mutex;
++    static std::map<std::pair<std::string, int>, std::string> cache;  // (nodes stay put: the views stay valid)
++    std::lock_guard lock(mutex);
++    auto [it, added] = cache.try_emplace({std::string(key), language});
++    if (added) it->second = ExpandHeadsetTokens(text);
++    return it->second;
++#else
++    return text;
++#endif
++}
++
+ }
 diff --git a/src/game/ui/pc_settings.h b/src/game/ui/pc_settings.h
 index 43f59a2..dfca32a 100644
 --- a/src/game/ui/pc_settings.h
@@ -27904,23 +27990,74 @@ index b45fa4d..bd33cc5 100644
      };
  
 diff --git a/src/game/vr_play.cpp b/src/game/vr_play.cpp
-index 38782fe..f2b7efc 100644
+index 38782fe..0296401 100644
 --- a/src/game/vr_play.cpp
 +++ b/src/game/vr_play.cpp
-@@ -63,7 +63,8 @@ bool VrPlay::ScreenMode(Game& game) {
+@@ -13,6 +13,10 @@ namespace pt::game {
+ namespace {
+ 
+ constexpr float kHudDistance = 1.6f;
++constexpr float kHudNearest = 0.7f;      // the HUD never comes closer than this when geometry is in the way
++constexpr float kHudClearance = 0.15f;   // ... and stays this far in front of it
++constexpr float kHudCloserTime = 0.15f;  // seconds to come closer (fast: never behind a wall)
++constexpr float kHudFurtherTime = 0.5f;  // seconds to go back (slow: no pumping)
+ constexpr float kHudWidth = 1.4f;
+ constexpr float kHudDrop = 0.08f;
+ constexpr float kHudDeadZone = 0.349f;
+@@ -63,8 +67,15 @@ bool VrPlay::ScreenMode(Game& game) {
      constexpr bool immersive = false;
  #endif
      const bool peephole = game.Nazo().IsPeepholeTheaterActive();
 -    const bool screen = (demo && !immersive) || peephole;
-+    // The museum's theater (a sandbox with its own camera) is shown on the virtual screen like the peephole.
-+    const bool screen = (demo && !immersive) || peephole || game.ArchiveTheaterActive();
-     const bool cutscene = demo && !screen;
+-    const bool cutscene = demo && !screen;
++    // The museum's theater (a sandbox with its own camera) goes where cutscenes go: in stereo from its camera
++    // (immersive), or on the virtual screen.
++    const bool theater = game.ArchiveTheaterActive();
++    const bool screen = ((demo || theater) && !immersive) || peephole;
++    if (theater != theater_) {
++        theater_ = theater;
++        cutscene_entered_ = false;  // the head's reference is taken again when it opens and when it closes
++    }
++    const bool cutscene = (demo || theater) && !screen;
      if (screen != screen_ || cutscene != cutscene_) {
          LogInfo("vr: {}", screen ? "virtual screen (a camera the game frames)" : cutscene ? "cutscene in stereo from the scene's camera" : "stereo view");
-@@ -169,6 +170,12 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+     }
+@@ -111,8 +122,10 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+             state.left_stick = move;
+             state.left_stick_from_pad = true;
+         }
+-        if (c.dpad_up) raw |= kRawUp;
+-        if (c.dpad_down) raw |= kRawDown;
++        // (The theater's model view tilts with up / down; in stereo the camera has no pitch, so the model would leave the view.)
++        const bool theater_stereo = game.ArchiveTheaterActive() && cutscene_;
++        if (c.dpad_up && !theater_stereo) raw |= kRawUp;
++        if (c.dpad_down && !theater_stereo) raw |= kRawDown;
+         if (c.dpad_left) raw |= kRawLeft;
+         if (c.dpad_right) raw |= kRawRight;
+         if (c.l1) raw |= kRawL1;
+@@ -124,10 +137,16 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
+         // hold the zoom" interaction of the original (the peephole, the clock, the picture, the bag)
+         // goes on X as well: pressing X is pressing R3, holding it is holding R3.
+         if (c.zoom || (c.interact && !menu_open)) raw |= kRawR3;
++        // The museum's theater reads the triggers as zoom (archive_theater.cpp), and Back leaves it.
++        if (game.ArchiveTheaterActive() && !menu_open) {
++            if (c.l2) raw |= kRawL2;
++            if (c.r2) raw |= kRawR2;
++        }
+         if (c.gouge) raw |= kRawSquare;
+         if (c.triangle) raw |= kRawTriangle;
+         if (!menu_open && screen) {
+-            const glm::vec2 look(c.turn.x, -c.turn.y);
++            // (The theater's camera has no pitch in stereo: the head looks, so the stick only turns the model.)
++            const glm::vec2 look(c.turn.x, game.ArchiveTheaterActive() && cutscene_ ? 0.0f : -c.turn.y);
+             if (glm::length(look) > glm::length(state.right_stick)) state.right_stick = look;
+         } else if (!menu_open && centered_) {
+             const float x = c.turn.x;
+@@ -169,6 +188,13 @@ void VrPlay::ApplyControls(Game& game, InputState& state, bool menu_open, bool s
          state.pressed |= kPadGouge;
      }
      if (pressed & kRawStart) state.pause = true;
++    if ((pressed & kRawCircle) && game.ArchiveTheaterActive() && !menu_open) state.cancel = true;  // Back leaves the theater
 +    // Both triggers at once: "Jack" without a microphone (main.cpp acts on it only while the game
 +    // listens). The triggers are not game buttons here, so no mapping changes.
 +    // (Held through a menu closing: no press until the triggers are let go and pressed again.)
@@ -27930,11 +28067,96 @@ index 38782fe..f2b7efc 100644
      if (c.settings && !settings_previous_) state.pc_settings = true;
      settings_previous_ = c.settings;
      if (pressed) state.any_button = true;
+@@ -288,6 +314,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+                                         glm::normalize(heading * rig_.ToWorld(pose.orientation)), frusta_[i], kNearPlane);
+         }
+         out.render = {draw.x, draw.y};
++        FitHud(game, out.head, menu_open, dt);
+         Place(head.position, head.orientation, menu_open, dt);
+         auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
+             if (!host_.Acquire(sc)) return false;
+@@ -346,6 +373,7 @@ bool VrPlay::PrepareStereo(Game& game, const Camera& logic, float dt, bool menu_
+         out.eyes[i] = xr::EyeCamera(anchor + rig_.Offset(pose.position) + correction, rig_.ToWorld(pose.orientation), frusta_[i], kNearPlane);
+     }
+     out.render = {draw.x, draw.y};
++    FitHud(game, out.head, menu_open, dt);
+     Place(head.position, head.orientation, menu_open, dt);
+     auto target = [&](xr::Swapchain& sc, const glm::vec4& rect, XrTarget& t) {
+         if (!host_.Acquire(sc)) return false;
+@@ -537,7 +565,8 @@ void VrPlay::FinishStereo(const Stereo& stereo) {
+     layers.hud = true;
+     layers.hud_orientation = hud_orientation_;
+     layers.hud_position = hud_position_;
+-    layers.hud_size = glm::vec2(kHudWidth, kHudWidth * 9.0f / 16.0f);
++    const float hud_width = kHudWidth * hud_distance_ / kHudDistance;  // the same angular size at any distance
++    layers.hud_size = glm::vec2(hud_width, hud_width * 9.0f / 16.0f);
+     host_.EndFrame(layers);
+     if (++frames_ == 1) {
+         LogInfo("vr: first stereo frame submitted");
+@@ -612,6 +641,24 @@ void VrPlay::Rumble(uint8_t large_motor, uint8_t small_motor) {
+     }
+ }
+ 
++// In play the HUD (subtitles) comes closer to the head when geometry is in front of it, so that it is never
++// seen behind a wall: the distance of the first surface along the view, less a margin. A menu keeps its
++// distance (it stays where it opened, and the hand points at it).
++void VrPlay::FitHud(Game& game, const Camera& head, bool menu_open, float dt) {
++    if (menu_open) {
++        hud_distance_ = kHudDistance;
++        return;
++    }
++    float target = kHudDistance;
++    RayHit hit;
++    if (game.Collision().Raycast(head.position, head.Forward(), kHudDistance + kHudClearance, hit) && std::isfinite(hit.distance)) {
++        target = std::clamp(hit.distance - kHudClearance, kHudNearest, kHudDistance);
++    }
++    const float time = target < hud_distance_ ? kHudCloserTime : kHudFurtherTime;
++    hud_distance_ += (target - hud_distance_) * (1.0f - std::exp(-(std::isfinite(dt) ? std::max(dt, 0.0f) : 0.0f) / time));
++    if (!std::isfinite(hud_distance_)) hud_distance_ = kHudDistance;
++}
++
+ void VrPlay::Place(const glm::vec3& head_local, const glm::quat& head_orientation_local, bool menu_open, float dt) {
+     const float head_yaw_local = xr::AnglesOf(head_orientation_local).yaw;
+     if (!menu_open) {
+@@ -621,7 +668,7 @@ void VrPlay::Place(const glm::vec3& head_local, const glm::quat& head_orientatio
+         hud_placed_ = true;
+         menu_was_open_ = false;
+         hud_orientation_ = head_orientation_local;
+-        hud_position_ = head_local + head_orientation_local * glm::vec3(0.0f, -kHudDrop, -kHudDistance);
++        hud_position_ = head_local + head_orientation_local * (glm::vec3(0.0f, -kHudDrop, -kHudDistance) * (hud_distance_ / kHudDistance));
+         return;
+     }
+     // A menu stays where it opened (in the world, turning after the head beyond a dead zone),
 diff --git a/src/game/vr_play.h b/src/game/vr_play.h
-index 2bcbcd6..b936bae 100644
+index 2bcbcd6..9072c63 100644
 --- a/src/game/vr_play.h
 +++ b/src/game/vr_play.h
-@@ -123,6 +123,7 @@ private:
+@@ -71,6 +71,8 @@ public:
+     void ReportGpu(float frame_gpu_ms);
+ 
+ private:
++    // The HUD's distance for this frame (hud_distance_), from what is in front of the head.
++    void FitHud(Game& game, const Camera& head, bool menu_open, float dt);
+     void Place(const glm::vec3& head_local, const glm::quat& head_orientation_local, bool menu_open, float dt);
+     // The insets of `out` (its eyes already set): false when there are none this frame.
+     bool PrepareInsets(Stereo& out);
+@@ -86,6 +88,7 @@ private:
+     bool waited_ = false;
+     bool centered_ = false;
+     bool screen_ = false;
++    bool theater_ = false;  // the museum's theater is open (drawn like a cutscene from its camera)
+     bool cutscene_ = false;  // a scene's camera drawn in stereo (immersive cutscenes)
+     bool cutscene_entered_ = false;  // where the head was when it began (below) is known
+     float cutscene_ref_yaw_ = 0.0f;  // the head's heading in the world then: the scene's camera points there
+@@ -96,6 +99,7 @@ private:
+     bool hud_placed_ = false;
+     bool menu_was_open_ = false;
+     float hud_yaw_ = 0.0f;
++    float hud_distance_ = 1.6f;  // kHudDistance; closer when geometry is in front of the head (FitHud)
+     glm::quat hud_orientation_{1.0f, 0.0f, 0.0f, 0.0f};
+     glm::vec3 hud_position_{0.0f};
+     float eye_height_ = -1.0f;
+@@ -123,6 +127,7 @@ private:
      uint32_t raw_previous_ = 0;
      bool snap_armed_ = true;
      bool settings_previous_ = false;
@@ -27943,7 +28165,7 @@ index 2bcbcd6..b936bae 100644
      uint64_t frames_ = 0;
  };
 diff --git a/src/main.cpp b/src/main.cpp
-index 6dd62ee..cb7ec76 100644
+index 6dd62ee..ab9103c 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -98,6 +98,13 @@
@@ -27996,7 +28218,17 @@ index 6dd62ee..cb7ec76 100644
          ui.SetMenuSuspended(true);
          ui.EnterTheater(view->theater->Sandbox());
          if (options.make_museum_previews.empty()) {
-@@ -4207,12 +4214,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -3868,7 +3875,8 @@ int RunGame(App& app, pt::Vfs& vfs) {
+             polled.prompts = *options.forced_prompts;
+         }
+         if (vr) {
+-            vr->ApplyControls(game, polled, ui_ready && ui.MenuOpen(), vr->ScreenMode(game), dt);
++            // (A theater opened from the pause menu leaves the menu open but suspended: the theater has the controls, not the menu.)
++            vr->ApplyControls(game, polled, ui_ready && ui.MenuOpen() && !game.ArchiveTheaterActive(), vr->ScreenMode(game), dt);
+         }
+         if (polled.pc_settings && !freecam) {
+             if (options.dev_ui && app.window) {
+@@ -4207,12 +4215,25 @@ int RunGame(App& app, pt::Vfs& vfs) {
              }
          }
  
@@ -28026,7 +28258,7 @@ index 6dd62ee..cb7ec76 100644
          }
          if (!ui.MenuOpen() || ui.Menu().CurrentPage() != pt::game::OptionsMenu::Page::Pc)
              app.microphone_test = app.microphone_monitor = false;
-@@ -4241,9 +4261,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4241,9 +4262,13 @@ int RunGame(App& app, pt::Vfs& vfs) {
          }
          if (hearing && recognizer) {
              if (!microphone.IsOpen() && !microphone_failed && !voice_file) {
@@ -28043,7 +28275,7 @@ index 6dd62ee..cb7ec76 100644
              }
              const pt::VoiceRecognizer::State state = recognizer->GetState();
              app.microphone_status = microphone_failed || state == pt::VoiceRecognizer::State::Failed ? "pc_mic_unavailable"
-@@ -4418,7 +4442,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4418,7 +4443,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
              ImGui::Render();
          }
          if (photo_mode) {
@@ -28052,7 +28284,16 @@ index 6dd62ee..cb7ec76 100644
              photo_status_time = std::max(0.0f, photo_status_time - dt);
              if (photo_status_time <= 0.0f) photo_status.clear();
              photo_view = photo_panel.View(language, photo_status);
-@@ -4456,10 +4480,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4441,7 +4466,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+         bool warmed = false;
+         if (vr) {
+             const bool screen = vr->ScreenMode(game);
+-            const bool menu_open = ui_ready && ui.MenuOpen();
++            const bool menu_open = ui_ready && ui.MenuOpen() && !game.ArchiveTheaterActive();  // (a suspended menu is not one)
+             const float scene_dt = static_cast<float>(game.Time() - last_scene_time);
+             auto begin = [&](bool present) { return app.renderer.BeginFrame(present && app.window) || (present && app.renderer.BeginFrame(false)); };
+             auto save_shots = [&](const char* suffix) {
+@@ -4456,10 +4481,11 @@ int RunGame(App& app, pt::Vfs& vfs) {
              if (screen && vr->PrepareScreen(screen_target)) {
                  app.renderer.SetRenderExtent(pt::Renderer::kHudExtent);
                  if (begin(true)) {
@@ -28067,7 +28308,7 @@ index 6dd62ee..cb7ec76 100644
                      app.scene.SetVrEye(-1);
                      app.scene.Render(camera, draw_items, lighting, dt);
                      ui.SetVrHud(false);
-@@ -4468,7 +4493,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+@@ -4468,21 +4494,22 @@ int RunGame(App& app, pt::Vfs& vfs) {
                      xr_frame.overlay_on_frame = true;
                      app.renderer.SetXrFrame(xr_frame);
                      app.renderer.EndFrame(app.window != nullptr);
@@ -28076,3 +28317,31 @@ index 6dd62ee..cb7ec76 100644
                      save_shots("");
                  }
                  vr->FinishScreen();
+                 last_render_frame = frame;
+-            } else if (!screen && vr->PrepareStereo(game, camera, dt, menu_open, stereo)) {
++            } else if (!screen && vr->PrepareStereo(view, camera, dt, menu_open, stereo)) {
+                 app.renderer.SetRenderExtent(stereo.render);
+-                scene_builder.Build(game, stereo.head, scene_dt, lighting, light_blend);
+-                last_scene_time = game.Time();
++                // (The museum's theater in stereo: its own sandbox, builder and effects, from the camera the head turns around.)
++                view_builder.Build(view, stereo.head, theater ? static_cast<float>(dt) : scene_dt, lighting, light_blend);
++                if (!theater) last_scene_time = game.Time();
+                 // (The picture's proportions: the logical size with variable rasterization rate.)
+                 const VkExtent2D picture = stereo.logical.width > 0 ? stereo.logical : stereo.render;
+                 // Lens flares as billboards at their lamps, sized by the flat game's field (the
+                 // game camera's, within 40-90 degrees).
+                 pt::vfx::SetFlareStereo(std::tan(0.5f * std::clamp(camera.fov_y, glm::radians(40.0f), glm::radians(90.0f))));
+-                vfx_scene.Prepare(game, stereo.head, static_cast<float>(picture.width) / static_cast<float>(std::max(1u, picture.height)),
++                view_vfx.Prepare(view, stereo.head, static_cast<float>(picture.width) / static_cast<float>(std::max(1u, picture.height)),
+                                   lighting, vfx_pass, blend);
+                 // Views 0 and 1: the eyes; with the game's foveation they are the wide, low-density
+                 // views (no screen-space AO or reflections) and 2 and 3 their sharp centres.
+@@ -4620,7 +4647,7 @@ int RunGame(App& app, pt::Vfs& vfs) {
+                 app.renderer.xr_hdr = false;
+ #endif
+                 ui.SetVrHud(false);
+-                take_reflection_readback(game);
++                take_reflection_readback(view);
+                 vr->FinishStereo(stereo);
+                 static const bool vr_trace = std::getenv("PT_VR_TRACE") != nullptr;
+                 if (vr_trace || !shots.empty()) {

@@ -63,7 +63,7 @@ struct PTSettings: Codable, Equatable {
     /// Subtitles in the headset: size, percent of the original's (100 to 250).
     var subtitleSize = 175
     /// ...and how far up from the bottom edge, percent of the view's height (0 to 40).
-    var subtitleHeight = 20
+    var subtitleHeight = 15
     /// The scene's depth handed to the headset with each picture (its reprojection moves near
     /// things correctly, 45 to 90 included).
     var sceneDepth = true
@@ -121,7 +121,7 @@ struct PTSettings: Codable, Equatable {
             // The tester's own settings on the first headset (sharper below them is too blurry).
             settings.resolutionScale = 0.5
             settings.gameFoveation = true
-            settings.center = 60
+            settings.center = 55
             settings.centerUp = -10
             settings.centerResolution = 100
             settings.periphery = 10

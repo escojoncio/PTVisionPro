@@ -2348,9 +2348,9 @@ struct Preset {
     bool taa_periphery;
 };
 constexpr Preset kPresets[2] = {
-    // Vision Pro M2: the tester's settings (log pt (37), build 50): shadows as on PS4, a 60 degree
+    // Vision Pro M2: the tester's settings (log pt (37), build 50): shadows as on PS4, a 55 degree
     // sharp circle rebuilt by VPKTAA from 80 % at full sharpness, the periphery steadied too.
-    {0.50f, 3, true, true, true, 45, 8, 60, -10, 100, 10, 5, 80, 100, true},
+    {0.50f, 3, true, true, true, 45, 8, 55, -10, 100, 10, 5, 80, 100, true},
     {0.85f, 3, true, true, true, 90, 16, 70, -10, 100, 15, 5, 100, 50, true},  // Vision Pro M5
 };
 
@@ -2486,7 +2486,7 @@ void ApplySettings(AppSettings& s) {
     h.taa_sharpness = SanitizeTaaSharpness(static_cast<int>(std::lround(Number("PT_VP_TAA_SHARPNESS", 50.0f))));
     h.taa_periphery = Flag("PT_VP_TAA_PERIPHERY", true);
     h.subtitle_size = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_SIZE", 175.0f)), 100, 250);
-    h.subtitle_height = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_HEIGHT", 20.0f)), 0, 40);
+    h.subtitle_height = std::clamp(static_cast<int>(Number("PT_VP_SUBTITLE_HEIGHT", 15.0f)), 0, 40);
     h.scene_depth = Flag("PT_VP_SCENE_DEPTH", true);
     h.tiled_lights = Flag("PT_VP_TILED_LIGHTS", true);
     h.game_foveation = Flag("PT_VP_GAME_FOVEATION", true);

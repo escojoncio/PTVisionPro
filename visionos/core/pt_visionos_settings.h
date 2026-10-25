@@ -46,7 +46,7 @@ struct HeadsetSettings {
     // Subtitles in the headset: size (percent of the original's, 100 to 250) and how far up from
     // the bottom edge (percent of the view's height, 0 to 40), where the headset is sharpest.
     int subtitle_size = 175;
-    int subtitle_height = 20;
+    int subtitle_height = 15;
     // The scene's depth handed to the compositor with each picture, so its reprojection (45 to
     // 90, and every picture's correction to the latest head pose) moves near things correctly.
     bool scene_depth = true;
