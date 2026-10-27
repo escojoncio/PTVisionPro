@@ -115,11 +115,18 @@ jobs:
           name: PTVisionPro-${{ github.run_number }}
           path: build/visionos/ipa/*.ipa
 
+      - name: Drop previous release
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        run: gh release delete visionos --cleanup-tag -y -R "$GITHUB_REPOSITORY" || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Release
         if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
+          tag_name: visionos
+          target_commitish: ${{ github.sha }}
           name: Build ${{ github.run_number }}
           files: build/visionos/ipa/*.ipa
           prerelease: true
