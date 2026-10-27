@@ -9,11 +9,11 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 - 2026-10-25: `.claude/agents/coder.md`: maxTurns → 70
 - 2026-10-25: `CLAUDE.MD` línea 1: regla de cumplir siempre el rol asignado.
 - 2026-10-25: `CLAUDE.MD` (Sub-agent setup): coder maxTurns 40 → 70.
-- Build 57 = rama `pt-1.0.5` (6632734: juego pt-pc 1.0.5 + arreglos 1.0.6), no `main`. Log pt (41): **regresión visual**.
-- Build 53 (987694a): icono `AppIcon.solidimagestack`, arte del launcher (`LauncherBackground.swift`, `HomeView`). Solo Swift.
-- Build 52 (112839b): `lighting.glsl`, `light_main.glsl`, `light_all.frag`, `upscale_demod.frag` devueltos a la 50;
+- Build 57 = rama `pt-1.0.5` (752bcc7: juego pt-pc 1.0.5 + arreglos 1.0.6), no `main`. Log pt (41): **regresión visual**.
+- Build 53 (1bd9c75): icono `AppIcon.solidimagestack`, arte del launcher (`LauncherBackground.swift`, `HomeView`). Solo Swift.
+- Build 52 (eefbcac): `lighting.glsl`, `light_main.glsl`, `light_all.frag`, `upscale_demod.frag` devueltos a la 50;
   `vpktaa.frag` `DEPTH_GATHER 0`. La 51 duplicaba el coste de luces.
-- Build 51 (3fe7a81): destellos estéreo (`vfx::SetFlareStereo`, `vfx_particle.vert`), caché de sombras por tesela
+- Build 51 (dff489d): destellos estéreo (`vfx::SetFlareStereo`, `vfx_particle.vert`), caché de sombras por tesela
   (`shadow_static_[4]`), recorte CPU de luces por tesela, bloom 1 pasada/ronda (`kawase_sum.frag`), post fusionado.
 - Bitácora compactada; detalle estable movido a `notas/`.
 
@@ -32,7 +32,7 @@ Port de P.T. (CUSA01127 v01.00) a Apple Vision Pro en VR inmersivo. Base: `upstr
 
 ## Pendiente (en orden)
 
-1. Diagnosticar en `pt-1.0.5` los triángulos y el museo negro (comparar con 987694a).
+1. Diagnosticar en `pt-1.0.5` los triángulos y el museo negro (comparar con 1bd9c75).
 2. Ocultar textos/páginas de PC en el menú de Vision Pro.
 3. Revisar HDR una vez se vea bien.
 4. Afinar constantes de `vpktaa.frag` (KEEP_*, SIGMA_*, DISOCCLUSION, afilado).
